@@ -195,7 +195,13 @@ input {
   min-height: 0;
 }
 
+#browser-screen {
+  overflow: visible;
+}
+
 .toolbar {
+  position: relative;
+  z-index: 80;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   gap: 8px;
@@ -419,7 +425,7 @@ input {
   top: calc(100% + 8px);
   left: 0;
   right: 0;
-  z-index: 35;
+  z-index: 120;
   display: grid;
   gap: 4px;
   padding: 8px;
@@ -489,6 +495,8 @@ input {
 }
 
 .browser-layout {
+  position: relative;
+  z-index: 1;
   flex: 1;
   min-height: 0;
   display: grid;
@@ -562,7 +570,10 @@ input {
 .browser-stage,
 .browser-overlay {
   position: absolute;
-  inset: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  top: var(--browser-stage-offset, 0px);
 }
 
 .browser-overlay {
@@ -745,6 +756,10 @@ input {
 
 .htdocs-config {
   padding: 0 16px 8px;
+}
+
+.sidebar-utility-actions {
+  margin-top: 10px;
 }
 
 .server-status {

@@ -79,6 +79,7 @@ const elements = {
   sitesRunningCount: document.getElementById("sites-running-count"),
   htdocsPath: document.getElementById("htdocs-path"),
   pickHtdocsButton: document.getElementById("pick-htdocs-button"),
+  openSidebarPhpMyAdminButton: document.getElementById("open-sidebar-phpmyadmin-button"),
   serverStatus: document.getElementById("server-status"),
   createSiteButton: document.getElementById("create-site-button"),
   createSiteModal: document.getElementById("create-site-modal"),
@@ -805,10 +806,23 @@ function syncBrowserLayoutSoon() {
     const visible = browserScreenActive && Boolean(active) && !active.error;
 
     if (!visible) {
+      elements.browserHost.style.setProperty("--browser-stage-offset", "0px");
       window.desktopAPI.browserUpdateLayout({ visible: false });
       return;
     }
 
+    const hostRect = elements.browserHost.getBoundingClientRect();
+    const suggestionsVisible = !elements.addressSuggestions.classList.contains("hidden");
+    let stageOffset = 0;
+
+    if (suggestionsVisible) {
+      const suggestionsRect = elements.addressSuggestions.getBoundingClientRect();
+      if (suggestionsRect.height > 0) {
+        stageOffset = Math.max(0, Math.ceil(suggestionsRect.bottom - hostRect.top + 8));
+      }
+    }
+
+    elements.browserHost.style.setProperty("--browser-stage-offset", `${stageOffset}px`);
     const rect = elements.browserStage.getBoundingClientRect();
     window.desktopAPI.browserUpdateLayout({
       visible: rect.width > 0 && rect.height > 0,
@@ -1024,7 +1038,20 @@ async function clearCurrentSiteCredentials() {
 }
 
 function autofillCurrentPage() {
-  setStatus("Autofill is temporarily disabled in the rebuilt browser.");
+  void (async () => {
+    const active = getActiveBrowserTab();
+    if (!active?.url) {
+      setStatus("Open a login page before using autofill.");
+      return;
+    }
+
+    const result = await window.desktopAPI.browserAutofillCredentials({
+      username: elements.vaultUsername.value,
+      password: elements.vaultPassword.value
+    });
+
+    setStatus(result?.message || "Autofill finished.");
+  })();
 }
 
 async function openSelectedSiteTarget(kind) {
@@ -1135,7 +1162,7 @@ async function backupSelectedSite() {
 }
 
 elements.newTabButton.addEventListener("click", () => {
-  window.desktopAPI.browserCreateTab({ url: "https://wordpress.org", mode: "auto" });
+  window.desktopAPI.browserCreateTab({ url: "https://www.google.com", mode: "auto" });
 });
 elements.vaultToggleButton.addEventListener("click", () => {
   state.vaultOpen = !state.vaultOpen;
@@ -1221,6 +1248,9 @@ elements.createSiteModal.addEventListener("click", (event) => {
   }
 });
 elements.pickHtdocsButton.addEventListener("click", () => void pickAndSaveHtdocsPath());
+elements.openSidebarPhpMyAdminButton.addEventListener("click", () => {
+  openUrlInAppBrowser("http://localhost/phpmyadmin");
+});
 elements.pickXamppRootButton.addEventListener("click", () => void pickAndSaveXamppRoot());
 elements.settingsPickHtdocsButton.addEventListener("click", () => void pickAndSaveHtdocsPath());
 elements.openXamppRootButton.addEventListener("click", () =>

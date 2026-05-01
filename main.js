@@ -2247,6 +2247,116 @@ function reloadActive(win) {
   emitBrowserState(win);
 }
 
+async function autofillActiveBrowserTab(win, credentials = {}) {
+  const state = getBrowserState(win);
+  const active = state.tabs.find((tab) => tab.id === state.activeTabId);
+  if (!active?.view?.webContents) {
+    return { ok: false, message: "No active page available for autofill." };
+  }
+
+  const username = String(credentials.username || "");
+  const password = String(credentials.password || "");
+
+  if (!username && !password) {
+    return { ok: false, message: "Save a username or password before using autofill." };
+  }
+
+  const script = `
+    (() => {
+      const usernameValue = ${JSON.stringify(username)};
+      const passwordValue = ${JSON.stringify(password)};
+
+      const fireInputEvents = (element) => {
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        element.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+
+      const pickFirstVisible = (selectors) => {
+        for (const selector of selectors) {
+          const node = document.querySelector(selector);
+          if (!node) continue;
+
+          const style = window.getComputedStyle(node);
+          if (style.display === "none" || style.visibility === "hidden") continue;
+          if (node.disabled || node.readOnly) continue;
+          return node;
+        }
+
+        return null;
+      };
+
+      const usernameField = pickFirstVisible([
+        "#user_login",
+        "input[name='log']",
+        "input[name='username']",
+        "input[name='email']",
+        "input[name='user_login']",
+        "input[type='email']",
+        "input[autocomplete='username']",
+        "input[id*='user']",
+        "input[id*='email']",
+        "input[placeholder*='user' i]",
+        "input[placeholder*='email' i]",
+        "form input[type='text']"
+      ]);
+
+      const passwordField = pickFirstVisible([
+        "#user_pass",
+        "input[name='pwd']",
+        "input[name='password']",
+        "input[type='password']",
+        "input[autocomplete='current-password']"
+      ]);
+
+      let filledUsername = false;
+      let filledPassword = false;
+
+      if (usernameField && usernameValue) {
+        usernameField.focus();
+        usernameField.value = usernameValue;
+        fireInputEvents(usernameField);
+        filledUsername = true;
+      }
+
+      if (passwordField && passwordValue) {
+        passwordField.focus();
+        passwordField.value = passwordValue;
+        fireInputEvents(passwordField);
+        filledPassword = true;
+      }
+
+      return {
+        filledUsername,
+        filledPassword,
+        usernameSelector: usernameField ? usernameField.id || usernameField.name || usernameField.type : null,
+        passwordSelector: passwordField ? passwordField.id || passwordField.name || passwordField.type : null
+      };
+    })();
+  `;
+
+  try {
+    const result = await active.view.webContents.executeJavaScript(script, true);
+    if (result?.filledUsername || result?.filledPassword) {
+      return {
+        ok: true,
+        message: "Credentials filled into the current page.",
+        details: result
+      };
+    }
+
+    return {
+      ok: false,
+      message: "No compatible login fields were found on the current page.",
+      details: result || null
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      message: `Autofill failed: ${error.message}`
+    };
+  }
+}
+
 function sendUrlToWindow(win, startupUrl, startupMode = "auto") {
   if (!win || win.isDestroyed() || !startupUrl) {
     return;
@@ -2635,6 +2745,15 @@ ipcMain.handle("browser:reload", (event) => {
   if (win) {
     reloadActive(win);
   }
+});
+
+ipcMain.handle("browser:autofill-credentials", async (event, payload) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win) {
+    return { ok: false, message: "Browser window not found." };
+  }
+
+  return autofillActiveBrowserTab(win, payload || {});
 });
 
 ipcMain.handle("browser:update-layout", (event, payload) => {

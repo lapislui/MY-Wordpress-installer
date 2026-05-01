@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld("desktopAPI", {
   browserGoBack: () => ipcRenderer.invoke("browser:go-back"),
   browserGoForward: () => ipcRenderer.invoke("browser:go-forward"),
   browserReload: () => ipcRenderer.invoke("browser:reload"),
+  browserAutofillCredentials: (payload) => ipcRenderer.invoke("browser:autofill-credentials", payload),
   browserUpdateLayout: (payload) => ipcRenderer.invoke("browser:update-layout", payload),
   browserPickDownloadDirectory: () => ipcRenderer.invoke("browser:pick-download-directory"),
   browserOpenDownload: (downloadId) => ipcRenderer.invoke("browser:open-download", downloadId),
