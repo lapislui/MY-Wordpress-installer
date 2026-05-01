@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld("desktopAPI", {
   browserActivateTab: (tabId) => ipcRenderer.invoke("browser:activate-tab", tabId),
   browserCloseTab: (tabId) => ipcRenderer.invoke("browser:close-tab", tabId),
   browserNavigate: (url) => ipcRenderer.invoke("browser:navigate", url),
+  browserGetSuggestions: (query) => ipcRenderer.invoke("browser:get-suggestions", query),
   browserGoBack: () => ipcRenderer.invoke("browser:go-back"),
   browserGoForward: () => ipcRenderer.invoke("browser:go-forward"),
   browserReload: () => ipcRenderer.invoke("browser:reload"),

@@ -31,6 +31,7 @@ const uiState = {
 };
 
 let browserFeedbackTimer = null;
+let addressSuggestionsToken = 0;
 
 const elements = {
   appShell: document.getElementById("app-shell"),
@@ -45,6 +46,7 @@ const elements = {
   browserOverlay: document.getElementById("browser-overlay"),
   addressForm: document.getElementById("address-form"),
   addressInput: document.getElementById("address-input"),
+  addressSuggestions: document.getElementById("address-suggestions"),
   backButton: document.getElementById("back-button"),
   forwardButton: document.getElementById("forward-button"),
   reloadButton: document.getElementById("reload-button"),
@@ -148,6 +150,9 @@ const elements = {
   siteTabPanels: document.querySelectorAll(".site-tab-panel")
 };
 
+state.addressSuggestions = [];
+state.activeAddressSuggestionIndex = -1;
+
 function setStatus(message) {
   elements.statusText.textContent = message;
 }
@@ -171,6 +176,104 @@ function setBrowserFeedback(message, type = "info") {
   browserFeedbackTimer = setTimeout(() => {
     elements.browserFeedback.classList.add("hidden");
   }, 2600);
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function hideAddressSuggestions() {
+  addressSuggestionsToken += 1;
+  state.addressSuggestions = [];
+  state.activeAddressSuggestionIndex = -1;
+  elements.addressSuggestions.innerHTML = "";
+  elements.addressSuggestions.classList.add("hidden");
+}
+
+function renderAddressSuggestions() {
+  const suggestions = state.addressSuggestions || [];
+  elements.addressSuggestions.innerHTML = "";
+
+  if (!suggestions.length) {
+    elements.addressSuggestions.classList.add("hidden");
+    return;
+  }
+
+  suggestions.forEach((suggestion, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `address-suggestion${index === state.activeAddressSuggestionIndex ? " active" : ""}`;
+    button.dataset.index = String(index);
+    button.innerHTML = `
+      <span class="address-suggestion-badge">${escapeHtml(suggestion.type)}</span>
+      <span class="address-suggestion-copy">
+        <span class="address-suggestion-title">${escapeHtml(suggestion.title || suggestion.value)}</span>
+        <span class="address-suggestion-meta">${escapeHtml(suggestion.secondaryText || suggestion.value)}</span>
+      </span>
+    `;
+
+    button.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+    });
+
+    button.addEventListener("click", () => {
+      applyAddressSuggestion(index);
+    });
+
+    elements.addressSuggestions.appendChild(button);
+  });
+
+  elements.addressSuggestions.classList.remove("hidden");
+}
+
+async function requestAddressSuggestions(query) {
+  const token = ++addressSuggestionsToken;
+  let suggestions = [];
+
+  try {
+    suggestions = await window.desktopAPI.browserGetSuggestions(query);
+  } catch (_) {
+    suggestions = [];
+  }
+
+  if (token !== addressSuggestionsToken) {
+    return;
+  }
+
+  state.addressSuggestions = Array.isArray(suggestions) ? suggestions : [];
+  state.activeAddressSuggestionIndex = -1;
+  renderAddressSuggestions();
+}
+
+function moveAddressSuggestion(step) {
+  if (!state.addressSuggestions.length) {
+    return;
+  }
+
+  const length = state.addressSuggestions.length;
+  const nextIndex = state.activeAddressSuggestionIndex < 0
+    ? 0
+    : (state.activeAddressSuggestionIndex + step + length) % length;
+
+  state.activeAddressSuggestionIndex = nextIndex;
+  renderAddressSuggestions();
+}
+
+function applyAddressSuggestion(index = state.activeAddressSuggestionIndex) {
+  const suggestion = state.addressSuggestions[index];
+  if (!suggestion) {
+    return;
+  }
+
+  state.isEditingAddress = false;
+  hideAddressSuggestions();
+  elements.addressInput.value = suggestion.value;
+  window.desktopAPI.browserNavigate(suggestion.value);
 }
 
 async function openBookmarkSaveDialogForCurrentPage() {
@@ -358,7 +461,7 @@ async function syncVaultPanel() {
 
 function refreshControls() {
   const active = getActiveBrowserTab();
-  if (!state.isEditingAddress) {
+  if (!state.isEditingAddress && !state.addressSuggestions.length) {
     elements.addressInput.value = active?.url || "";
   }
   elements.backButton.disabled = !state.browser.canGoBack;
@@ -1040,15 +1143,56 @@ elements.vaultToggleButton.addEventListener("click", () => {
 });
 elements.addressForm.addEventListener("submit", (event) => {
   event.preventDefault();
+  if (state.activeAddressSuggestionIndex >= 0 && state.addressSuggestions.length) {
+    applyAddressSuggestion(state.activeAddressSuggestionIndex);
+    return;
+  }
+
   state.isEditingAddress = false;
+  hideAddressSuggestions();
   window.desktopAPI.browserNavigate(elements.addressInput.value);
 });
 elements.addressInput.addEventListener("focus", () => {
   state.isEditingAddress = true;
+  void requestAddressSuggestions(elements.addressInput.value);
+});
+elements.addressInput.addEventListener("input", () => {
+  state.isEditingAddress = true;
+  void requestAddressSuggestions(elements.addressInput.value);
+});
+elements.addressInput.addEventListener("keydown", (event) => {
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    moveAddressSuggestion(1);
+    return;
+  }
+
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    moveAddressSuggestion(-1);
+    return;
+  }
+
+  if (event.key === "Escape") {
+    hideAddressSuggestions();
+    return;
+  }
+
+  if (event.key === "Tab" && state.activeAddressSuggestionIndex >= 0 && state.addressSuggestions.length) {
+    event.preventDefault();
+    const suggestion = state.addressSuggestions[state.activeAddressSuggestionIndex];
+    if (suggestion) {
+      elements.addressInput.value = suggestion.value;
+      hideAddressSuggestions();
+    }
+  }
 });
 elements.addressInput.addEventListener("blur", () => {
-  state.isEditingAddress = false;
-  refreshControls();
+  window.setTimeout(() => {
+    state.isEditingAddress = false;
+    hideAddressSuggestions();
+    refreshControls();
+  }, 120);
 });
 elements.backButton.addEventListener("click", () => window.desktopAPI.browserGoBack());
 elements.forwardButton.addEventListener("click", () => window.desktopAPI.browserGoForward());

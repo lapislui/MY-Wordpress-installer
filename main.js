@@ -76,6 +76,10 @@ function getSettingsPath() {
   return path.join(app.getPath("userData"), "settings.json");
 }
 
+function getBrowserHistoryPath() {
+  return path.join(app.getPath("userData"), "browser-history.json");
+}
+
 function getDefaultVault() {
   return {
     installerDb: null,
@@ -131,6 +135,24 @@ function getSites() {
 
 function saveSites(sites) {
   fs.writeFileSync(getSitesPath(), JSON.stringify(sites, null, 2));
+}
+
+function getBrowserHistory() {
+  try {
+    const historyPath = getBrowserHistoryPath();
+    if (!fs.existsSync(historyPath)) {
+      return [];
+    }
+
+    const parsed = JSON.parse(fs.readFileSync(historyPath, "utf8"));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (_) {
+    return [];
+  }
+}
+
+function saveBrowserHistory(entries) {
+  fs.writeFileSync(getBrowserHistoryPath(), JSON.stringify(entries.slice(0, 250), null, 2));
 }
 
 function getDefaultHtdocsPath() {
@@ -375,6 +397,129 @@ function ensureUrl(input) {
     return `http://${raw}`;
   }
   return `https://${raw}`;
+}
+
+function buildSearchUrl(query) {
+  return `https://duckduckgo.com/?q=${encodeURIComponent(query)}`;
+}
+
+function isProbablyUrlInput(input) {
+  const raw = String(input || "").trim();
+  if (!raw) {
+    return false;
+  }
+
+  if (/^https?:\/\//i.test(raw)) {
+    return true;
+  }
+
+  if (/^(localhost|127\.0\.0\.1|::1)(:\d+)?(\/.*)?$/i.test(raw)) {
+    return true;
+  }
+
+  if (/\s/.test(raw)) {
+    return false;
+  }
+
+  return /^[\w.-]+\.[a-z]{2,}(\/.*)?$/i.test(raw) || /^\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?(\/.*)?$/i.test(raw);
+}
+
+function shouldTrackBrowserHistory(url) {
+  if (!url || /^(data|javascript|devtools|about|file):/i.test(url)) {
+    return false;
+  }
+
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch (_) {
+    return false;
+  }
+}
+
+function recordBrowserHistoryVisit(url, title = "", incrementVisit = true) {
+  if (!shouldTrackBrowserHistory(url)) {
+    return;
+  }
+
+  const history = getBrowserHistory();
+  const existing = history.find((entry) => entry.url === url);
+  const now = Date.now();
+
+  if (existing) {
+    existing.title = title || existing.title || url;
+    existing.lastVisited = now;
+    existing.visitCount = Number(existing.visitCount || 0) + (incrementVisit ? 1 : 0);
+  } else {
+    history.unshift({
+      url,
+      title: title || url,
+      lastVisited: now,
+      visitCount: incrementVisit ? 1 : 0
+    });
+  }
+
+  const nextHistory = existing
+    ? history
+    : history.sort((left, right) => Number(right.lastVisited || 0) - Number(left.lastVisited || 0));
+
+  saveBrowserHistory(nextHistory);
+}
+
+function scoreSuggestionMatch(query, ...values) {
+  const normalizedQuery = String(query || "").trim().toLowerCase();
+  if (!normalizedQuery) {
+    return 0;
+  }
+
+  let score = 0;
+  values.forEach((value, index) => {
+    const text = String(value || "").toLowerCase();
+    if (!text) {
+      return;
+    }
+
+    if (text === normalizedQuery) {
+      score += index === 0 ? 180 : 140;
+    } else if (text.startsWith(normalizedQuery)) {
+      score += index === 0 ? 120 : 90;
+    } else if (text.includes(normalizedQuery)) {
+      score += index === 0 ? 70 : 50;
+    }
+  });
+
+  return score;
+}
+
+async function fetchRemoteSearchSuggestions(query) {
+  const raw = String(query || "").trim();
+  if (!raw || raw.length < 2) {
+    return [];
+  }
+
+  try {
+    const response = await fetch(`https://duckduckgo.com/ac/?q=${encodeURIComponent(raw)}&type=list`, {
+      headers: {
+        "user-agent": getBrowserUserAgent()
+      }
+    });
+
+    if (!response.ok) {
+      return [];
+    }
+
+    const payload = await response.json();
+    if (!Array.isArray(payload)) {
+      return [];
+    }
+
+    return payload
+      .map((entry) => String(entry?.phrase || "").trim())
+      .filter(Boolean)
+      .slice(0, 5);
+  } catch (_) {
+    return [];
+  }
 }
 
 function getPartitionForUrl(url, tabId, mode = "auto") {
@@ -1209,6 +1354,123 @@ function getBrowserState(win) {
   return browserWindows.get(win.id);
 }
 
+async function getBrowserSuggestions(win, query) {
+  const raw = String(query || "").trim();
+  const state = getBrowserState(win);
+  const suggestions = [];
+  const seenKeys = new Set();
+
+  const pushSuggestion = (entry) => {
+    if (!entry?.value) {
+      return;
+    }
+
+    const key = `${entry.type}:${entry.value}`;
+    if (seenKeys.has(key)) {
+      return;
+    }
+
+    seenKeys.add(key);
+    suggestions.push(entry);
+  };
+
+  const addLocalSuggestion = (type, title, url, secondaryText, score) => {
+    if (!url) {
+      return;
+    }
+
+    pushSuggestion({
+      id: `${type}-${Buffer.from(url).toString("base64").replace(/=+$/g, "")}`,
+      type,
+      title: title || url,
+      value: url,
+      secondaryText: secondaryText || url,
+      score
+    });
+  };
+
+  const historyEntries = getBrowserHistory();
+  const bookmarkEntries = getBrowserBookmarks();
+  const tabEntries = state.tabs.map((tab) => ({
+    title: tab.title,
+    url: tab.url
+  }));
+
+  if (!raw) {
+    bookmarkEntries.slice(0, 4).forEach((bookmark, index) => {
+      addLocalSuggestion("bookmark", bookmark.title, bookmark.url, "Bookmark", 200 - index);
+    });
+
+    historyEntries
+      .sort((left, right) => Number(right.lastVisited || 0) - Number(left.lastVisited || 0))
+      .slice(0, 6)
+      .forEach((entry, index) => {
+        addLocalSuggestion("history", entry.title, entry.url, "Recent history", 160 - index);
+      });
+
+    return suggestions.slice(0, 8);
+  }
+
+  const resolvedUrl = ensureUrl(raw);
+  if (isProbablyUrlInput(raw)) {
+    pushSuggestion({
+      id: `direct-${Buffer.from(resolvedUrl).toString("base64").replace(/=+$/g, "")}`,
+      type: "direct",
+      title: `Go to ${resolvedUrl}`,
+      value: resolvedUrl,
+      secondaryText: "Typed address",
+      score: 1000
+    });
+  }
+
+  pushSuggestion({
+    id: `search-${Buffer.from(raw).toString("base64").replace(/=+$/g, "")}`,
+    type: "search",
+    title: `Search for "${raw}"`,
+    value: buildSearchUrl(raw),
+    secondaryText: "DuckDuckGo search",
+    score: 900
+  });
+
+  historyEntries.forEach((entry) => {
+    const score = scoreSuggestionMatch(raw, entry.url, entry.title) + Number(entry.visitCount || 0) * 4;
+    if (score > 0) {
+      addLocalSuggestion("history", entry.title, entry.url, "History", score);
+    }
+  });
+
+  bookmarkEntries.forEach((entry) => {
+    const score = scoreSuggestionMatch(raw, entry.url, entry.title) + 60;
+    if (score > 0) {
+      addLocalSuggestion("bookmark", entry.title, entry.url, "Bookmark", score);
+    }
+  });
+
+  tabEntries.forEach((entry) => {
+    const score = scoreSuggestionMatch(raw, entry.url, entry.title) + 40;
+    if (score > 0) {
+      addLocalSuggestion("tab", entry.title, entry.url, "Open tab", score);
+    }
+  });
+
+  const remoteSuggestions = await fetchRemoteSearchSuggestions(raw);
+  remoteSuggestions.forEach((phrase, index) => {
+    pushSuggestion({
+      id: `search-remote-${index}-${Buffer.from(phrase).toString("base64").replace(/=+$/g, "")}`,
+      type: "search",
+      title: phrase,
+      value: buildSearchUrl(phrase),
+      secondaryText: "Search suggestion",
+      score: 820 - index
+    });
+  });
+
+  return suggestions
+    .sort((left, right) => Number(right.score || 0) - Number(left.score || 0))
+    .slice(0, 8)
+    .map(({ score, ...entry }) => entry);
+}
+
 function addDownloadRecord(win, record) {
   const state = getBrowserState(win);
   state.downloads = [record, ...state.downloads.filter((item) => item.id !== record.id)].slice(0, 12);
@@ -1792,17 +2054,20 @@ function wireTabEvents(win, tab) {
   wc.on("page-title-updated", (event, title) => {
     event.preventDefault();
     tab.title = title || tab.url;
+    recordBrowserHistoryVisit(tab.url, tab.title, false);
     emitBrowserState(win);
   });
 
   wc.on("did-navigate", (_event, url) => {
     tab.url = url;
     tab.error = null;
+    recordBrowserHistoryVisit(tab.url, tab.title);
     emitBrowserState(win);
   });
 
   wc.on("did-navigate-in-page", (_event, url) => {
     tab.url = url;
+    recordBrowserHistoryVisit(tab.url, tab.title);
     emitBrowserState(win);
   });
 
@@ -2340,6 +2605,15 @@ ipcMain.handle("browser:navigate", (event, url) => {
   if (win) {
     navigateActiveBrowserTab(win, url);
   }
+});
+
+ipcMain.handle("browser:get-suggestions", async (event, query) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win) {
+    return [];
+  }
+
+  return getBrowserSuggestions(win, query);
 });
 
 ipcMain.handle("browser:go-back", (event) => {

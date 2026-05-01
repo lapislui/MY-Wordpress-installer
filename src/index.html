@@ -53,7 +53,8 @@
             <button id="reload-button" class="icon-button">Reload</button>
           </div>
           <form id="address-form" class="address-form">
-            <input id="address-input" type="text" placeholder="Enter a URL or localhost path">
+            <input id="address-input" type="text" placeholder="Enter a URL, localhost path, or search" autocomplete="off" spellcheck="false">
+            <div id="address-suggestions" class="address-suggestions hidden" aria-live="polite"></div>
           </form>
           <div class="toolbar-actions">
             <button id="bookmark-page-button" class="icon-button">Bookmark</button>
