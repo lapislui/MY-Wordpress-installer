@@ -1,0 +1,536 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WP Desktop</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div id="app-shell" class="app-shell">
+    <aside id="app-sidebar" class="sidebar">
+      <div class="sidebar-head">
+        <div class="brand">
+          <span class="brand-kicker">Local Tools</span>
+          <h1>
+            <span class="brand-title-full">WP Desktop</span>
+            <span class="brand-title-short">WP</span>
+          </h1>
+          <p>Browser + installer for local WordPress work.</p>
+        </div>
+        <button id="sidebar-toggle-button" class="sidebar-toggle-button" type="button" aria-label="Collapse sidebar">
+          <span class="sidebar-toggle-glyph"><<</span>
+        </button>
+      </div>
+
+      <nav class="nav">
+        <button class="nav-button active" data-screen="browser">
+          <span class="nav-button-short">B</span>
+          <span class="nav-button-label">Browser</span>
+        </button>
+        <button class="nav-button" data-screen="installer">
+          <span class="nav-button-short">I</span>
+          <span class="nav-button-label">Installer</span>
+        </button>
+        <button class="nav-button" data-screen="settings">
+          <span class="nav-button-short">S</span>
+          <span class="nav-button-label">Settings</span>
+        </button>
+      </nav>
+
+      <section class="sidebar-note">
+        <h2>Session rules</h2>
+        <p>Local sites keep their login. Every non-local tab gets its own temporary session.</p>
+      </section>
+    </aside>
+
+    <main class="main">
+      <section class="screen active" id="browser-screen">
+        <header class="toolbar">
+          <div class="toolbar-actions">
+            <button id="back-button" class="icon-button">Back</button>
+            <button id="forward-button" class="icon-button">Forward</button>
+            <button id="reload-button" class="icon-button">Reload</button>
+          </div>
+          <form id="address-form" class="address-form">
+            <input id="address-input" type="text" placeholder="Enter a URL or localhost path">
+          </form>
+          <div class="toolbar-actions">
+            <button id="bookmark-page-button" class="icon-button">Bookmark</button>
+            <button id="vault-toggle-button" class="icon-button">Browser Tools</button>
+            <button id="new-tab-button" class="primary-button">New Tab</button>
+          </div>
+        </header>
+        <div id="browser-feedback" class="browser-feedback hidden" aria-live="polite"></div>
+        <div id="bookmark-bar" class="bookmark-bar"></div>
+        <div id="bookmark-context-menu" class="bookmark-context-menu hidden"></div>
+        <div id="bookmark-modal" class="bookmark-modal hidden">
+          <div class="bookmark-modal-card">
+            <div class="bookmark-modal-head">
+              <strong>Favorite added</strong>
+              <button id="close-bookmark-modal-button" type="button" class="bookmark-modal-close">x</button>
+            </div>
+            <label class="field">
+              <span>Name</span>
+              <input id="bookmark-name-input" type="text" placeholder="Bookmark name">
+            </label>
+            <label class="field">
+              <span>Folder</span>
+              <div class="bookmark-folder-display">Favorites bar</div>
+            </label>
+            <div class="bookmark-modal-actions">
+              <button id="bookmark-more-button" type="button">More</button>
+              <div class="bookmark-modal-actions-right">
+                <button id="bookmark-done-button" type="button" class="primary-button">Done</button>
+                <button id="bookmark-remove-button" type="button">Remove</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div id="browser-layout" class="browser-layout">
+          <div class="browser-main">
+            <div id="tab-strip" class="tab-strip"></div>
+            <div id="browser-host" class="browser-host">
+              <div id="browser-stage" class="browser-stage"></div>
+              <div id="browser-overlay" class="browser-overlay"></div>
+            </div>
+          </div>
+          <aside id="vault-panel" class="vault-panel hidden">
+            <div class="panel-header compact">
+              <div>
+                <span class="eyebrow">Browser tools</span>
+                <h3>Passwords, downloads, permissions</h3>
+              </div>
+            </div>
+            <section class="browser-tool-section">
+              <div class="row-heading">
+                <div>
+                  <span class="eyebrow">Bookmarks</span>
+                  <p class="panel-copy">Saved pages you can reopen quickly.</p>
+                </div>
+              </div>
+              <div id="bookmarks-list" class="browser-tool-list"></div>
+            </section>
+            <section class="browser-tool-section">
+              <span class="eyebrow">Credential vault</span>
+              <p class="panel-copy" id="vault-site-label">Open a page to manage saved credentials.</p>
+              <label class="field">
+                <span>Username</span>
+                <input id="vault-username" type="text" placeholder="Username or email">
+              </label>
+              <label class="field">
+                <span>Password</span>
+                <input id="vault-password" type="password" placeholder="Password">
+              </label>
+              <div class="button-row compact">
+                <button id="vault-save-button" type="button">Save</button>
+                <button id="vault-fill-button" type="button">Autofill</button>
+                <button id="vault-clear-button" type="button">Clear</button>
+              </div>
+              <div class="vault-note">Saved values are encrypted with the OS-backed Electron storage.</div>
+              <div class="vault-note">Passkeys and Windows Hello are available on persistent local sessions when the site supports WebAuthn.</div>
+            </section>
+            <section class="browser-tool-section">
+              <div class="row-heading">
+                <div>
+                  <span class="eyebrow">Downloads</span>
+                  <p class="panel-copy">Files save to your chosen browser download folder.</p>
+                </div>
+                <button id="clear-downloads-button" type="button">Clear finished</button>
+              </div>
+              <label class="field">
+                <span>Download folder</span>
+                <div class="picker-row">
+                  <input id="download-directory" type="text" readonly>
+                  <button id="pick-download-directory-button" type="button">Change</button>
+                </div>
+              </label>
+              <div id="downloads-list" class="browser-tool-list"></div>
+            </section>
+            <section class="browser-tool-section">
+              <div class="row-heading">
+                <div>
+                  <span class="eyebrow">Saved permissions</span>
+                  <p class="panel-copy">Per-site decisions for geolocation, camera, screen share, and similar APIs.</p>
+                </div>
+              </div>
+              <div id="permissions-list" class="browser-tool-list"></div>
+            </section>
+          </aside>
+        </div>
+      </section>
+
+      <section class="screen" id="installer-screen">
+        <div class="local-shell">
+          <aside class="sites-sidebar">
+            <div class="sites-sidebar-head">
+              <div>
+                <span class="eyebrow">Local sites</span>
+                <h2>Workspace</h2>
+              </div>
+              <button id="create-site-button" class="add-site-button" type="button">+</button>
+            </div>
+            <div class="htdocs-config">
+              <label class="field">
+                <span>XAMPP htdocs</span>
+                <div class="picker-row">
+                  <input id="htdocs-path" type="text" placeholder="Pick your XAMPP htdocs folder" readonly>
+                  <button id="pick-htdocs-button" type="button">Set</button>
+                </div>
+              </label>
+              <div id="server-status" class="server-status">Apache status: unknown</div>
+            </div>
+            <div id="sites-running-count" class="sites-running-count">0 sites running</div>
+            <div id="sites-list" class="sites-list"></div>
+          </aside>
+
+          <section class="site-details">
+            <header class="site-hero">
+              <div>
+                <span class="eyebrow">Installer</span>
+                <h1 id="site-title">Create a new site</h1>
+                <div class="site-links">
+                  <button id="open-folder-button" type="button" class="link-button">Site folder</button>
+                  <button id="open-shell-button" type="button" class="link-button">Site shell</button>
+                  <button id="open-vscode-button" type="button" class="link-button">VS Code</button>
+                </div>
+              </div>
+              <div class="site-hero-actions">
+                <div id="site-last-started" class="last-started">Last started: never</div>
+                <div class="button-row compact">
+                  <button id="test-db-button" type="button">Test DB</button>
+                  <button id="backup-site-button" type="button">Backup site</button>
+                  <button id="open-site-button" type="button">WP Admin</button>
+                  <button id="open-live-site-button" type="button" class="primary-button">Open site</button>
+                  <button id="delete-site-button" type="button" class="danger-button">Delete site</button>
+                </div>
+              </div>
+            </header>
+
+            <nav class="site-tabs">
+              <button class="site-tab active" data-site-tab="overview" type="button">Overview</button>
+              <button class="site-tab" data-site-tab="database" type="button">Database</button>
+              <button class="site-tab" data-site-tab="tools" type="button">Tools</button>
+            </nav>
+
+            <div class="site-tab-panels">
+              <section class="site-tab-panel active" id="overview-panel">
+                <div class="local-grid">
+                  <div class="overview-table-card">
+                    <div class="overview-table" id="overview-table">
+                      <div class="overview-row">
+                        <span>Site domain</span>
+                        <strong id="detail-domain">-</strong>
+                      </div>
+                      <div class="overview-row">
+                        <span>SSL</span>
+                        <strong id="detail-ssl">-</strong>
+                      </div>
+                      <div class="overview-row">
+                        <span>Web server</span>
+                        <strong id="detail-web-server">-</strong>
+                      </div>
+                      <div class="overview-row">
+                        <span>PHP version</span>
+                        <strong id="detail-php-version">-</strong>
+                      </div>
+                      <div class="overview-row">
+                        <span>Database</span>
+                        <strong id="detail-db-version">-</strong>
+                      </div>
+                      <div class="overview-row">
+                        <span>WordPress version</span>
+                        <strong id="detail-wordpress-version">-</strong>
+                      </div>
+                      <div class="overview-row">
+                        <span>Target path</span>
+                        <strong id="result-target">-</strong>
+                      </div>
+                      <div class="overview-row">
+                        <span>Files extracted</span>
+                        <strong id="result-files">-</strong>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="overview-empty-card" id="overview-empty-card">
+                    <span class="eyebrow">Create site</span>
+                    <h3>Add a new WordPress install</h3>
+                    <p>Use the <strong>+</strong> button in the workspace column to open the create-site popup.</p>
+                  </div>
+                </div>
+              </section>
+
+              <section class="site-tab-panel" id="database-panel">
+                <div class="install-card">
+                  <div class="card-header">
+                    <div>
+                      <span class="eyebrow">Database</span>
+                      <h3>MySQL settings</h3>
+                    </div>
+                  </div>
+
+                  <div class="form-grid four-up">
+                    <label class="field">
+                      <span>Host</span>
+                      <input id="db-host" type="text" value="127.0.0.1">
+                    </label>
+                    <label class="field">
+                      <span>Port</span>
+                      <input id="db-port" type="number" value="3306">
+                    </label>
+                    <label class="field">
+                      <span>User</span>
+                      <input id="db-user" type="text" value="root">
+                    </label>
+                    <label class="field">
+                      <span>Password</span>
+                      <input id="db-password" type="password" placeholder="Leave empty if none">
+                    </label>
+                  </div>
+
+                  <div class="overview-table database-readout">
+                    <div class="overview-row">
+                      <span>Database name</span>
+                      <strong id="result-db">-</strong>
+                    </div>
+                    <div class="overview-row">
+                      <span>Site URL</span>
+                      <strong id="result-url">-</strong>
+                    </div>
+                  </div>
+
+                  <p class="panel-copy">These MySQL details are used for testing, creating, and deleting site databases.</p>
+
+                  <div class="button-row compact">
+                    <button id="open-phpmyadmin-button" type="button">Open phpMyAdmin</button>
+                  </div>
+                </div>
+              </section>
+
+              <section class="site-tab-panel" id="tools-panel">
+                <div class="install-card">
+                  <div class="card-header">
+                    <div>
+                      <span class="eyebrow">Tools</span>
+                      <h3>Logs and utilities</h3>
+                    </div>
+                  </div>
+                  <div id="status-card" class="status-card">
+                    <strong>Status</strong>
+                    <p id="status-text">Ready.</p>
+                  </div>
+                  <div id="delete-progress-card" class="progress-card delete-progress hidden" aria-live="polite">
+                    <div class="progress-copy">
+                      <strong id="delete-progress-title">Deleting site</strong>
+                      <p id="delete-progress-text">Removing files and database...</p>
+                    </div>
+                    <div class="flat-progress-track">
+                      <div class="flat-progress-bar"></div>
+                    </div>
+                  </div>
+                  <div id="result-card" class="result-card hidden">
+                    <div class="result-head">
+                      <h3>Installer log</h3>
+                    </div>
+                    <ul id="result-logs" class="log-list"></ul>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section class="screen" id="settings-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Environment</span>
+              <h1>XAMPP settings</h1>
+              <p>Manage the root folder and jump straight to Apache, PHP, MySQL, and phpMyAdmin files.</p>
+            </div>
+            <div class="button-row compact">
+              <button id="pick-xampp-root-button" type="button" class="primary-button">Set XAMPP Root</button>
+              <button id="settings-pick-htdocs-button" type="button">Set htdocs</button>
+            </div>
+          </header>
+
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header">
+                <div>
+                  <span class="eyebrow">Paths</span>
+                  <h3>Core folders</h3>
+                </div>
+              </div>
+
+              <label class="field">
+                <span>XAMPP root</span>
+                <div class="picker-row">
+                  <input id="settings-xampp-root" type="text" placeholder="Pick your XAMPP root folder" readonly>
+                  <button id="open-xampp-root-button" type="button">Open</button>
+                </div>
+              </label>
+
+              <label class="field">
+                <span>htdocs</span>
+                <div class="picker-row">
+                  <input id="settings-htdocs-path" type="text" placeholder="Pick your XAMPP htdocs folder" readonly>
+                  <button id="open-settings-htdocs-button" type="button">Open</button>
+                </div>
+              </label>
+
+              <div class="settings-note" id="xampp-settings-note">
+                Use the root folder when you want the app to auto-find Apache, PHP, MySQL, and phpMyAdmin files.
+              </div>
+            </div>
+
+            <div class="settings-card">
+              <div class="card-header">
+                <div>
+                  <span class="eyebrow">Service files</span>
+                  <h3>Apache and MySQL</h3>
+                </div>
+              </div>
+
+              <div class="settings-list">
+                <div class="settings-item">
+                  <div class="settings-item-copy">
+                    <strong>Apache start script</strong>
+                    <span id="settings-apache-start">Not found</span>
+                  </div>
+                  <button id="open-apache-start-button" type="button">Open</button>
+                </div>
+                <div class="settings-item">
+                  <div class="settings-item-copy">
+                    <strong>Apache stop script</strong>
+                    <span id="settings-apache-stop">Not found</span>
+                  </div>
+                  <button id="open-apache-stop-button" type="button">Open</button>
+                </div>
+                <div class="settings-item">
+                  <div class="settings-item-copy">
+                    <strong>Apache config</strong>
+                    <span id="settings-apache-config">Not found</span>
+                  </div>
+                  <button id="open-apache-config-button" type="button">Open</button>
+                </div>
+                <div class="settings-item">
+                  <div class="settings-item-copy">
+                    <strong>MySQL config</strong>
+                    <span id="settings-mysql-config">Not found</span>
+                  </div>
+                  <button id="open-mysql-config-button" type="button">Open</button>
+                </div>
+                <div class="settings-item">
+                  <div class="settings-item-copy">
+                    <strong>XAMPP control panel</strong>
+                    <span id="settings-control-panel">Not found</span>
+                  </div>
+                  <button id="open-control-panel-button" type="button">Open</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-card">
+              <div class="card-header">
+                <div>
+                  <span class="eyebrow">Developer files</span>
+                  <h3>PHP and phpMyAdmin</h3>
+                </div>
+              </div>
+
+              <div class="settings-list">
+                <div class="settings-item">
+                  <div class="settings-item-copy">
+                    <strong>PHP executable</strong>
+                    <span id="settings-php-exe">Not found</span>
+                  </div>
+                  <button id="open-php-exe-button" type="button">Open</button>
+                </div>
+                <div class="settings-item">
+                  <div class="settings-item-copy">
+                    <strong>PHP config</strong>
+                    <span id="settings-php-config">Not found</span>
+                  </div>
+                  <button id="open-php-config-button" type="button">Open</button>
+                </div>
+                <div class="settings-item">
+                  <div class="settings-item-copy">
+                    <strong>phpMyAdmin folder</strong>
+                    <span id="settings-phpmyadmin">Not found</span>
+                  </div>
+                  <button id="open-phpmyadmin-folder-button" type="button">Open</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <div id="create-site-modal" class="modal-backdrop hidden">
+    <div class="modal-card">
+      <div class="card-header">
+        <div>
+          <span class="eyebrow">Create site</span>
+          <h3>Install WordPress from zip</h3>
+        </div>
+        <button id="close-create-site-modal" type="button" class="icon-button">Close</button>
+      </div>
+
+      <div class="form-grid">
+        <label class="field">
+          <span>WordPress zip</span>
+          <div class="picker-row">
+            <input id="zip-path" type="text" placeholder="Pick a .zip file" readonly>
+            <button id="pick-zip-button" type="button">Browse</button>
+          </div>
+        </label>
+
+        <label class="field">
+          <span>Base folder</span>
+          <div class="picker-row">
+            <input id="base-path" type="text" placeholder="Pick a folder" readonly>
+            <button id="pick-folder-button" type="button">Browse</button>
+          </div>
+        </label>
+
+        <label class="field">
+          <span>Optional subfolder</span>
+          <input id="folder-name" type="text" placeholder="browser">
+        </label>
+      </div>
+
+      <label class="checkbox-row">
+        <input id="create-db" type="checkbox" checked>
+        <span>Create the database after extraction</span>
+      </label>
+
+      <label class="checkbox-row">
+        <input id="save-db-profile" type="checkbox" checked>
+        <span>Save MySQL credentials securely for next time</span>
+      </label>
+
+      <div class="button-row compact">
+        <button id="install-button" type="button" class="primary-button">Create site</button>
+      </div>
+
+      <div id="create-progress-card" class="progress-card create-progress hidden" aria-live="polite">
+        <div class="circular-progress-shell">
+          <div class="circular-progress-ring"></div>
+          <div class="circular-progress-core"></div>
+        </div>
+        <div class="progress-copy">
+          <strong id="create-progress-title">Creating site</strong>
+          <p id="create-progress-text">Preparing files, database, and local site records...</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="./renderer.js"></script>
+</body>
+</html>
