@@ -547,41 +547,56 @@ async function fetchRemoteSearchSuggestions(query) {
 
 function getPartitionForUrl(url, tabId, mode = "auto") {
   const settings = getSettings();
-  
-  // Check if this is a local URL and if per-site session isolation is enabled
+
+  if (mode === "isolated") {
+    return `${mode}:${tabId}`;
+  }
+
+  const buildTabScopedPartition = (scope) => {
+    const siteIdentifier = getSanitizedSiteIdentifier(url, scope === "local" ? "local-default" : "online-default");
+    const tabIdentifier = sanitizeSessionToken(tabId || `tab-${Date.now()}`);
+    return `persist:${scope}-${siteIdentifier}-${tabIdentifier}`;
+  };
+
   if (isLocalUrl(url)) {
-    // If shareLocalSiteSessions is FALSE, we want PER-SITE sessions
     if (settings.shareLocalSiteSessions === false) {
-      try {
-        const parsed = new URL(url);
-        // Create unique partition for each site based on hostname and port
-        const siteIdentifier = parsed.port 
-          ? `${parsed.hostname}:${parsed.port}`
-          : parsed.hostname;
-        return `persist:local-${siteIdentifier}`;
-      } catch (_) {
-        return "persist:local-default";
-      }
+      return buildTabScopedPartition("local");
     }
-    // If shareLocalSiteSessions is TRUE, share sessions across local sites
     return "persist:local-shared";
   }
-  
-  // For online sites, check if session sharing is enabled
+
   if (settings.shareOnlineSiteSessions === true) {
     return "persist:online-shared";
   }
-  
-  // For online sites without sharing, create site-specific partitions
+
+  return buildTabScopedPartition("online");
+}
+
+function sanitizeSessionToken(value, fallback = "default") {
+  const sanitized = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return sanitized || fallback;
+}
+
+function getSanitizedSiteIdentifier(url, fallback = "default") {
   try {
     const parsed = new URL(url);
-    const siteIdentifier = parsed.port 
+    const siteIdentifier = parsed.port
       ? `${parsed.hostname}:${parsed.port}`
       : parsed.hostname;
-    return `persist:online-${siteIdentifier}`;
+
+    return sanitizeSessionToken(siteIdentifier, fallback);
   } catch (_) {
-    return "persist:main";
+    return fallback;
   }
+}
+
+function getSessionProfileName(partition) {
+  return String(partition || "").trim() || "temporary-session";
 }
 
 function buildBrowserWebPreferences(partition) {
@@ -1479,7 +1494,9 @@ function serializeBrowserState(state) {
       error: tab.error || null,
       pinned: Boolean(tab.pinned),
       muted: Boolean(tab.muted),
-      nickname: tab.nickname || ""
+      nickname: tab.nickname || "",
+      partition: tab.partition,
+      sessionProfileName: getSessionProfileName(tab.partition)
     })),
     activeTabId: state.activeTabId,
     canGoBack: navigation ? navigation.canGoBack() : false,

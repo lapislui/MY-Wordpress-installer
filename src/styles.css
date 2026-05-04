@@ -621,10 +621,10 @@ input {
 
 .tab-button {
   display: inline-flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   min-width: 150px;
-  max-width: 210px;
+  max-width: 240px;
   padding: 8px 10px;
   border: 1px solid var(--line);
   border-radius: 10px 10px 0 0;
@@ -645,14 +645,31 @@ input {
   background: #f5fbf6;
 }
 
+.tab-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+  flex: 1;
+}
+
 .tab-title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.tab-session {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.73rem;
+  color: var(--muted);
+}
+
 .tab-close {
   color: var(--muted);
+  flex-shrink: 0;
 }
 
 .browser-host {

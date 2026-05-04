@@ -641,15 +641,22 @@ function renderSessionRules() {
     return;
   }
 
-  let ruleText = "All tabs share one persistent browser profile. Cookies, local storage, and sign-in state are preserved across restarts.";
-  
-  if (elements.settingsShareLocalSessions && !elements.settingsShareLocalSessions.checked) {
-    ruleText = "Each local tab has its own isolated session. WordPress sign-ins are not shared between localhost tabs.";
-  } else if (elements.settingsShareOnlineSessions && elements.settingsShareOnlineSessions.checked) {
-    ruleText = "Tabs from the same online site can share login sessions. Local tabs also share sessions by default.";
-  }
-  
+  const localShared = !elements.settingsShareLocalSessions || elements.settingsShareLocalSessions.checked;
+  const onlineShared = Boolean(elements.settingsShareOnlineSessions?.checked);
+  const localRule = localShared
+    ? "Local tabs reuse persist:local-shared."
+    : "Each new local tab gets its own persistent profile.";
+  const onlineRule = onlineShared
+    ? "Online tabs reuse persist:online-shared."
+    : "Each new online tab gets its own persistent profile.";
+
+  const ruleText = `${localRule} ${onlineRule}`;
   elements.sessionRulesCopy.textContent = ruleText;
+}
+
+function getTabSessionLabel(tab) {
+  const profileName = String(tab?.sessionProfileName || tab?.partition || "").trim();
+  return profileName ? `Profile: ${profileName}` : "Profile: temporary-session";
 }
 
 function getBrowserToolSections() {
@@ -1012,8 +1019,14 @@ function renderBrowserTabs() {
   state.browser.tabs.forEach((tab) => {
     const button = document.createElement("button");
     button.className = `tab-button${tab.id === state.browser.activeTabId ? " active" : ""}${tab.pinned ? " pinned" : ""}`;
+    const title = escapeHtml(tab.title || tab.url);
+    const sessionLabel = escapeHtml(getTabSessionLabel(tab));
+    button.title = `${tab.title || tab.url}\n${getTabSessionLabel(tab)}`;
     button.innerHTML = `
-      <span class="tab-title">${tab.pinned ? "[Pin] " : ""}${tab.title || tab.url}${tab.muted ? " [Muted]" : ""}</span>
+      <span class="tab-copy">
+        <span class="tab-title">${tab.pinned ? "[Pin] " : ""}${title}${tab.muted ? " [Muted]" : ""}</span>
+        <span class="tab-session">${sessionLabel}</span>
+      </span>
       <span class="tab-close" data-close="${tab.id}">x</span>
     `;
 
