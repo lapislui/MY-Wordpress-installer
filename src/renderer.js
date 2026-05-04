@@ -650,13 +650,18 @@ function renderSessionRules() {
     ? "Online tabs reuse persist:online-shared."
     : "Each new online tab gets its own persistent profile.";
 
-  const ruleText = `${localRule} ${onlineRule}`;
+  const ruleText = `${localRule} ${onlineRule} Tabs in the same group always reuse that group's profile.`;
   elements.sessionRulesCopy.textContent = ruleText;
 }
 
 function getTabSessionLabel(tab) {
   const profileName = String(tab?.sessionProfileName || tab?.partition || "").trim();
   return profileName ? `Profile: ${profileName}` : "Profile: temporary-session";
+}
+
+function getTabGroupLabel(tab) {
+  const groupName = String(tab?.groupName || "").trim();
+  return groupName ? `Group: ${groupName}` : "Group: none";
 }
 
 function getBrowserToolSections() {
@@ -1020,11 +1025,13 @@ function renderBrowserTabs() {
     const button = document.createElement("button");
     button.className = `tab-button${tab.id === state.browser.activeTabId ? " active" : ""}${tab.pinned ? " pinned" : ""}`;
     const title = escapeHtml(tab.title || tab.url);
+    const groupLabel = escapeHtml(getTabGroupLabel(tab));
     const sessionLabel = escapeHtml(getTabSessionLabel(tab));
-    button.title = `${tab.title || tab.url}\n${getTabSessionLabel(tab)}`;
+    button.title = `${tab.title || tab.url}\n${getTabGroupLabel(tab)}\n${getTabSessionLabel(tab)}`;
     button.innerHTML = `
       <span class="tab-copy">
         <span class="tab-title">${tab.pinned ? "[Pin] " : ""}${title}${tab.muted ? " [Muted]" : ""}</span>
+        <span class="tab-group">${groupLabel}</span>
         <span class="tab-session">${sessionLabel}</span>
       </span>
       <span class="tab-close" data-close="${tab.id}">x</span>

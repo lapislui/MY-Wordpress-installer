@@ -545,11 +545,16 @@ async function fetchRemoteSearchSuggestions(query) {
   }
 }
 
-function getPartitionForUrl(url, tabId, mode = "auto") {
+function getPartitionForUrl(url, tabId, mode = "auto", group = null) {
   const settings = getSettings();
 
   if (mode === "isolated") {
     return `${mode}:${tabId}`;
+  }
+
+  const groupPartition = getTabGroupPartitionName(group);
+  if (groupPartition) {
+    return groupPartition;
   }
 
   const buildTabScopedPartition = (scope) => {
@@ -597,6 +602,19 @@ function getSanitizedSiteIdentifier(url, fallback = "default") {
 
 function getSessionProfileName(partition) {
   return String(partition || "").trim() || "temporary-session";
+}
+
+function buildTabGroupProfilePartition(groupId) {
+  return `persist:group-${sanitizeSessionToken(groupId, "default")}`;
+}
+
+function getTabGroupPartitionName(group) {
+  if (!group) {
+    return "";
+  }
+
+  return String(group.partition || group.profilePartition || "").trim()
+    || buildTabGroupProfilePartition(group.id || "default");
 }
 
 function buildBrowserWebPreferences(partition) {
@@ -1333,6 +1351,7 @@ function getBrowserState(win) {
   if (!browserWindows.has(win.id)) {
     browserWindows.set(win.id, {
       tabs: [],
+      tabGroups: [],
       activeTabId: null,
       attachedTabId: null,
       browserBounds: null,
@@ -1487,6 +1506,8 @@ function serializeBrowserState(state) {
   const navigation = activeTab ? getNavigationApi(activeTab.view.webContents) : null;
   return {
     tabs: state.tabs.map((tab) => ({
+      groupId: tab.groupId || null,
+      groupName: getTabGroupById(state, tab.groupId)?.name || "",
       id: tab.id,
       title: tab.nickname || tab.title || tab.url,
       url: tab.url,
@@ -1497,6 +1518,12 @@ function serializeBrowserState(state) {
       nickname: tab.nickname || "",
       partition: tab.partition,
       sessionProfileName: getSessionProfileName(tab.partition)
+    })),
+    tabGroups: state.tabGroups.map((group) => ({
+      id: group.id,
+      name: group.name,
+      partition: getTabGroupPartitionName(group),
+      tabCount: state.tabs.filter((tab) => tab.groupId === group.id).length
     })),
     activeTabId: state.activeTabId,
     canGoBack: navigation ? navigation.canGoBack() : false,
@@ -1677,7 +1704,9 @@ function buildContextMenu(win, tab, params) {
     {
       label: "Open link in new tab",
       enabled: Boolean(linkUrl),
-      click: () => createBrowserTab(win, linkUrl, "auto", true)
+      click: () => createBrowserTab(win, linkUrl, tab.mode || "auto", true, null, {
+        groupId: tab.groupId || null
+      })
     },
     {
       label: "Open link in new window",
@@ -1731,8 +1760,10 @@ function buildContextMenu(win, tab, params) {
       click: () => createBrowserTab(
         win,
         `https://www.google.com/searchbyimage?image_url=${encodeURIComponent(linkUrl)}`,
-        "auto",
-        true
+        tab.mode || "auto",
+        true,
+        null,
+        { groupId: tab.groupId || null }
       )
     },
     {
@@ -1829,11 +1860,58 @@ function findTabById(win, tabId) {
   return getBrowserState(win).tabs.find((tab) => tab.id === tabId) || null;
 }
 
+function getTabGroupById(state, groupId) {
+  if (!groupId) {
+    return null;
+  }
+
+  return state.tabGroups.find((group) => group.id === groupId) || null;
+}
+
+function getTabGroupForTab(state, tab) {
+  if (!tab?.groupId) {
+    return null;
+  }
+
+  return getTabGroupById(state, tab.groupId);
+}
+
+function createTabGroupRecord(state, name = "") {
+  const groupId = `group-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+  const normalizedName = String(name || "").trim() || `Group ${state.tabGroups.length + 1}`;
+  const group = {
+    id: groupId,
+    name: normalizedName,
+    partition: buildTabGroupProfilePartition(groupId)
+  };
+  state.tabGroups.push(group);
+  return group;
+}
+
+function deleteEmptyTabGroup(state, groupId) {
+  if (!groupId) {
+    return false;
+  }
+
+  if (state.tabs.some((tab) => tab.groupId === groupId)) {
+    return false;
+  }
+
+  const index = state.tabGroups.findIndex((group) => group.id === groupId);
+  if (index === -1) {
+    return false;
+  }
+
+  state.tabGroups.splice(index, 1);
+  return true;
+}
+
 function snapshotClosedTab(tab) {
   return {
     url: tab.url,
     mode: tab.mode || "auto",
     nickname: tab.nickname || "",
+    groupId: tab.groupId || null,
     pinned: Boolean(tab.pinned),
     muted: Boolean(tab.muted)
   };
@@ -1917,6 +1995,123 @@ function setTabNickname(win, tabId, nickname) {
   return true;
 }
 
+function replaceTabViewWithPartition(win, tab, nextPartition, nextUrl = null) {
+  if (!tab || !nextPartition) {
+    return false;
+  }
+
+  const state = getBrowserState(win);
+  const resolvedUrl = ensureUrl(nextUrl || tab.url || getDefaultStartupUrl());
+  const wasActive = state.activeTabId === tab.id;
+
+  tab.partition = nextPartition;
+  tab.url = resolvedUrl;
+  tab.error = null;
+  tab.isLoading = true;
+
+  if (state.attachedTabId === tab.id) {
+    detachActiveView(win);
+  }
+
+  try {
+    tab.view.webContents.close({ waitForBeforeUnload: false });
+  } catch (_) {
+    // Ignore teardown issues while replacing a tab view.
+  }
+
+  configureBrowserSession(win, nextPartition);
+  tab.view = new BrowserView({
+    webPreferences: buildBrowserWebPreferences(nextPartition)
+  });
+  wireTabEvents(win, tab);
+  tab.view.webContents.setAudioMuted(Boolean(tab.muted));
+  wcSafeLoadURL(tab.view.webContents, resolvedUrl);
+
+  if (wasActive) {
+    attachActiveView(win);
+  }
+
+  return true;
+}
+
+function renameTabGroup(win, groupId, name) {
+  const state = getBrowserState(win);
+  const group = getTabGroupById(state, groupId);
+  if (!group) {
+    return false;
+  }
+
+  group.name = String(name || "").trim() || group.name;
+  emitBrowserState(win);
+  return true;
+}
+
+function moveTabToGroup(win, tabId, groupId) {
+  const state = getBrowserState(win);
+  const tab = findTabById(win, tabId);
+  const group = getTabGroupById(state, groupId);
+  if (!tab || !group) {
+    return false;
+  }
+
+  const previousGroupId = tab.groupId || null;
+  tab.groupId = group.id;
+  replaceTabViewWithPartition(win, tab, getTabGroupPartitionName(group), tab.url);
+  deleteEmptyTabGroup(state, previousGroupId);
+  emitBrowserState(win);
+  return true;
+}
+
+function removeTabFromGroup(win, tabId) {
+  const state = getBrowserState(win);
+  const tab = findTabById(win, tabId);
+  if (!tab?.groupId) {
+    return false;
+  }
+
+  const previousGroupId = tab.groupId;
+  tab.groupId = null;
+  replaceTabViewWithPartition(win, tab, getPartitionForUrl(tab.url, tab.id, tab.mode), tab.url);
+  deleteEmptyTabGroup(state, previousGroupId);
+  emitBrowserState(win);
+  return true;
+}
+
+function createTabGroupFromTab(win, tabId, groupName = "") {
+  const state = getBrowserState(win);
+  const tab = findTabById(win, tabId);
+  if (!tab) {
+    return null;
+  }
+
+  const previousGroupId = tab.groupId || null;
+  const group = createTabGroupRecord(state, groupName || tab.nickname || tab.title || "Tab group");
+  tab.groupId = group.id;
+  replaceTabViewWithPartition(win, tab, getTabGroupPartitionName(group), tab.url);
+  deleteEmptyTabGroup(state, previousGroupId);
+  emitBrowserState(win);
+  return group;
+}
+
+function dissolveTabGroup(win, groupId) {
+  const state = getBrowserState(win);
+  const group = getTabGroupById(state, groupId);
+  if (!group) {
+    return false;
+  }
+
+  state.tabs
+    .filter((tab) => tab.groupId === groupId)
+    .forEach((tab) => {
+      tab.groupId = null;
+      replaceTabViewWithPartition(win, tab, getPartitionForUrl(tab.url, tab.id, tab.mode), tab.url);
+    });
+
+  deleteEmptyTabGroup(state, groupId);
+  emitBrowserState(win);
+  return true;
+}
+
 function duplicateBrowserTab(win, tabId) {
   const state = getBrowserState(win);
   const index = state.tabs.findIndex((tab) => tab.id === tabId);
@@ -1927,6 +2122,7 @@ function duplicateBrowserTab(win, tabId) {
   const source = state.tabs[index];
   createBrowserTab(win, source.url, source.mode || "auto", true, index + 1, {
     nickname: source.nickname || "",
+    groupId: source.groupId || null,
     pinned: Boolean(source.pinned),
     muted: Boolean(source.muted)
   });
@@ -2186,7 +2382,9 @@ function wireTabEvents(win, tab) {
   const wc = tab.view.webContents;
 
   wc.setWindowOpenHandler((details) => {
-    createBrowserTab(win, details.url, tab.mode || "auto", true);
+    createBrowserTab(win, details.url, tab.mode || "auto", true, null, {
+      groupId: tab.groupId || null
+    });
     return { action: "deny" };
   });
 
@@ -2246,7 +2444,8 @@ function createBrowserTab(win, url, mode = "auto", activate = true, insertIndex 
   const state = getBrowserState(win);
   const resolvedUrl = ensureUrl(url);
   const id = `tab-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`;
-  const partition = getPartitionForUrl(resolvedUrl, id, mode);
+  const group = getTabGroupById(state, tabOptions.groupId);
+  const partition = getPartitionForUrl(resolvedUrl, id, mode, group);
   configureBrowserSession(win, partition);
   const view = new BrowserView({
     webPreferences: buildBrowserWebPreferences(partition)
@@ -2256,6 +2455,7 @@ function createBrowserTab(win, url, mode = "auto", activate = true, insertIndex 
     id,
     title: "New Tab",
     nickname: String(tabOptions.nickname || "").trim(),
+    groupId: group?.id || null,
     url: resolvedUrl,
     isLoading: true,
     mode,
@@ -2305,11 +2505,13 @@ function closeBrowserTab(win, tabId) {
   }
 
   const [tab] = state.tabs.splice(index, 1);
+  const previousGroupId = tab.groupId || null;
   rememberClosedTab(win, tab);
   if (state.attachedTabId === tab.id) {
     detachActiveView(win);
   }
   tab.view.webContents.close({ waitForBeforeUnload: false });
+  deleteEmptyTabGroup(state, previousGroupId);
 
   if (!state.tabs.length) {
     createBrowserTab(win, getDefaultStartupUrl(), "auto", true);
@@ -2333,7 +2535,7 @@ function navigateActiveBrowserTab(win, url) {
   }
 
   const resolvedUrl = ensureUrl(url);
-  const nextPartition = getPartitionForUrl(resolvedUrl, active.id, active.mode);
+  const nextPartition = getPartitionForUrl(resolvedUrl, active.id, active.mode, getTabGroupForTab(state, active));
 
   if (nextPartition !== active.partition) {
     const wasActive = state.activeTabId === active.id;
@@ -2735,6 +2937,226 @@ function showTabNicknameDialog(win, payload = {}) {
   });
 }
 
+function buildTabGroupDialogHtml(requestId, payload = {}) {
+  const value = escapeHtml(payload.value || "");
+  const title = escapeHtml(payload.title || "Tab group");
+  const heading = escapeHtml(payload.heading || "Name tab group");
+  const description = escapeHtml(payload.description || "Tabs in the same group reuse one persistent session profile.");
+  const confirmLabel = escapeHtml(payload.confirmLabel || "Save");
+
+  return `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <title>${title}</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: "Segoe UI", Arial, sans-serif;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html, body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        background: #232323;
+        color: #ffffff;
+      }
+      body {
+        padding: 18px;
+      }
+      .card {
+        width: 100%;
+        height: 100%;
+        display: grid;
+        gap: 14px;
+        align-content: start;
+      }
+      .head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .close {
+        border: 0;
+        background: transparent;
+        color: #fff;
+        cursor: pointer;
+        font-size: 1.3rem;
+        line-height: 1;
+        padding: 0 4px;
+      }
+      label {
+        display: grid;
+        gap: 8px;
+        font-size: 0.95rem;
+        color: #d3d3d3;
+      }
+      input {
+        width: 100%;
+        border: 1px solid #6b7280;
+        border-radius: 12px;
+        background: #2b2b2b;
+        color: #fff;
+        padding: 10px 12px;
+        min-height: 42px;
+        outline: none;
+      }
+      input:focus {
+        border-color: #f0a202;
+        box-shadow: 0 0 0 1px #f0a202;
+      }
+      .note {
+        color: #b8bec8;
+        font-size: 0.92rem;
+        line-height: 1.5;
+      }
+      .actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 10px;
+        margin-top: 8px;
+      }
+      button {
+        border: 1px solid #5a5a5a;
+        border-radius: 12px;
+        background: #4a4a4a;
+        color: #fff;
+        padding: 10px 16px;
+        cursor: pointer;
+        font-size: 0.95rem;
+      }
+      button.primary {
+        background: #f3f4f6;
+        border-color: #f3f4f6;
+        color: #111827;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="head">
+        <strong>${heading}</strong>
+        <button id="close-button" class="close" type="button" aria-label="Close">x</button>
+      </div>
+      <label>
+        <span>Group name</span>
+        <input id="group-name-input" type="text" value="${value}" placeholder="Enter a group name" />
+      </label>
+      <div class="note">${description}</div>
+      <div class="actions">
+        <button id="cancel-button" type="button">Cancel</button>
+        <button id="save-button" class="primary" type="button">${confirmLabel}</button>
+      </div>
+    </div>
+    <script>
+      const requestId = ${JSON.stringify(requestId)};
+      const input = document.getElementById("group-name-input");
+      const closeButton = document.getElementById("close-button");
+      const cancelButton = document.getElementById("cancel-button");
+      const saveButton = document.getElementById("save-button");
+
+      const send = (result) => {
+        window.dialogAPI.sendTabGroupDialogResult({
+          requestId,
+          result
+        });
+      };
+
+      closeButton.addEventListener("click", () => send({ action: "cancel" }));
+      cancelButton.addEventListener("click", () => send({ action: "cancel" }));
+      saveButton.addEventListener("click", () => send({ action: "save", name: input.value.trim() }));
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          saveButton.click();
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeButton.click();
+        }
+      });
+      window.addEventListener("DOMContentLoaded", () => {
+        input.focus();
+        input.select();
+      });
+    </script>
+  </body>
+</html>`;
+}
+
+function showTabGroupDialog(win, payload = {}) {
+  return new Promise((resolve) => {
+    const requestId = `tab-group-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+    let child = null;
+    let settled = false;
+
+    const finish = (result) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      ipcMain.removeListener("browser:tab-group-dialog-result", handleResult);
+
+      if (child && !child.isDestroyed()) {
+        child.destroy();
+      }
+
+      resolve(result || { action: "cancel" });
+    };
+
+    const handleResult = (_event, payloadResult) => {
+      if (payloadResult?.requestId !== requestId) {
+        return;
+      }
+
+      finish(payloadResult.result);
+    };
+
+    ipcMain.on("browser:tab-group-dialog-result", handleResult);
+
+    child = new BrowserWindow({
+      parent: win,
+      modal: true,
+      show: false,
+      width: 430,
+      height: 240,
+      resizable: false,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      autoHideMenuBar: true,
+      title: payload.title || "Tab group",
+      backgroundColor: "#232323",
+      webPreferences: {
+        preload: path.join(__dirname, "dialog-preload.js"),
+        sandbox: true,
+        contextIsolation: true,
+        nodeIntegration: false,
+        webSecurity: true
+      }
+    });
+
+    child.once("ready-to-show", () => {
+      if (!child.isDestroyed()) {
+        child.show();
+      }
+    });
+
+    child.on("closed", () => {
+      child = null;
+      finish({ action: "cancel" });
+    });
+
+    const html = buildTabGroupDialogHtml(requestId, payload);
+    child.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  });
+}
+
 function buildBrowserHistoryHtml() {
   const entries = getBrowserHistory()
     .sort((left, right) => Number(right.lastVisited || 0) - Number(left.lastVisited || 0))
@@ -2893,7 +3315,7 @@ function showBrowserAppMenu(win, position = {}) {
     },
     {
       label: "Tab groups",
-      submenu: [{ label: "Coming soon", enabled: false }]
+      submenu: buildWindowTabGroupsMenu(win)
     },
     {
       label: "Downloads",
@@ -2977,18 +3399,96 @@ function showBrowserTabContextMenu(win, tabId) {
     return false;
   }
 
+  const currentGroup = getTabGroupForTab(state, tab);
   const index = state.tabs.findIndex((item) => item.id === tab.id);
   const hasOtherTabs = state.tabs.length > 1;
   const hasTabsToRight = index >= 0 && index < state.tabs.length - 1;
+  const availableGroups = state.tabGroups.filter((group) => group.id !== currentGroup?.id);
 
   const menu = Menu.buildFromTemplate([
     {
       label: "New tab to the right",
-      click: () => createBrowserTab(win, getDefaultStartupUrl(), "auto", true, index + 1)
+      click: () => createBrowserTab(win, getDefaultStartupUrl(), tab.mode || "auto", true, index + 1, {
+        groupId: tab.groupId || null
+      })
     },
     {
-      label: "Add tab to new group",
-      enabled: false
+      label: currentGroup ? `Tab group: ${currentGroup.name}` : "Tab groups",
+      submenu: [
+        {
+          label: "Create new group from tab",
+          click: async () => {
+            const result = await showTabGroupDialog(win, {
+              title: "Create tab group",
+              heading: "Create a tab group",
+              value: tab.nickname || tab.title || "",
+              confirmLabel: "Create"
+            });
+
+            if (result?.action === "save") {
+              createTabGroupFromTab(win, tab.id, result.name);
+            }
+          }
+        },
+        {
+          label: "Add to existing group",
+          enabled: availableGroups.length > 0,
+          submenu: availableGroups.length > 0
+            ? availableGroups.map((group) => ({
+                label: `${group.name} (${state.tabs.filter((item) => item.groupId === group.id).length} tab${state.tabs.filter((item) => item.groupId === group.id).length === 1 ? "" : "s"})`,
+                click: () => moveTabToGroup(win, tab.id, group.id)
+              }))
+            : [{ label: "No other groups", enabled: false }]
+        },
+        {
+          label: "Remove from current group",
+          enabled: Boolean(currentGroup),
+          click: () => removeTabFromGroup(win, tab.id)
+        },
+        { type: "separator" },
+        {
+          label: "Rename current group",
+          enabled: Boolean(currentGroup),
+          click: async () => {
+            if (!currentGroup) {
+              return;
+            }
+
+            const result = await showTabGroupDialog(win, {
+              title: "Rename tab group",
+              heading: "Rename current tab group",
+              value: currentGroup.name,
+              confirmLabel: "Save"
+            });
+
+            if (result?.action === "save") {
+              renameTabGroup(win, currentGroup.id, result.name);
+            }
+          }
+        },
+        {
+          label: "New tab in current group",
+          enabled: Boolean(currentGroup),
+          click: () => {
+            if (!currentGroup) {
+              return;
+            }
+
+            createBrowserTab(win, getDefaultStartupUrl(), tab.mode || "auto", true, index + 1, {
+              groupId: currentGroup.id
+            });
+          }
+        },
+        {
+          label: "Delete current group",
+          enabled: Boolean(currentGroup),
+          click: () => {
+            if (currentGroup) {
+              dissolveTabGroup(win, currentGroup.id);
+            }
+          }
+        }
+      ]
     },
     { type: "separator" },
     {
@@ -3116,6 +3616,45 @@ function sendUrlToWindow(win, startupUrl, startupMode = "auto") {
 
   createBrowserTab(win, startupUrl, startupMode, true);
   win.webContents.send("browser:focus");
+}
+
+function buildWindowTabGroupsMenu(win) {
+  const state = getBrowserState(win);
+  if (!state.tabGroups.length) {
+    return [{ label: "No groups yet", enabled: false }];
+  }
+
+  return state.tabGroups.map((group) => {
+    const groupTabs = state.tabs.filter((tab) => tab.groupId === group.id);
+    return {
+      label: `${group.name} (${groupTabs.length})`,
+      submenu: [
+        {
+          label: "Open new tab in this group",
+          click: () => createBrowserTab(win, getDefaultStartupUrl(), "auto", true, null, { groupId: group.id })
+        },
+        {
+          label: "Rename group",
+          click: async () => {
+            const result = await showTabGroupDialog(win, {
+              title: "Rename tab group",
+              heading: "Rename tab group",
+              value: group.name,
+              confirmLabel: "Save"
+            });
+
+            if (result?.action === "save") {
+              renameTabGroup(win, group.id, result.name);
+            }
+          }
+        },
+        {
+          label: "Delete group",
+          click: () => dissolveTabGroup(win, group.id)
+        }
+      ]
+    };
+  });
 }
 
 function openSiteShell(targetPath) {

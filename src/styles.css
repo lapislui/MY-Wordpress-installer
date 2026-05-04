@@ -667,6 +667,14 @@ input {
   color: var(--muted);
 }
 
+.tab-group {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.73rem;
+  color: #3f8f5e;
+}
+
 .tab-close {
   color: var(--muted);
   flex-shrink: 0;
