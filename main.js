@@ -546,7 +546,42 @@ async function fetchRemoteSearchSuggestions(query) {
 }
 
 function getPartitionForUrl(url, tabId, mode = "auto") {
-  return "persist:main";
+  const settings = getSettings();
+  
+  // Check if this is a local URL and if per-site session isolation is enabled
+  if (isLocalUrl(url)) {
+    // If shareLocalSiteSessions is FALSE, we want PER-SITE sessions
+    if (settings.shareLocalSiteSessions === false) {
+      try {
+        const parsed = new URL(url);
+        // Create unique partition for each site based on hostname and port
+        const siteIdentifier = parsed.port 
+          ? `${parsed.hostname}:${parsed.port}`
+          : parsed.hostname;
+        return `persist:local-${siteIdentifier}`;
+      } catch (_) {
+        return "persist:local-default";
+      }
+    }
+    // If shareLocalSiteSessions is TRUE, share sessions across local sites
+    return "persist:local-shared";
+  }
+  
+  // For online sites, check if session sharing is enabled
+  if (settings.shareOnlineSiteSessions === true) {
+    return "persist:online-shared";
+  }
+  
+  // For online sites without sharing, create site-specific partitions
+  try {
+    const parsed = new URL(url);
+    const siteIdentifier = parsed.port 
+      ? `${parsed.hostname}:${parsed.port}`
+      : parsed.hostname;
+    return `persist:online-${siteIdentifier}`;
+  } catch (_) {
+    return "persist:main";
+  }
 }
 
 function buildBrowserWebPreferences(partition) {

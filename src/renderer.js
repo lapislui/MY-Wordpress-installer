@@ -629,19 +629,27 @@ function renderXamppSettings() {
 
 function renderSessionRules() {
   if (elements.settingsShareLocalSessions) {
-    elements.settingsShareLocalSessions.checked = true;
-    elements.settingsShareLocalSessions.disabled = true;
+    elements.settingsShareLocalSessions.checked = state.shareLocalSiteSessions !== false;
+    elements.settingsShareLocalSessions.disabled = false;
   }
   if (elements.settingsShareOnlineSessions) {
-    elements.settingsShareOnlineSessions.checked = true;
-    elements.settingsShareOnlineSessions.disabled = true;
+    elements.settingsShareOnlineSessions.checked = state.shareOnlineSiteSessions === true;
+    elements.settingsShareOnlineSessions.disabled = false;
   }
 
   if (!elements.sessionRulesCopy) {
     return;
   }
 
-  elements.sessionRulesCopy.textContent = "All tabs share one persistent browser profile. Cookies, local storage, and sign-in state are preserved across restarts.";
+  let ruleText = "All tabs share one persistent browser profile. Cookies, local storage, and sign-in state are preserved across restarts.";
+  
+  if (elements.settingsShareLocalSessions && !elements.settingsShareLocalSessions.checked) {
+    ruleText = "Each local tab has its own isolated session. WordPress sign-ins are not shared between localhost tabs.";
+  } else if (elements.settingsShareOnlineSessions && elements.settingsShareOnlineSessions.checked) {
+    ruleText = "Tabs from the same online site can share login sessions. Local tabs also share sessions by default.";
+  }
+  
+  elements.sessionRulesCopy.textContent = ruleText;
 }
 
 function getBrowserToolSections() {
@@ -1242,8 +1250,8 @@ function applySettingsPayload(settings) {
   state.xamppPaths = settings.xamppPaths || null;
   state.effectiveDbProfile = settings.effectiveDbProfile || getEffectiveDbProfile();
   state.mysqlConfigContent = settings.mysqlConfigContent || "";
-  state.shareLocalSiteSessions = true;
-  state.shareOnlineSiteSessions = true;
+  state.shareLocalSiteSessions = settings.shareLocalSiteSessions !== false;
+  state.shareOnlineSiteSessions = settings.shareOnlineSiteSessions === true;
 
   elements.htdocsPath.value = state.htdocsPath;
   elements.settingsHtdocsPath.value = state.htdocsPath;
@@ -1258,15 +1266,23 @@ function applySettingsPayload(settings) {
 }
 
 async function updateLocalSessionSharing() {
-  const result = await window.desktopAPI.setLocalSessionSharing(true);
+  const enabled = elements.settingsShareLocalSessions.checked;
+  const result = await window.desktopAPI.setLocalSessionSharing(enabled);
   applySettingsPayload(result);
-  setStatus("The browser always uses one persistent session profile.");
+  const message = enabled 
+    ? "All local tabs now share WordPress sign-ins."
+    : "Each local tab has its own isolated session.";
+  setStatus(message);
 }
 
 async function updateOnlineSessionSharing() {
-  const result = await window.desktopAPI.setOnlineSessionSharing(true);
+  const enabled = elements.settingsShareOnlineSessions.checked;
+  const result = await window.desktopAPI.setOnlineSessionSharing(enabled);
   applySettingsPayload(result);
-  setStatus("The browser always uses one persistent session profile.");
+  const message = enabled 
+    ? "Online tabs from the same site now share sessions."
+    : "Each online tab has its own isolated session.";
+  setStatus(message);
 }
 
 async function pickAndSaveXamppRoot() {
