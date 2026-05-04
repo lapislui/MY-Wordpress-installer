@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8">
+    <title>Browser</title>
+    <style>
+      body, html {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+        overflow: hidden;
+        font-family: sans-serif;
+      }
+      #controls {
+        padding: 10px;
+        display: flex;
+        background-color: #f0f0f0;
+        border-bottom: 1px solid #ccc;
+        height: 30px; /* Set a fixed height for the controls */
+      }
+      #location {
+        flex-grow: 1;
+        padding: 5px;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+      }
+      button {
+        padding: 5px 10px;
+        margin-left: 5px;
+        border: 1px solid #ccc;
+        border-radius: 3px;
+        cursor: pointer;
+      }
+      #content {
+        height: calc(100% - 50px);
+        background: #fff;
+      }
+      #source-view {
+        white-space: pre-wrap;
+        padding: 10px;
+        box-sizing: border-box;
+        overflow-y: scroll;
+        background-color: #f5f5f5;
+        height: 100%;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="controls">
+      <button id="back">Back</button>
+      <button id="forward">Forward</button>
+      <button id="reload">Reload</button>
+      <input type="text" id="location" placeholder="Enter a URL" />
+      <button id="go">Go</button>
+      <button id="view-source">View Source</button>
+    </div>
+    <div id="content">
+      <div id="source-view" style="display: none;"></div>
+    </div>
+    <script>
+      const backButton = document.getElementById('back');
+      const forwardButton = document.getElementById('forward');
+      const reloadButton = document.getElementById('reload');
+      const locationInput = document.getElementById('location');
+      const goButton = document.getElementById('go');
+      const viewSourceButton = document.getElementById('view-source');
+      const contentDiv = document.getElementById('content');
+      const sourceView = document.getElementById('source-view');
+
+      function loadUrl() {
+        let url = locationInput.value;
+        if (!url.startsWith('http')) {
+          url = 'http://' + url;
+        }
+        window.electronAPI.navigate(url);
+      }
+
+      backButton.addEventListener('click', () => window.electronAPI.back());
+      forwardButton.addEventListener('click', () => window.electronAPI.forward());
+      reloadButton.addEventListener('click', () => window.electronAPI.reload());
+      goButton.addEventListener('click', loadUrl);
+      locationInput.addEventListener('keypress', (e) => {
+        if (e.key === 'Enter') {
+          loadUrl();
+        }
+      });
+
+      window.electronAPI.onUpdateUrl((url) => {
+        locationInput.value = url;
+      });
+
+      viewSourceButton.addEventListener('click', async () => {
+        const source = await window.electronAPI.toggleSourceView();
+        if (source) {
+          sourceView.textContent = source;
+          sourceView.style.display = 'block';
+          viewSourceButton.textContent = 'View Page';
+        } else {
+          sourceView.style.display = 'none';
+          viewSourceButton.textContent = 'View Source';
+        }
+      });
+    </script>
+  </body>
+</html>

@@ -17,7 +17,10 @@ const state = {
   isEditingAddress: false,
   htdocsPath: "",
   apacheRunning: false,
-  xamppPaths: null
+  xamppPaths: null,
+  googleOAuthClientId: "",
+  googleOAuthScopes: ["openid", "email", "profile"],
+  googleOAuthStatus: null
 };
 
 const progressState = {
@@ -27,11 +30,32 @@ const progressState = {
 };
 
 const uiState = {
-  sidebarCollapsed: false
+  sidebarCollapsed: false,
+  browserFocusMode: false
 };
 
 let browserFeedbackTimer = null;
 let addressSuggestionsToken = 0;
+let draggedBrowserToolSection = null;
+const BROWSER_TOOL_ORDER_KEY = "wp-desktop.browser-tool-order";
+const BROWSER_TOOL_COLLAPSE_KEY = "wp-desktop.browser-tool-collapse";
+const DEFAULT_BROWSER_TOOL_ORDER = ["sessions", "credentials", "bookmarks", "downloads", "permissions"];
+const DEFAULT_BROWSER_TOOL_COLLAPSE = {
+  sessions: false,
+  credentials: false,
+  bookmarks: true,
+  downloads: true,
+  permissions: true
+};
+state.effectiveDbProfile = {
+  host: "127.0.0.1",
+  port: "3306",
+  user: "root",
+  password: ""
+};
+state.mysqlConfigContent = "";
+state.shareLocalSiteSessions = true;
+state.shareOnlineSiteSessions = false;
 
 const elements = {
   appShell: document.getElementById("app-shell"),
@@ -51,7 +75,9 @@ const elements = {
   forwardButton: document.getElementById("forward-button"),
   reloadButton: document.getElementById("reload-button"),
   newTabButton: document.getElementById("new-tab-button"),
+  browserMenuButton: document.getElementById("browser-menu-button"),
   bookmarkPageButton: document.getElementById("bookmark-page-button"),
+  browserFullscreenButton: document.getElementById("browser-fullscreen-button"),
   browserFeedback: document.getElementById("browser-feedback"),
   bookmarkBar: document.getElementById("bookmark-bar"),
   bookmarkContextMenu: document.getElementById("bookmark-context-menu"),
@@ -128,6 +154,7 @@ const elements = {
   settingsPickHtdocsButton: document.getElementById("settings-pick-htdocs-button"),
   settingsXamppRoot: document.getElementById("settings-xampp-root"),
   settingsHtdocsPath: document.getElementById("settings-htdocs-path"),
+  sessionRulesCopy: document.getElementById("session-rules-copy"),
   xamppSettingsNote: document.getElementById("xampp-settings-note"),
   openXamppRootButton: document.getElementById("open-xampp-root-button"),
   openSettingsHtdocsButton: document.getElementById("open-settings-htdocs-button"),
@@ -136,6 +163,18 @@ const elements = {
   settingsApacheConfig: document.getElementById("settings-apache-config"),
   settingsMysqlConfig: document.getElementById("settings-mysql-config"),
   settingsControlPanel: document.getElementById("settings-control-panel"),
+  settingsDbUser: document.getElementById("settings-db-user"),
+  settingsDbPassword: document.getElementById("settings-db-password"),
+  settingsShareLocalSessions: document.getElementById("settings-share-local-sessions"),
+  settingsShareOnlineSessions: document.getElementById("settings-share-online-sessions"),
+  settingsMysqlEditor: document.getElementById("settings-mysql-editor"),
+  saveMysqlConfigButton: document.getElementById("save-mysql-config-button"),
+  settingsGoogleClientId: document.getElementById("settings-google-client-id"),
+  settingsGoogleScopes: document.getElementById("settings-google-scopes"),
+  saveGoogleOAuthButton: document.getElementById("save-google-oauth-button"),
+  googleSigninButton: document.getElementById("google-signin-button"),
+  googleSignoutButton: document.getElementById("google-signout-button"),
+  googleOAuthStatus: document.getElementById("google-oauth-status"),
   settingsPhpExe: document.getElementById("settings-php-exe"),
   settingsPhpConfig: document.getElementById("settings-php-config"),
   settingsPhpMyAdmin: document.getElementById("settings-phpmyadmin"),
@@ -372,8 +411,12 @@ async function openBookmarkSaveDialogForBookmark(bookmark) {
 
 function renderSidebarState() {
   elements.appShell.classList.toggle("sidebar-collapsed", uiState.sidebarCollapsed);
+  elements.appShell.classList.toggle("browser-focus-mode", uiState.browserFocusMode);
   elements.sidebarToggleButton.setAttribute("aria-label", uiState.sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar");
   elements.sidebarToggleButton.querySelector(".sidebar-toggle-glyph").textContent = uiState.sidebarCollapsed ? ">>" : "<<";
+  elements.browserFullscreenButton.setAttribute("aria-label", uiState.browserFocusMode ? "Exit Full Screen" : "Full Screen");
+  elements.browserFullscreenButton.title = uiState.browserFocusMode ? "Exit Full Screen" : "Full Screen";
+  elements.browserFullscreenButton.querySelector(".toolbar-icon-glyph").textContent = uiState.browserFocusMode ? "×" : "⛶";
   syncBrowserLayoutSoon();
 }
 
@@ -383,7 +426,20 @@ function toggleSidebar() {
   renderSidebarState();
 }
 
+function toggleBrowserFocusMode(forceValue) {
+  uiState.browserFocusMode = typeof forceValue === "boolean" ? forceValue : !uiState.browserFocusMode;
+  if (uiState.browserFocusMode && state.vaultOpen) {
+    state.vaultOpen = false;
+    renderVaultPanel();
+  }
+  renderSidebarState();
+}
+
 function showScreen(screenName) {
+  if (screenName !== "browser" && uiState.browserFocusMode) {
+    uiState.browserFocusMode = false;
+  }
+
   elements.navButtons.forEach((button) => {
     button.classList.toggle("active", button.dataset.screen === screenName);
   });
@@ -412,6 +468,8 @@ function showSiteTab(name) {
 elements.siteTabs.forEach((tab) => {
   tab.addEventListener("click", () => showSiteTab(tab.dataset.siteTab));
 });
+
+initBrowserToolSections();
 
 function ensureUrl(input) {
   const raw = input.trim();
@@ -465,12 +523,13 @@ function refreshControls() {
   if (!state.isEditingAddress && !state.addressSuggestions.length) {
     elements.addressInput.value = active?.url || "";
   }
+  const isBookmarked = Boolean(active?.url && state.browser.bookmarks.some((bookmark) => bookmark.url === active.url));
   elements.backButton.disabled = !state.browser.canGoBack;
   elements.forwardButton.disabled = !state.browser.canGoForward;
   elements.bookmarkPageButton.disabled = !active?.url;
-  elements.bookmarkPageButton.textContent = active?.url && state.browser.bookmarks.some((bookmark) => bookmark.url === active.url)
-    ? "Bookmarked"
-    : "Bookmark";
+  elements.bookmarkPageButton.innerHTML = `<span class="toolbar-icon-glyph">${isBookmarked ? "&#x2605;" : "&#x2606;"}</span>`;
+  elements.bookmarkPageButton.title = isBookmarked ? "Bookmarked" : "Bookmark";
+  elements.bookmarkPageButton.setAttribute("aria-label", isBookmarked ? "Bookmarked" : "Bookmark");
   renderBookmarks();
   renderDownloads();
   renderPermissions();
@@ -484,8 +543,66 @@ function renderVaultPanel() {
   syncBrowserLayoutSoon();
 }
 
+async function openBrowserMenu() {
+  const rect = elements.browserMenuButton.getBoundingClientRect();
+  await window.desktopAPI.browserShowAppMenu({
+    x: rect.left,
+    y: rect.bottom + 4
+  });
+}
+
+async function handleBrowserMenuCommand(payload) {
+  const action = payload?.action;
+  if (!action) {
+    return;
+  }
+
+  if (action === "favorites" || action === "downloads" || action === "passwords") {
+    showScreen("browser");
+    state.vaultOpen = true;
+    renderVaultPanel();
+    setBrowserFeedback(
+      action === "downloads"
+        ? "Open Browser Tools to review downloads."
+        : action === "passwords"
+          ? "Open Browser Tools to manage saved passwords."
+          : "Open Browser Tools to manage favorites.",
+      "info"
+    );
+    return;
+  }
+
+  if (action === "settings") {
+    showScreen("settings");
+    return;
+  }
+
+  if (action === "find") {
+    const query = window.prompt("Find on page", "");
+    if (!query?.trim()) {
+      return;
+    }
+
+    const found = await window.desktopAPI.browserFindInPage(query.trim());
+    if (!found) {
+      setBrowserFeedback("Could not search the current page.", "error");
+    }
+    return;
+  }
+
+}
+
 function formatPathValue(value) {
   return value || "Not found";
+}
+
+function getEffectiveDbProfile() {
+  return state.effectiveDbProfile || {
+    host: "127.0.0.1",
+    port: "3306",
+    user: "root",
+    password: ""
+  };
 }
 
 function bindSettingsPath(labelElement, buttonElement, targetPath) {
@@ -509,9 +626,192 @@ function renderXamppSettings() {
   bindSettingsPath(elements.settingsApacheConfig, elements.openApacheConfigButton, paths.apacheConfigPath);
   bindSettingsPath(elements.settingsMysqlConfig, elements.openMysqlConfigButton, paths.mysqlConfigPath);
   bindSettingsPath(elements.settingsControlPanel, elements.openControlPanelButton, paths.controlPanelPath);
+  elements.settingsDbUser.value = getEffectiveDbProfile().user || "root";
+  elements.settingsDbPassword.value = getEffectiveDbProfile().password || "";
+  elements.settingsMysqlEditor.value = state.mysqlConfigContent || "";
+  elements.settingsMysqlEditor.readOnly = !paths.mysqlConfigPath;
+  elements.saveMysqlConfigButton.disabled = !paths.mysqlConfigPath;
   bindSettingsPath(elements.settingsPhpExe, elements.openPhpExeButton, paths.phpExecutablePath);
   bindSettingsPath(elements.settingsPhpConfig, elements.openPhpConfigButton, paths.phpConfigPath);
   bindSettingsPath(elements.settingsPhpMyAdmin, elements.openPhpMyAdminFolderButton, paths.phpMyAdminPath);
+}
+
+function renderSessionRules() {
+  if (elements.settingsShareLocalSessions) {
+    elements.settingsShareLocalSessions.checked = state.shareLocalSiteSessions !== false;
+  }
+  if (elements.settingsShareOnlineSessions) {
+    elements.settingsShareOnlineSessions.checked = state.shareOnlineSiteSessions === true;
+  }
+
+  if (!elements.sessionRulesCopy) {
+    return;
+  }
+
+  const localCopy = state.shareLocalSiteSessions === false
+    ? "Local tabs are isolated."
+    : "Local sites share their login across tabs.";
+  const onlineCopy = state.shareOnlineSiteSessions === true
+    ? "Online tabs from the same site share one session too."
+    : "Online tabs stay isolated per tab.";
+  elements.sessionRulesCopy.textContent = `${localCopy} ${onlineCopy}`;
+}
+
+function renderGoogleOAuthSettings() {
+  if (elements.settingsGoogleClientId) {
+    elements.settingsGoogleClientId.value = state.googleOAuthClientId || "";
+  }
+  if (elements.settingsGoogleScopes) {
+    elements.settingsGoogleScopes.value = (state.googleOAuthScopes || ["openid", "email", "profile"]).join(" ");
+  }
+
+  const oauthStatus = state.googleOAuthStatus || null;
+  const connected = Boolean(oauthStatus?.connected);
+  const statusText = connected
+    ? `Connected as ${oauthStatus.name || oauthStatus.email || "Google account"}${oauthStatus.hasRefreshToken ? " with offline access." : "."}`
+    : "Not connected.";
+
+  if (elements.googleOAuthStatus) {
+    elements.googleOAuthStatus.textContent = statusText;
+  }
+  if (elements.googleSignoutButton) {
+    elements.googleSignoutButton.disabled = !connected;
+  }
+}
+
+function getBrowserToolSections() {
+  return Array.from(document.querySelectorAll(".browser-tool-section[data-tool-section]"));
+}
+
+function readBrowserToolPrefs(key, fallback) {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) {
+      return fallback;
+    }
+
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function writeBrowserToolPrefs(key, value) {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch (_) {
+    // Ignore renderer preference persistence failures.
+  }
+}
+
+function saveBrowserToolOrder() {
+  const order = getBrowserToolSections().map((section) => section.dataset.toolSection);
+  writeBrowserToolPrefs(BROWSER_TOOL_ORDER_KEY, order);
+}
+
+function saveBrowserToolCollapseState() {
+  const collapsed = Object.fromEntries(
+    getBrowserToolSections().map((section) => [section.dataset.toolSection, section.classList.contains("collapsed")])
+  );
+  writeBrowserToolPrefs(BROWSER_TOOL_COLLAPSE_KEY, collapsed);
+}
+
+function applyBrowserToolSectionPrefs() {
+  const panel = elements.vaultPanel;
+  if (!panel) {
+    return;
+  }
+
+  const order = readBrowserToolPrefs(BROWSER_TOOL_ORDER_KEY, DEFAULT_BROWSER_TOOL_ORDER);
+  const collapsed = readBrowserToolPrefs(BROWSER_TOOL_COLLAPSE_KEY, DEFAULT_BROWSER_TOOL_COLLAPSE);
+  const sectionMap = new Map(getBrowserToolSections().map((section) => [section.dataset.toolSection, section]));
+
+  order.forEach((id) => {
+    const section = sectionMap.get(id);
+    if (section) {
+      panel.appendChild(section);
+    }
+  });
+
+  getBrowserToolSections().forEach((section) => {
+    section.classList.toggle("collapsed", Boolean(collapsed[section.dataset.toolSection]));
+  });
+}
+
+function toggleBrowserToolSection(section) {
+  section.classList.toggle("collapsed");
+  saveBrowserToolCollapseState();
+}
+
+function findBrowserToolDropTarget(pointerY, currentSection) {
+  const sections = getBrowserToolSections().filter((section) => section !== currentSection);
+
+  for (const section of sections) {
+    const rect = section.getBoundingClientRect();
+    if (pointerY < rect.top + rect.height / 2) {
+      return { section, position: "before" };
+    }
+  }
+
+  return { section: sections.at(-1) || null, position: "after" };
+}
+
+function initBrowserToolSections() {
+  getBrowserToolSections().forEach((section) => {
+    const toggleButton = section.querySelector("[data-tool-toggle]");
+    toggleButton?.addEventListener("click", (event) => {
+      if (event.target.closest(".browser-tool-drag")) {
+        return;
+      }
+
+      toggleBrowserToolSection(section);
+    });
+
+    section.addEventListener("dragstart", (event) => {
+      draggedBrowserToolSection = section;
+      section.classList.add("dragging");
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", section.dataset.toolSection || "");
+      }
+    });
+
+    section.addEventListener("dragend", () => {
+      draggedBrowserToolSection?.classList.remove("dragging");
+      draggedBrowserToolSection = null;
+      saveBrowserToolOrder();
+    });
+
+    section.addEventListener("dragover", (event) => {
+      if (!draggedBrowserToolSection || draggedBrowserToolSection === section) {
+        return;
+      }
+
+      event.preventDefault();
+      const target = findBrowserToolDropTarget(event.clientY, draggedBrowserToolSection);
+      if (!target.section) {
+        return;
+      }
+
+      if (target.position === "before") {
+        target.section.before(draggedBrowserToolSection);
+      } else {
+        target.section.after(draggedBrowserToolSection);
+      }
+    });
+
+    section.addEventListener("drop", (event) => {
+      if (!draggedBrowserToolSection) {
+        return;
+      }
+
+      event.preventDefault();
+      saveBrowserToolOrder();
+    });
+  });
+
+  applyBrowserToolSectionPrefs();
 }
 
 function setCreateProgress(active, message = "Preparing files, database, and local site records...") {
@@ -738,9 +1038,9 @@ function renderBrowserTabs() {
 
   state.browser.tabs.forEach((tab) => {
     const button = document.createElement("button");
-    button.className = `tab-button${tab.id === state.browser.activeTabId ? " active" : ""}`;
+    button.className = `tab-button${tab.id === state.browser.activeTabId ? " active" : ""}${tab.pinned ? " pinned" : ""}`;
     button.innerHTML = `
-      <span class="tab-title">${tab.title || tab.url}</span>
+      <span class="tab-title">${tab.pinned ? "[Pin] " : ""}${tab.title || tab.url}${tab.muted ? " [Muted]" : ""}</span>
       <span class="tab-close" data-close="${tab.id}">x</span>
     `;
 
@@ -753,6 +1053,15 @@ function renderBrowserTabs() {
       window.desktopAPI.browserActivateTab(tab.id);
     });
 
+    button.addEventListener("contextmenu", async (event) => {
+      event.preventDefault();
+      try {
+        await window.desktopAPI.browserShowTabContextMenu(tab.id);
+      } catch (error) {
+        setBrowserFeedback(`Tab menu failed: ${error.message}`, "error");
+      }
+    });
+
     elements.tabStrip.appendChild(button);
   });
 
@@ -763,30 +1072,73 @@ function renderBrowserOverlay() {
   const active = getActiveBrowserTab();
   elements.browserOverlay.innerHTML = "";
 
-  if (!active?.error) {
+  if (!active) {
+    syncBrowserLayoutSoon();
+    return;
+  }
+
+  if (!active.error && active.isLoading) {
+    const overlay = document.createElement("div");
+    overlay.className = "browser-loading-card";
+    overlay.innerHTML = `
+      <div class="browser-loading-spinner" aria-hidden="true"></div>
+      <div class="browser-loading-copy">
+        <strong>Loading page</strong>
+        <span>${active.url || "Please wait..."}</span>
+      </div>
+    `;
+    elements.browserOverlay.appendChild(overlay);
+    syncBrowserLayoutSoon();
+    return;
+  }
+
+  if (!active.error) {
     syncBrowserLayoutSoon();
     return;
   }
 
   const overlay = document.createElement("div");
   overlay.className = "browser-error-card";
-  overlay.innerHTML = `
-    <span class="eyebrow">Local site error</span>
-    <h3>Could not open this local site</h3>
-    <p><strong>URL:</strong> ${active.error.url}</p>
-    <p><strong>Reason:</strong> ${active.error.description}</p>
-    <div class="button-row compact">
-      <button type="button" id="browser-error-retry">Retry</button>
-      <button type="button" id="browser-error-open-installer">Open Installer</button>
-    </div>
-  `;
+  if (active.error.type === "google_auth_blocked") {
+    overlay.innerHTML = `
+      <span class="eyebrow">Google sign-in</span>
+      <h3>Google requires sign-in in your default browser</h3>
+      <p><strong>URL:</strong> ${active.error.url}</p>
+      <p><strong>Reason:</strong> ${active.error.description}</p>
+      <div class="button-row compact">
+        <button type="button" id="browser-google-continue">Continue with Google</button>
+        <button type="button" id="browser-google-close">Close tab</button>
+      </div>
+    `;
 
-  overlay.querySelector("#browser-error-retry").addEventListener("click", () => {
-    window.desktopAPI.browserReload();
-  });
-  overlay.querySelector("#browser-error-open-installer").addEventListener("click", () => {
-    showScreen("installer");
-  });
+    overlay.querySelector("#browser-google-continue").addEventListener("click", async () => {
+      const openedUrl = await window.desktopAPI.browserContinueGoogleSignin(active.error.url);
+      setBrowserFeedback(`Opened Google sign-in in your default browser: ${openedUrl}`, "info");
+    });
+    overlay.querySelector("#browser-google-close").addEventListener("click", () => {
+      if (active.id) {
+        window.desktopAPI.browserCloseTab(active.id);
+      }
+    });
+  } else {
+    overlay.innerHTML = `
+      <span class="eyebrow">Local site error</span>
+      <h3>Could not open this local site</h3>
+      <p><strong>URL:</strong> ${active.error.url}</p>
+      <p><strong>Reason:</strong> ${active.error.description}</p>
+      <div class="button-row compact">
+        <button type="button" id="browser-error-retry">Retry</button>
+        <button type="button" id="browser-error-open-installer">Open Installer</button>
+      </div>
+    `;
+
+    overlay.querySelector("#browser-error-retry").addEventListener("click", () => {
+      window.desktopAPI.browserReload();
+    });
+    overlay.querySelector("#browser-error-open-installer").addEventListener("click", () => {
+      showScreen("installer");
+    });
+  }
 
   elements.browserOverlay.appendChild(overlay);
   syncBrowserLayoutSoon();
@@ -915,10 +1267,11 @@ function renderSiteDetails() {
   elements.detailPhpVersion.textContent = site.phpVersion || "-";
   elements.detailDbVersion.textContent = site.databaseVersion || "-";
   elements.detailWordpressVersion.textContent = site.wordpressVersion || "-";
-  elements.dbHost.value = site.dbHost || elements.dbHost.value || "127.0.0.1";
-  elements.dbPort.value = site.dbPort || elements.dbPort.value || "3306";
-  elements.dbUser.value = site.dbUser || elements.dbUser.value || "root";
-  elements.dbPassword.value = site.dbPassword ?? elements.dbPassword.value ?? "";
+  const effectiveDbProfile = getEffectiveDbProfile();
+  elements.dbHost.value = effectiveDbProfile.host || "127.0.0.1";
+  elements.dbPort.value = effectiveDbProfile.port || "3306";
+  elements.dbUser.value = effectiveDbProfile.user || "root";
+  elements.dbPassword.value = effectiveDbProfile.password || "";
   elements.backupSiteButton.disabled = progressState.backingUp || progressState.deleting;
   elements.deleteSiteButton.disabled = progressState.deleting;
   elements.overviewEmptyCard.classList.add("hidden");
@@ -945,6 +1298,19 @@ function applySettingsPayload(settings) {
   state.apacheRunning = Boolean(settings.apacheRunning);
   state.browser.downloadDirectory = settings.downloadDirectory || state.browser.downloadDirectory || "";
   state.xamppPaths = settings.xamppPaths || null;
+  state.effectiveDbProfile = settings.effectiveDbProfile || getEffectiveDbProfile();
+  state.mysqlConfigContent = settings.mysqlConfigContent || "";
+  state.shareLocalSiteSessions = settings.shareLocalSiteSessions !== false;
+  state.shareOnlineSiteSessions = settings.shareOnlineSiteSessions === true;
+  if (Object.prototype.hasOwnProperty.call(settings, "googleOAuthClientId")) {
+    state.googleOAuthClientId = settings.googleOAuthClientId || "";
+  }
+  if (Object.prototype.hasOwnProperty.call(settings, "googleOAuthScopes")) {
+    state.googleOAuthScopes = settings.googleOAuthScopes || ["openid", "email", "profile"];
+  }
+  if (Object.prototype.hasOwnProperty.call(settings, "googleOAuthStatus")) {
+    state.googleOAuthStatus = settings.googleOAuthStatus || null;
+  }
 
   elements.htdocsPath.value = state.htdocsPath;
   elements.settingsHtdocsPath.value = state.htdocsPath;
@@ -954,6 +1320,31 @@ function applySettingsPayload(settings) {
   }
 
   renderXamppSettings();
+  renderSessionRules();
+  renderGoogleOAuthSettings();
+  renderSiteDetails();
+}
+
+async function updateLocalSessionSharing() {
+  const enabled = elements.settingsShareLocalSessions.checked;
+  const result = await window.desktopAPI.setLocalSessionSharing(enabled);
+  applySettingsPayload(result);
+  setStatus(
+    enabled
+      ? "Local tabs now share their session. Opened local tabs keep their current session until reloaded or reopened."
+      : "Local tab isolation enabled. New local tabs will use their own session."
+  );
+}
+
+async function updateOnlineSessionSharing() {
+  const enabled = elements.settingsShareOnlineSessions.checked;
+  const result = await window.desktopAPI.setOnlineSessionSharing(enabled);
+  applySettingsPayload(result);
+  setStatus(
+    enabled
+      ? "Online tabs from the same site now share their session. Existing tabs keep their current session until reloaded or reopened."
+      : "Online tab isolation enabled. New online tabs will use their own session."
+  );
 }
 
 async function pickAndSaveXamppRoot() {
@@ -964,13 +1355,6 @@ async function pickAndSaveXamppRoot() {
 
   const result = await window.desktopAPI.setXamppRootPath(selected);
   applySettingsPayload(result);
-
-  if (result.detectedDbProfile) {
-    elements.dbHost.value = result.detectedDbProfile.host || "127.0.0.1";
-    elements.dbPort.value = result.detectedDbProfile.port || "3306";
-    elements.dbUser.value = result.detectedDbProfile.user || "root";
-    elements.dbPassword.value = result.detectedDbProfile.password || "";
-  }
 
   await refreshSites();
   setStatus("Updated XAMPP root path.");
@@ -985,13 +1369,6 @@ async function pickAndSaveHtdocsPath() {
   const result = await window.desktopAPI.setHtdocsPath(selected);
   applySettingsPayload(result);
 
-  if (result.detectedDbProfile) {
-    elements.dbHost.value = result.detectedDbProfile.host || "127.0.0.1";
-    elements.dbPort.value = result.detectedDbProfile.port || "3306";
-    elements.dbUser.value = result.detectedDbProfile.user || "root";
-    elements.dbPassword.value = result.detectedDbProfile.password || "";
-  }
-
   await refreshSites();
   setStatus("Updated XAMPP htdocs path.");
 }
@@ -1003,6 +1380,60 @@ async function openExistingPath(targetPath, emptyMessage) {
   }
 
   await window.desktopAPI.openPath(targetPath);
+}
+
+async function saveMysqlConfigFromSettings() {
+  setStatus("Saving MySQL settings...");
+
+  try {
+    const result = await window.desktopAPI.saveMysqlConfig({
+      dbUser: elements.settingsDbUser.value,
+      dbPassword: elements.settingsDbPassword.value,
+      content: elements.settingsMysqlEditor.value
+    });
+
+    applySettingsPayload(result);
+    setStatus("Saved MySQL config and DB credentials.");
+  } catch (error) {
+    setStatus(`Saving MySQL config failed: ${error.message}`);
+  }
+}
+
+async function saveGoogleOAuthConfigFromSettings() {
+  try {
+    const result = await window.desktopAPI.saveGoogleOAuthConfig({
+      clientId: elements.settingsGoogleClientId.value,
+      scopes: elements.settingsGoogleScopes.value
+    });
+    applySettingsPayload(result);
+    setStatus("Saved Google OAuth settings.");
+  } catch (error) {
+    setStatus(`Saving Google OAuth settings failed: ${error.message}`);
+  }
+}
+
+async function beginGoogleSigninFromSettings() {
+  try {
+    setStatus("Opening Google sign-in in your default browser...");
+    await saveGoogleOAuthConfigFromSettings();
+    const status = await window.desktopAPI.beginGoogleSignin();
+    state.googleOAuthStatus = status;
+    renderGoogleOAuthSettings();
+    setStatus(`Google connected as ${status.name || status.email || "your account"}.`);
+  } catch (error) {
+    setStatus(`Google sign-in failed: ${error.message}`);
+  }
+}
+
+async function signOutGoogleFromSettings() {
+  try {
+    const status = await window.desktopAPI.signOutGoogle();
+    state.googleOAuthStatus = status;
+    renderGoogleOAuthSettings();
+    setStatus("Signed out of Google in WP Desktop.");
+  } catch (error) {
+    setStatus(`Google sign-out failed: ${error.message}`);
+  }
 }
 
 async function saveCurrentSiteCredentials() {
@@ -1100,13 +1531,14 @@ async function deleteSelectedSite() {
   showSiteTab("tools");
 
   try {
+    const effectiveDbProfile = getEffectiveDbProfile();
     await window.desktopAPI.deleteSite({
       site,
       database: {
-        host: elements.dbHost.value,
-        port: elements.dbPort.value,
-        user: elements.dbUser.value,
-        password: elements.dbPassword.value
+        host: effectiveDbProfile.host,
+        port: effectiveDbProfile.port,
+        user: effectiveDbProfile.user,
+        password: effectiveDbProfile.password
       }
     });
     if (state.selectedSiteId === site.id) {
@@ -1142,14 +1574,15 @@ async function backupSelectedSite() {
   setStatus(`Creating backup for ${site.name}...`);
 
   try {
+    const effectiveDbProfile = getEffectiveDbProfile();
     const result = await window.desktopAPI.backupSite({
       site,
       savePath,
       database: {
-        host: elements.dbHost.value,
-        port: elements.dbPort.value,
-        user: elements.dbUser.value,
-        password: elements.dbPassword.value
+        host: effectiveDbProfile.host,
+        port: effectiveDbProfile.port,
+        user: effectiveDbProfile.user,
+        password: effectiveDbProfile.password
       }
     });
     setStatus(`Backup saved to ${result.savePath}.`);
@@ -1164,10 +1597,12 @@ async function backupSelectedSite() {
 elements.newTabButton.addEventListener("click", () => {
   window.desktopAPI.browserCreateTab({ url: "https://www.google.com", mode: "auto" });
 });
+elements.browserMenuButton.addEventListener("click", () => void openBrowserMenu());
 elements.vaultToggleButton.addEventListener("click", () => {
   state.vaultOpen = !state.vaultOpen;
   renderVaultPanel();
 });
+elements.browserFullscreenButton.addEventListener("click", () => toggleBrowserFocusMode());
 elements.addressForm.addEventListener("submit", (event) => {
   event.preventDefault();
   if (state.activeAddressSuggestionIndex >= 0 && state.addressSuggestions.length) {
@@ -1271,6 +1706,12 @@ elements.openApacheConfigButton.addEventListener("click", () =>
 elements.openMysqlConfigButton.addEventListener("click", () =>
   void openExistingPath(state.xamppPaths?.mysqlConfigPath, "MySQL config file was not found.")
 );
+elements.settingsShareLocalSessions.addEventListener("change", () => void updateLocalSessionSharing());
+elements.settingsShareOnlineSessions.addEventListener("change", () => void updateOnlineSessionSharing());
+elements.saveMysqlConfigButton.addEventListener("click", () => void saveMysqlConfigFromSettings());
+elements.saveGoogleOAuthButton.addEventListener("click", () => void saveGoogleOAuthConfigFromSettings());
+elements.googleSigninButton.addEventListener("click", () => void beginGoogleSigninFromSettings());
+elements.googleSignoutButton.addEventListener("click", () => void signOutGoogleFromSettings());
 elements.openControlPanelButton.addEventListener("click", () =>
   void openExistingPath(state.xamppPaths?.controlPanelPath, "XAMPP control panel was not found.")
 );
@@ -1309,12 +1750,8 @@ document.getElementById("test-db-button").addEventListener("click", async () => 
   setStatus("Testing MySQL connection...");
 
   try {
-    const result = await window.desktopAPI.testDb({
-      host: elements.dbHost.value,
-      port: elements.dbPort.value,
-      user: elements.dbUser.value,
-      password: elements.dbPassword.value
-    });
+    const effectiveDbProfile = getEffectiveDbProfile();
+    const result = await window.desktopAPI.testDb(effectiveDbProfile);
     setStatus(`Connected. MySQL ${result.version}`);
     elements.detailDbVersion.textContent = result.version;
   } catch (error) {
@@ -1332,30 +1769,18 @@ elements.installButton.addEventListener("click", async () => {
   setCreateProgress(true);
 
   try {
-    if (elements.saveDbProfile.checked) {
-      setCreateProgress(true, "Saving database profile...");
-      await window.desktopAPI.saveInstallerDbProfile({
-        host: elements.dbHost.value,
-        port: elements.dbPort.value,
-        user: elements.dbUser.value,
-        password: elements.dbPassword.value
-      });
-    } else {
-      setCreateProgress(true, "Clearing saved database profile...");
-      await window.desktopAPI.clearInstallerDbProfile();
-    }
-
     setCreateProgress(true, "Extracting WordPress files and preparing the local database...");
+    const effectiveDbProfile = getEffectiveDbProfile();
     const result = await window.desktopAPI.installWordPress({
       zipPath: elements.zipPath.value,
       basePath: elements.basePath.value,
       folderName: elements.folderName.value,
       database: {
         create: elements.createDb.checked,
-        host: elements.dbHost.value,
-        port: elements.dbPort.value,
-        user: elements.dbUser.value,
-        password: elements.dbPassword.value
+        host: effectiveDbProfile.host,
+        port: effectiveDbProfile.port,
+        user: effectiveDbProfile.user,
+        password: effectiveDbProfile.password
       }
     });
 
@@ -1390,6 +1815,12 @@ window.desktopAPI.onBrowserState((payload) => {
   refreshControls();
 });
 
+window.desktopAPI.onBrowserNotice((payload) => {
+  if (payload?.message) {
+    setBrowserFeedback(payload.message, payload.type || "info");
+  }
+});
+
 window.desktopAPI.onBrowserDownloadComplete((payload) => {
   if (payload?.filename) {
     setStatus(`Download complete: ${payload.filename}`);
@@ -1417,6 +1848,10 @@ window.desktopAPI.onBrowserFocus(() => {
   showScreen("browser");
 });
 
+window.desktopAPI.onBrowserMenuCommand((payload) => {
+  void handleBrowserMenuCommand(payload);
+});
+
 window.desktopAPI.onSitesChanged(() => {
   void refreshSites();
 });
@@ -1424,23 +1859,8 @@ window.desktopAPI.onSitesChanged(() => {
 async function loadSavedState() {
   const settings = await window.desktopAPI.getSettings();
   applySettingsPayload(settings);
-
-  const dbProfile = await window.desktopAPI.getInstallerDbProfile();
-  const detectedDbProfile = settings.detectedDbProfile || null;
-  const explicitSavedProfile = dbProfile && !(
-    (dbProfile.host || "127.0.0.1") === "127.0.0.1" &&
-    String(dbProfile.port || "3306") === "3306" &&
-    (dbProfile.user || "root") === "root" &&
-    (dbProfile.password || "") === ""
-  );
-  const effectiveDbProfile = explicitSavedProfile ? dbProfile : detectedDbProfile || dbProfile;
-
-  if (effectiveDbProfile) {
-    elements.dbHost.value = effectiveDbProfile.host || "127.0.0.1";
-    elements.dbPort.value = effectiveDbProfile.port || "3306";
-    elements.dbUser.value = effectiveDbProfile.user || "root";
-    elements.dbPassword.value = effectiveDbProfile.password || "";
-  }
+  elements.saveDbProfile.checked = false;
+  elements.saveDbProfile.disabled = true;
 
   const vaultInfo = await window.desktopAPI.getVaultInfo();
   setStatus(

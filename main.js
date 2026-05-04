@@ -1,6 +1,8 @@
 const path = require("path");
 const fs = require("fs");
 const net = require("net");
+const http = require("http");
+const crypto = require("crypto");
 const { spawn } = require("child_process");
 const {
   app,
@@ -83,7 +85,8 @@ function getBrowserHistoryPath() {
 function getDefaultVault() {
   return {
     installerDb: null,
-    siteCredentials: {}
+    siteCredentials: {},
+    googleOAuth: null
   };
 }
 
@@ -103,7 +106,8 @@ function getVault() {
 
     return {
       installerDb: parsed.installerDb || null,
-      siteCredentials: parsed.siteCredentials || {}
+      siteCredentials: parsed.siteCredentials || {},
+      googleOAuth: parsed.googleOAuth || null
     };
   } catch (_) {
     return getDefaultVault();
@@ -153,6 +157,17 @@ function getBrowserHistory() {
 
 function saveBrowserHistory(entries) {
   fs.writeFileSync(getBrowserHistoryPath(), JSON.stringify(entries.slice(0, 250), null, 2));
+}
+
+function clearBrowserHistory() {
+  try {
+    const historyPath = getBrowserHistoryPath();
+    if (fs.existsSync(historyPath)) {
+      fs.unlinkSync(historyPath);
+    }
+  } catch (_) {
+    // Ignore cleanup failures.
+  }
 }
 
 function getDefaultHtdocsPath() {
@@ -239,6 +254,42 @@ function getXamppPathsSummary(settings) {
   };
 }
 
+function parseMysqlConfigProfile(source) {
+  const text = String(source || "");
+  const portMatch = text.match(/^\s*port\s*=\s*(\d+)\s*$/im);
+  const bindAddressMatch = text.match(/^\s*bind-address\s*=\s*([^\s#;]+)\s*$/im);
+  const rawHost = (bindAddressMatch?.[1] || "").trim();
+  const host = !rawHost || rawHost === "0.0.0.0" || rawHost === "::" || rawHost === "*"
+    ? "127.0.0.1"
+    : rawHost;
+
+  return {
+    host,
+    port: portMatch?.[1] || "3306"
+  };
+}
+
+function readMysqlConfigContent(settings) {
+  const mysqlConfigPath = getXamppPathsSummary(settings).mysqlConfigPath;
+  if (!mysqlConfigPath || !fs.existsSync(mysqlConfigPath)) {
+    return "";
+  }
+
+  return fs.readFileSync(mysqlConfigPath, "utf8");
+}
+
+function getEffectiveDbProfile(settings = getSettings()) {
+  const mysqlConfigContent = readMysqlConfigContent(settings);
+  const parsed = parseMysqlConfigProfile(mysqlConfigContent);
+
+  return {
+    host: parsed.host || "127.0.0.1",
+    port: String(parsed.port || "3306"),
+    user: settings.dbUser || "root",
+    password: settings.dbPassword || ""
+  };
+}
+
 function detectXamppDbProfile(htdocsPath) {
   const xamppRoot = getXamppRootFromHtdocs(htdocsPath);
   if (!xamppRoot) {
@@ -257,10 +308,10 @@ function detectXamppDbProfile(htdocsPath) {
     }
 
     const source = fs.readFileSync(configPath, "utf8");
-    const portMatch = source.match(/^\s*port\s*=\s*(\d+)\s*$/im);
+    const parsed = parseMysqlConfigProfile(source);
     return {
-      host: "127.0.0.1",
-      port: portMatch?.[1] || "3306",
+      host: parsed.host || "127.0.0.1",
+      port: parsed.port || "3306",
       user: "root",
       password: ""
     };
@@ -291,6 +342,16 @@ function getDefaultSettings() {
   return {
     xamppRootPath: getDefaultXamppRootPath(),
     htdocsPath: getDefaultHtdocsPath(),
+    dbUser: "root",
+    dbPassword: "",
+    googleOAuthClientId: "",
+    googleOAuthScopes: [
+      "openid",
+      "email",
+      "profile"
+    ],
+    shareLocalSiteSessions: true,
+    shareOnlineSiteSessions: false,
     downloadDirectory: app.getPath("downloads"),
     browserPermissions: {},
     browserBookmarks: [],
@@ -325,6 +386,14 @@ function normalizeSettings(input = {}) {
   return {
     xamppRootPath: input.xamppRootPath || getXamppRootFromHtdocs(input.htdocsPath || "") || getDefaultXamppRootPath(),
     htdocsPath: input.htdocsPath || (input.xamppRootPath ? path.join(input.xamppRootPath, "htdocs") : getDefaultHtdocsPath()),
+    dbUser: String(input.dbUser || "root").trim() || "root",
+    dbPassword: input.dbPassword ?? "",
+    googleOAuthClientId: String(input.googleOAuthClientId || "").trim(),
+    googleOAuthScopes: Array.isArray(input.googleOAuthScopes)
+      ? input.googleOAuthScopes.map((scope) => String(scope || "").trim()).filter(Boolean)
+      : ["openid", "email", "profile"],
+    shareLocalSiteSessions: input.shareLocalSiteSessions !== false,
+    shareOnlineSiteSessions: input.shareOnlineSiteSessions === true,
     downloadDirectory: input.downloadDirectory || app.getPath("downloads"),
     browserPermissions: permissions,
     browserBookmarks: bookmarks,
@@ -539,8 +608,16 @@ function getPartitionForUrl(url, tabId, mode = "auto") {
   try {
     const parsed = new URL(url);
     const isLocal = ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname);
+    const settings = getSettings();
     if (isLocal) {
+      if (settings.shareLocalSiteSessions === false) {
+        return `isolated-${tabId}`;
+      }
       return `persist:local-${parsed.origin.replace(/[^a-z0-9]/gi, "-").toLowerCase()}`;
+    }
+
+    if (settings.shareOnlineSiteSessions === true) {
+      return `persist:remote-${parsed.origin.replace(/[^a-z0-9]/gi, "-").toLowerCase()}`;
     }
   } catch (_) {
     return `isolated-${tabId}`;
@@ -1109,7 +1186,7 @@ async function backupSiteResources(payload) {
   }
 
   const wpConfig = parseWpConfig(resolvedSitePath) || {};
-  const detectedDb = detectXamppDbProfile(getResolvedHtdocsPath(settings));
+  const detectedDb = getEffectiveDbProfile(settings);
   const dbName = sanitizeDbName(
     wpConfig.dbName || site.dbName || site.name || path.basename(resolvedSitePath)
   );
@@ -1200,7 +1277,7 @@ async function deleteSiteResources(payload) {
 
   const installerDb = getVault().installerDb || {};
   const wpConfig = parseWpConfig(resolvedSitePath) || {};
-  const detectedDb = detectXamppDbProfile(getResolvedHtdocsPath(settings));
+  const detectedDb = getEffectiveDbProfile(settings);
   const dbName = sanitizeDbName(
     wpConfig.dbName || site.dbName || site.name || path.basename(resolvedSitePath)
   );
@@ -1347,7 +1424,8 @@ function getBrowserState(win) {
       attachedTabId: null,
       browserBounds: null,
       browserVisible: false,
-      downloads: []
+      downloads: [],
+      closedTabs: []
     });
   }
 
@@ -1497,9 +1575,13 @@ function serializeBrowserState(state) {
   return {
     tabs: state.tabs.map((tab) => ({
       id: tab.id,
-      title: tab.title || tab.url,
+      title: tab.nickname || tab.title || tab.url,
       url: tab.url,
-      error: tab.error || null
+      isLoading: Boolean(tab.isLoading),
+      error: tab.error || null,
+      pinned: Boolean(tab.pinned),
+      muted: Boolean(tab.muted),
+      nickname: tab.nickname || ""
     })),
     activeTabId: state.activeTabId,
     canGoBack: navigation ? navigation.canGoBack() : false,
@@ -1551,6 +1633,22 @@ function emitBrowserState(win) {
   win.webContents.send("browser:state", serializeBrowserState(getBrowserState(win)));
 }
 
+function emitBrowserNotice(win, payload) {
+  if (!win || win.isDestroyed()) {
+    return;
+  }
+
+  win.webContents.send("browser:notice", payload);
+}
+
+function emitBrowserMenuCommand(win, payload) {
+  if (!win || win.isDestroyed()) {
+    return;
+  }
+
+  win.webContents.send("browser:menu-command", payload);
+}
+
 function emitSitesChanged(win) {
   if (!win || win.isDestroyed()) {
     return;
@@ -1561,6 +1659,11 @@ function emitSitesChanged(win) {
 
 function findTabByWebContents(win, webContents) {
   return getBrowserState(win).tabs.find((tab) => tab.view.webContents === webContents) || null;
+}
+
+function getActiveBrowserTab(win) {
+  const state = getBrowserState(win);
+  return state.tabs.find((tab) => tab.id === state.activeTabId) || null;
 }
 
 function attachDownloadTracking(win, browserSession) {
@@ -1799,6 +1902,419 @@ function showBookmarkContextMenu(win, bookmark, showBookmarksBar) {
   ]);
 
   menu.popup({ window: win });
+}
+
+function findTabById(win, tabId) {
+  return getBrowserState(win).tabs.find((tab) => tab.id === tabId) || null;
+}
+
+function snapshotClosedTab(tab) {
+  return {
+    url: tab.url,
+    mode: tab.mode || "auto",
+    nickname: tab.nickname || "",
+    pinned: Boolean(tab.pinned),
+    muted: Boolean(tab.muted)
+  };
+}
+
+function isGoogleSignInRejectedUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname.toLowerCase() === "accounts.google.com" && parsed.pathname.toLowerCase().includes("/signin/rejected");
+  } catch (_) {
+    return false;
+  }
+}
+
+function getGoogleSignInHandoffUrl(url) {
+  const fallbackUrl = "https://accounts.google.com/ServiceLogin";
+
+  try {
+    const parsed = new URL(url);
+    if (!isGoogleSignInRejectedUrl(url)) {
+      return parsed.toString();
+    }
+
+    const continueTarget = parsed.searchParams.get("continue") || "";
+    const flowEntry = parsed.searchParams.get("flowEntry") || "ServiceLogin";
+    const flowName = parsed.searchParams.get("flowName") || "GlifWebSignIn";
+    const hl = parsed.searchParams.get("hl") || "";
+
+    const handoffUrl = new URL(fallbackUrl);
+    if (/^https?:\/\//i.test(continueTarget)) {
+      handoffUrl.searchParams.set("continue", continueTarget);
+    }
+    handoffUrl.searchParams.set("flowEntry", flowEntry);
+    handoffUrl.searchParams.set("flowName", flowName);
+    if (hl) {
+      handoffUrl.searchParams.set("hl", hl);
+    }
+
+    return handoffUrl.toString();
+  } catch (_) {
+    return fallbackUrl;
+  }
+}
+
+function normalizeGoogleScopes(input) {
+  const rawScopes = Array.isArray(input)
+    ? input
+    : String(input || "")
+        .split(/[\s,]+/)
+        .map((value) => value.trim())
+        .filter(Boolean);
+
+  const scopes = Array.from(new Set(rawScopes));
+  if (!scopes.includes("openid")) {
+    scopes.unshift("openid");
+  }
+  if (!scopes.includes("email")) {
+    scopes.push("email");
+  }
+  if (!scopes.includes("profile")) {
+    scopes.push("profile");
+  }
+  return scopes;
+}
+
+function getGoogleOAuthConfig(settings = getSettings()) {
+  return {
+    clientId: String(settings.googleOAuthClientId || "").trim(),
+    scopes: normalizeGoogleScopes(settings.googleOAuthScopes)
+  };
+}
+
+function getGoogleOAuthVaultState() {
+  return getVault().googleOAuth || null;
+}
+
+function getGoogleOAuthStatus() {
+  const stored = getGoogleOAuthVaultState();
+  const tokens = stored?.tokens || null;
+  const user = stored?.user || null;
+  const expiresAt = Number(tokens?.expiresAt || 0) || null;
+  const scopes = normalizeGoogleScopes(stored?.scopes || []);
+
+  return {
+    connected: Boolean(tokens?.refreshToken || tokens?.accessToken),
+    email: user?.email || "",
+    name: user?.name || "",
+    picture: user?.picture || "",
+    expiresAt,
+    scopes,
+    hasRefreshToken: Boolean(tokens?.refreshToken)
+  };
+}
+
+function saveGoogleOAuthState(payload) {
+  const vault = getVault();
+  vault.googleOAuth = payload || null;
+  saveVault(vault);
+}
+
+function clearGoogleOAuthState() {
+  const vault = getVault();
+  vault.googleOAuth = null;
+  saveVault(vault);
+}
+
+function createPkcePair() {
+  const codeVerifier = crypto.randomBytes(48).toString("base64url");
+  const codeChallenge = crypto.createHash("sha256").update(codeVerifier).digest("base64url");
+  return { codeVerifier, codeChallenge };
+}
+
+function createOAuthState() {
+  return crypto.randomBytes(24).toString("base64url");
+}
+
+function buildGoogleOAuthSettingsPayload(settings = getSettings()) {
+  const config = getGoogleOAuthConfig(settings);
+  return {
+    googleOAuthClientId: config.clientId,
+    googleOAuthScopes: config.scopes,
+    googleOAuthStatus: getGoogleOAuthStatus()
+  };
+}
+
+function startLoopbackCallbackServer(expectedState) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let resultResolver = null;
+    const finish = (payload) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      resultResolver?.(payload);
+      server.close();
+    };
+
+    const server = http.createServer((request, response) => {
+      try {
+        const requestUrl = new URL(request.url || "/", "http://127.0.0.1");
+        const code = requestUrl.searchParams.get("code") || "";
+        const state = requestUrl.searchParams.get("state") || "";
+        const error = requestUrl.searchParams.get("error") || "";
+        const errorDescription = requestUrl.searchParams.get("error_description") || "";
+
+        response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        if (error) {
+          response.end("<html><body><h2>Google sign-in cancelled</h2><p>You can close this window and return to WP Desktop.</p></body></html>");
+          finish({ error, errorDescription });
+          return;
+        }
+
+        if (!code || state !== expectedState) {
+          response.end("<html><body><h2>Sign-in failed</h2><p>The returned Google OAuth state was invalid. You can close this window.</p></body></html>");
+          finish({ error: "invalid_state", errorDescription: "State mismatch or missing code." });
+          return;
+        }
+
+        response.end("<html><body><h2>Sign-in complete</h2><p>You can close this window and return to WP Desktop.</p></body></html>");
+        finish({ code });
+      } catch (error) {
+        response.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
+        response.end("<html><body><h2>Sign-in failed</h2><p>You can close this window and return to WP Desktop.</p></body></html>");
+        finish({ error: "callback_failure", errorDescription: error.message });
+      }
+    });
+
+    server.on("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (!address || typeof address !== "object") {
+        server.close();
+        reject(new Error("Could not start local OAuth callback server."));
+        return;
+      }
+
+      resolve({
+        redirectUri: `http://127.0.0.1:${address.port}/oauth/google/callback`,
+        waitForResult: () => new Promise((waitResolve) => {
+          resultResolver = waitResolve;
+        }),
+        close: () => {
+          if (!settled) {
+            finish({ error: "cancelled", errorDescription: "Sign-in window was closed." });
+          }
+        }
+      });
+    });
+  });
+}
+
+async function exchangeGoogleAuthorizationCode({ clientId, code, codeVerifier, redirectUri }) {
+  const response = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded"
+    },
+    body: new URLSearchParams({
+      client_id: clientId,
+      code,
+      code_verifier: codeVerifier,
+      grant_type: "authorization_code",
+      redirect_uri: redirectUri
+    }).toString()
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.error_description || payload.error || "Google token exchange failed.");
+  }
+
+  return payload;
+}
+
+async function fetchGoogleUserProfile(accessToken) {
+  const response = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
+    headers: {
+      Authorization: `Bearer ${accessToken}`
+    }
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.error_description || payload.error || "Could not load Google account profile.");
+  }
+
+  return payload;
+}
+
+async function beginGoogleOAuthFlow() {
+  const settings = getSettings();
+  const config = getGoogleOAuthConfig(settings);
+  if (!config.clientId) {
+    throw new Error("Set a Google OAuth client ID in Settings first.");
+  }
+
+  const oauthState = createOAuthState();
+  const pkce = createPkcePair();
+  const callback = await startLoopbackCallbackServer(oauthState);
+  const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+  authUrl.searchParams.set("client_id", config.clientId);
+  authUrl.searchParams.set("redirect_uri", callback.redirectUri);
+  authUrl.searchParams.set("response_type", "code");
+  authUrl.searchParams.set("scope", config.scopes.join(" "));
+  authUrl.searchParams.set("state", oauthState);
+  authUrl.searchParams.set("code_challenge", pkce.codeChallenge);
+  authUrl.searchParams.set("code_challenge_method", "S256");
+  authUrl.searchParams.set("access_type", "offline");
+  authUrl.searchParams.set("prompt", "consent");
+
+  await shell.openExternal(authUrl.toString());
+
+  let result;
+  try {
+    result = await Promise.race([
+      callback.waitForResult(),
+      new Promise((resolve) => setTimeout(() => resolve({
+        error: "timeout",
+        errorDescription: "Timed out waiting for the Google sign-in callback."
+      }), 180000))
+    ]);
+  } finally {
+    callback.close?.();
+  }
+
+  if (!result?.code) {
+    throw new Error(result?.errorDescription || result?.error || "Google sign-in did not return an authorization code.");
+  }
+
+  const tokenPayload = await exchangeGoogleAuthorizationCode({
+    clientId: config.clientId,
+    code: result.code,
+    codeVerifier: pkce.codeVerifier,
+    redirectUri: callback.redirectUri
+  });
+  const user = await fetchGoogleUserProfile(tokenPayload.access_token);
+
+  saveGoogleOAuthState({
+    scopes: config.scopes,
+    user: {
+      email: user.email || "",
+      name: user.name || "",
+      picture: user.picture || ""
+    },
+    tokens: {
+      accessToken: tokenPayload.access_token || "",
+      refreshToken: tokenPayload.refresh_token || getGoogleOAuthVaultState()?.tokens?.refreshToken || "",
+      idToken: tokenPayload.id_token || "",
+      tokenType: tokenPayload.token_type || "Bearer",
+      scope: tokenPayload.scope || config.scopes.join(" "),
+      expiresAt: Date.now() + (Number(tokenPayload.expires_in || 0) * 1000)
+    },
+    updatedAt: new Date().toISOString()
+  });
+
+  return getGoogleOAuthStatus();
+}
+
+function rememberClosedTab(win, tab) {
+  const state = getBrowserState(win);
+  state.closedTabs = [snapshotClosedTab(tab), ...state.closedTabs].slice(0, 12);
+}
+
+function insertTabAt(state, tab, insertIndex = null) {
+  if (typeof insertIndex === "number" && insertIndex >= 0 && insertIndex <= state.tabs.length) {
+    state.tabs.splice(insertIndex, 0, tab);
+    return;
+  }
+
+  state.tabs.push(tab);
+}
+
+function reorderTab(win, tabId, targetIndex) {
+  const state = getBrowserState(win);
+  const index = state.tabs.findIndex((tab) => tab.id === tabId);
+  if (index === -1) {
+    return false;
+  }
+
+  const boundedIndex = Math.max(0, Math.min(targetIndex, state.tabs.length - 1));
+  if (index === boundedIndex) {
+    return true;
+  }
+
+  const [tab] = state.tabs.splice(index, 1);
+  state.tabs.splice(boundedIndex, 0, tab);
+  emitBrowserState(win);
+  return true;
+}
+
+function setTabPinned(win, tabId, pinned) {
+  const state = getBrowserState(win);
+  const index = state.tabs.findIndex((tab) => tab.id === tabId);
+  if (index === -1) {
+    return false;
+  }
+
+  const [tab] = state.tabs.splice(index, 1);
+  tab.pinned = Boolean(pinned);
+
+  if (tab.pinned) {
+    const firstUnpinnedIndex = state.tabs.findIndex((item) => !item.pinned);
+    const nextIndex = firstUnpinnedIndex === -1 ? state.tabs.length : firstUnpinnedIndex;
+    state.tabs.splice(nextIndex, 0, tab);
+  } else {
+    const lastPinnedIndex = state.tabs.reduce((found, item, itemIndex) => (item.pinned ? itemIndex : found), -1);
+    state.tabs.splice(lastPinnedIndex + 1, 0, tab);
+  }
+
+  emitBrowserState(win);
+  return true;
+}
+
+function setTabMuted(win, tabId, muted) {
+  const tab = findTabById(win, tabId);
+  if (!tab) {
+    return false;
+  }
+
+  tab.muted = Boolean(muted);
+  tab.view.webContents.setAudioMuted(tab.muted);
+  emitBrowserState(win);
+  return true;
+}
+
+function setTabNickname(win, tabId, nickname) {
+  const tab = findTabById(win, tabId);
+  if (!tab) {
+    return false;
+  }
+
+  tab.nickname = String(nickname || "").trim();
+  emitBrowserState(win);
+  return true;
+}
+
+function duplicateBrowserTab(win, tabId) {
+  const state = getBrowserState(win);
+  const index = state.tabs.findIndex((tab) => tab.id === tabId);
+  if (index === -1) {
+    return false;
+  }
+
+  const source = state.tabs[index];
+  createBrowserTab(win, source.url, source.mode || "auto", true, index + 1, {
+    nickname: source.nickname || "",
+    pinned: Boolean(source.pinned),
+    muted: Boolean(source.muted)
+  });
+  return true;
+}
+
+function reopenClosedBrowserTab(win) {
+  const state = getBrowserState(win);
+  const snapshot = state.closedTabs.shift();
+  if (!snapshot) {
+    return false;
+  }
+
+  createBrowserTab(win, snapshot.url, snapshot.mode || "auto", true, null, snapshot);
+  return true;
 }
 
 function escapeHtml(value) {
@@ -2047,7 +2563,13 @@ function wireTabEvents(win, tab) {
   });
 
   wc.on("did-start-loading", () => {
+    tab.isLoading = true;
     tab.error = null;
+    emitBrowserState(win);
+  });
+
+  wc.on("did-stop-loading", () => {
+    tab.isLoading = false;
     emitBrowserState(win);
   });
 
@@ -2060,13 +2582,26 @@ function wireTabEvents(win, tab) {
 
   wc.on("did-navigate", (_event, url) => {
     tab.url = url;
-    tab.error = null;
+    tab.error = isGoogleSignInRejectedUrl(url)
+      ? {
+          type: "google_auth_blocked",
+          url,
+          description: "Google blocked sign-in inside this embedded browser."
+        }
+      : null;
     recordBrowserHistoryVisit(tab.url, tab.title);
     emitBrowserState(win);
   });
 
   wc.on("did-navigate-in-page", (_event, url) => {
     tab.url = url;
+    if (isGoogleSignInRejectedUrl(url)) {
+      tab.error = {
+        type: "google_auth_blocked",
+        url,
+        description: "Google blocked sign-in inside this embedded browser."
+      };
+    }
     recordBrowserHistoryVisit(tab.url, tab.title);
     emitBrowserState(win);
   });
@@ -2076,6 +2611,7 @@ function wireTabEvents(win, tab) {
       return;
     }
 
+    tab.isLoading = false;
     if (isLocalUrl(validatedURL || tab.url)) {
       tab.error = {
         url: validatedURL || tab.url,
@@ -2091,7 +2627,7 @@ function wireTabEvents(win, tab) {
   });
 }
 
-function createBrowserTab(win, url, mode = "auto", activate = true) {
+function createBrowserTab(win, url, mode = "auto", activate = true, insertIndex = null, tabOptions = {}) {
   const state = getBrowserState(win);
   const resolvedUrl = ensureUrl(url);
   const id = `tab-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`;
@@ -2104,16 +2640,21 @@ function createBrowserTab(win, url, mode = "auto", activate = true) {
   const tab = {
     id,
     title: "New Tab",
+    nickname: String(tabOptions.nickname || "").trim(),
     url: resolvedUrl,
+    isLoading: true,
     mode,
     partition,
     error: null,
+    pinned: Boolean(tabOptions.pinned),
+    muted: Boolean(tabOptions.muted),
     view
   };
 
   wireTabEvents(win, tab);
   view.webContents.setUserAgent(getBrowserUserAgent());
-  state.tabs.push(tab);
+  view.webContents.setAudioMuted(tab.muted);
+  insertTabAt(state, tab, insertIndex);
 
   if (activate || !state.activeTabId) {
     state.activeTabId = id;
@@ -2149,6 +2690,7 @@ function closeBrowserTab(win, tabId) {
   }
 
   const [tab] = state.tabs.splice(index, 1);
+  rememberClosedTab(win, tab);
   if (state.attachedTabId === tab.id) {
     detachActiveView(win);
   }
@@ -2355,6 +2897,601 @@ async function autofillActiveBrowserTab(win, credentials = {}) {
       message: `Autofill failed: ${error.message}`
     };
   }
+}
+
+function buildTabNicknameDialogHtml(requestId, payload = {}) {
+  const nickname = escapeHtml(payload.nickname || payload.title || "");
+
+  return `<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <title>Nickname tab</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: "Segoe UI", Arial, sans-serif;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html, body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        background: #232323;
+        color: #ffffff;
+      }
+      body {
+        padding: 18px;
+      }
+      .card {
+        width: 100%;
+        height: 100%;
+        display: grid;
+        gap: 14px;
+        align-content: start;
+      }
+      .head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+      .close {
+        border: 0;
+        background: transparent;
+        color: #fff;
+        cursor: pointer;
+        font-size: 1.3rem;
+        line-height: 1;
+        padding: 0 4px;
+      }
+      label {
+        display: grid;
+        gap: 8px;
+        font-size: 0.95rem;
+        color: #d3d3d3;
+      }
+      input {
+        width: 100%;
+        border: 1px solid #6b7280;
+        border-radius: 12px;
+        background: #2b2b2b;
+        color: #fff;
+        padding: 10px 12px;
+        min-height: 42px;
+        outline: none;
+      }
+      input:focus {
+        border-color: #f0a202;
+        box-shadow: 0 0 0 1px #f0a202;
+      }
+      .note {
+        color: #b8bec8;
+        font-size: 0.92rem;
+        line-height: 1.5;
+      }
+      .actions {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        margin-top: 8px;
+      }
+      .right {
+        display: flex;
+        gap: 10px;
+      }
+      button {
+        border: 1px solid #5a5a5a;
+        border-radius: 12px;
+        background: #4a4a4a;
+        color: #fff;
+        padding: 10px 16px;
+        cursor: pointer;
+        font-size: 0.95rem;
+      }
+      button.primary {
+        background: #f3f4f6;
+        border-color: #f3f4f6;
+        color: #111827;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="head">
+        <strong>Set a fixed tab name</strong>
+        <button id="close-button" class="close" type="button" aria-label="Close">x</button>
+      </div>
+      <label>
+        <span>Nickname</span>
+        <input id="nickname-input" type="text" value="${nickname}" placeholder="Enter a nickname for this tab" />
+      </label>
+      <div class="note">This name stays on the tab even when the page title changes.</div>
+      <div class="actions">
+        <button id="clear-button" type="button">Clear</button>
+        <div class="right">
+          <button id="save-button" class="primary" type="button">Save</button>
+        </div>
+      </div>
+    </div>
+    <script>
+      const { ipcRenderer } = require("electron");
+      const requestId = ${JSON.stringify(requestId)};
+      const input = document.getElementById("nickname-input");
+      const closeButton = document.getElementById("close-button");
+      const saveButton = document.getElementById("save-button");
+      const clearButton = document.getElementById("clear-button");
+
+      const send = (result) => {
+        ipcRenderer.send("browser:tab-nickname-dialog-result", {
+          requestId,
+          result
+        });
+      };
+
+      closeButton.addEventListener("click", () => send({ action: "cancel" }));
+      saveButton.addEventListener("click", () => send({ action: "save", nickname: input.value.trim() }));
+      clearButton.addEventListener("click", () => send({ action: "save", nickname: "" }));
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          saveButton.click();
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeButton.click();
+        }
+      });
+      window.addEventListener("DOMContentLoaded", () => {
+        input.focus();
+        input.select();
+      });
+    </script>
+  </body>
+</html>`;
+}
+
+function showTabNicknameDialog(win, payload = {}) {
+  return new Promise((resolve) => {
+    const requestId = `tab-nickname-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
+    let child = null;
+    let settled = false;
+
+    const finish = (result) => {
+      if (settled) {
+        return;
+      }
+
+      settled = true;
+      ipcMain.removeListener("browser:tab-nickname-dialog-result", handleResult);
+
+      if (child && !child.isDestroyed()) {
+        child.destroy();
+      }
+
+      resolve(result || { action: "cancel" });
+    };
+
+    const handleResult = (_event, payloadResult) => {
+      if (payloadResult?.requestId !== requestId) {
+        return;
+      }
+
+      finish(payloadResult.result);
+    };
+
+    ipcMain.on("browser:tab-nickname-dialog-result", handleResult);
+
+    child = new BrowserWindow({
+      parent: win,
+      modal: true,
+      show: false,
+      width: 420,
+      height: 220,
+      resizable: false,
+      minimizable: false,
+      maximizable: false,
+      fullscreenable: false,
+      autoHideMenuBar: true,
+      title: "Nickname tab",
+      backgroundColor: "#232323",
+      webPreferences: {
+        sandbox: false,
+        contextIsolation: false,
+        nodeIntegration: true
+      }
+    });
+
+    child.once("ready-to-show", () => {
+      if (!child.isDestroyed()) {
+        child.show();
+      }
+    });
+
+    child.on("closed", () => {
+      child = null;
+      finish({ action: "cancel" });
+    });
+
+    const html = buildTabNicknameDialogHtml(requestId, payload);
+    child.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  });
+}
+
+function buildBrowserHistoryHtml() {
+  const entries = getBrowserHistory()
+    .sort((left, right) => Number(right.lastVisited || 0) - Number(left.lastVisited || 0))
+    .slice(0, 100);
+
+  const items = entries.length
+    ? entries.map((entry) => `
+        <a class="history-item" href="${entry.url}">
+          <strong>${entry.title || entry.url}</strong>
+          <span>${entry.url}</span>
+          <small>Visited ${new Date(entry.lastVisited || Date.now()).toLocaleString()} · ${entry.visitCount || 1} visit(s)</small>
+        </a>
+      `).join("")
+    : `<div class="history-empty">No browser history yet.</div>`;
+
+  return `<!DOCTYPE html>
+  <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+      <title>History</title>
+      <style>
+        body { font-family: "Segoe UI", sans-serif; margin: 0; padding: 24px; background: #f3f1ee; color: #17212b; }
+        h1 { margin: 0 0 16px; }
+        .history-list { display: grid; gap: 12px; }
+        .history-item, .history-empty {
+          display: grid; gap: 6px; padding: 14px 16px; border-radius: 14px; text-decoration: none;
+          border: 1px solid #ddd7d1; background: rgba(255,255,255,0.88); color: inherit;
+        }
+        .history-item:hover { border-color: #58bf7b; box-shadow: 0 12px 24px rgba(20,34,45,0.08); }
+        .history-item span, .history-item small, .history-empty { color: #6b7280; }
+      </style>
+    </head>
+    <body>
+      <h1>History</h1>
+      <div class="history-list">${items}</div>
+    </body>
+  </html>`;
+}
+
+function openHistoryTab(win) {
+  createBrowserTab(win, `data:text/html;charset=utf-8,${encodeURIComponent(buildBrowserHistoryHtml())}`, "auto", true);
+}
+
+function getActiveWebContents(win) {
+  return getActiveBrowserTab(win)?.view?.webContents || null;
+}
+
+function adjustZoom(win, delta) {
+  const webContents = getActiveWebContents(win);
+  if (!webContents) {
+    return 1;
+  }
+
+  const nextZoom = Math.min(3, Math.max(0.3, webContents.getZoomFactor() + delta));
+  webContents.setZoomFactor(nextZoom);
+  return nextZoom;
+}
+
+function resetZoom(win) {
+  const webContents = getActiveWebContents(win);
+  if (!webContents) {
+    return 1;
+  }
+
+  webContents.setZoomFactor(1);
+  return 1;
+}
+
+function getZoomLabel(win) {
+  const webContents = getActiveWebContents(win);
+  const zoomFactor = webContents ? webContents.getZoomFactor() : 1;
+  return `${Math.round(zoomFactor * 100)}%`;
+}
+
+async function saveBrowserScreenshot(win) {
+  const webContents = getActiveWebContents(win);
+  if (!webContents) {
+    emitBrowserNotice(win, { type: "error", message: "Open a page before taking a screenshot." });
+    return;
+  }
+
+  const targetUrl = getActiveBrowserTab(win)?.url || "page";
+  const suggestedName = `screenshot-${Date.now()}.png`;
+  const result = await dialog.showSaveDialog(win, {
+    title: "Save screenshot",
+    defaultPath: path.join(app.getPath("pictures"), suggestedName),
+    filters: [{ name: "PNG Image", extensions: ["png"] }]
+  });
+
+  if (result.canceled || !result.filePath) {
+    return;
+  }
+
+  const image = await webContents.capturePage();
+  fs.writeFileSync(result.filePath, image.toPNG());
+  emitBrowserNotice(win, {
+    type: "success",
+    message: `Saved screenshot for ${targetUrl} to ${result.filePath}.`
+  });
+}
+
+function clearActiveBrowserData(win) {
+  clearBrowserHistory();
+  const state = getBrowserState(win);
+  state.downloads = state.downloads.filter((item) => item.status === "progressing");
+  const settings = getSettings();
+  settings.browserPermissions = {};
+  saveSettings(settings);
+  emitBrowserState(win);
+  emitBrowserNotice(win, {
+    type: "success",
+    message: "Cleared browser history, finished downloads, and saved permissions."
+  });
+}
+
+function showBrowserAppMenu(win, position = {}) {
+  const activeTab = getActiveBrowserTab(win);
+  const activeUrl = activeTab?.url || getDefaultStartupUrl();
+
+  const menu = Menu.buildFromTemplate([
+    {
+      label: "New tab",
+      accelerator: "Ctrl+T",
+      click: () => createBrowserTab(win, getDefaultStartupUrl(), "auto", true)
+    },
+    {
+      label: "New window",
+      accelerator: "Ctrl+N",
+      click: () => createWindow({ startupUrl: getDefaultStartupUrl(), startupMode: "auto" })
+    },
+    {
+      label: "New InPrivate window",
+      accelerator: "Ctrl+Shift+N",
+      click: () => createWindow({ startupUrl: getDefaultStartupUrl(), startupMode: "isolated" })
+    },
+    { type: "separator" },
+    {
+      label: `Zoom (${getZoomLabel(win)})`,
+      submenu: [
+        { label: "Zoom in", accelerator: "Ctrl+=", click: () => adjustZoom(win, 0.1) },
+        { label: "Zoom out", accelerator: "Ctrl+-", click: () => adjustZoom(win, -0.1) },
+        { label: "Reset zoom", accelerator: "Ctrl+0", click: () => resetZoom(win) }
+      ]
+    },
+    { type: "separator" },
+    {
+      label: "Favorites",
+      accelerator: "Ctrl+Shift+O",
+      click: () => emitBrowserMenuCommand(win, { action: "favorites" })
+    },
+    {
+      label: "History",
+      accelerator: "Ctrl+H",
+      click: () => openHistoryTab(win)
+    },
+    {
+      label: "Tab groups",
+      submenu: [{ label: "Coming soon", enabled: false }]
+    },
+    {
+      label: "Downloads",
+      accelerator: "Ctrl+J",
+      click: () => emitBrowserMenuCommand(win, { action: "downloads" })
+    },
+    {
+      label: "Extensions",
+      submenu: [{ label: "Coming soon", enabled: false }]
+    },
+    {
+      label: "Passwords",
+      click: () => emitBrowserMenuCommand(win, { action: "passwords" })
+    },
+    { type: "separator" },
+    {
+      label: "Delete browsing data",
+      accelerator: "Ctrl+Shift+Delete",
+      click: () => clearActiveBrowserData(win)
+    },
+    {
+      label: "Print",
+      accelerator: "Ctrl+P",
+      click: () => getActiveWebContents(win)?.print({ printBackground: true })
+    },
+    {
+      label: "Translate",
+      enabled: false
+    },
+    {
+      label: "Split screen",
+      click: () => createWindow({ splitScreen: true, startupUrl: activeUrl, startupMode: activeTab?.mode || "auto" })
+    },
+    {
+      label: "Screenshot",
+      accelerator: "Ctrl+Shift+S",
+      click: () => void saveBrowserScreenshot(win)
+    },
+    {
+      label: "Find on page",
+      accelerator: "Ctrl+F",
+      click: () => emitBrowserMenuCommand(win, { action: "find" })
+    },
+    {
+      label: "More tools",
+      submenu: [
+        { label: "Developer tools", click: () => getActiveWebContents(win)?.openDevTools({ mode: "detach" }) },
+        { label: "View source", click: () => createBrowserTab(win, `view-source:${activeUrl}`, "auto", true) }
+      ]
+    },
+    { type: "separator" },
+    {
+      label: "Settings",
+      click: () => emitBrowserMenuCommand(win, { action: "settings" })
+    },
+    {
+      label: "Help and feedback",
+      submenu: [
+        { label: "Open README", click: () => void shell.openPath(path.join(__dirname, "README.md")) },
+        { label: "About WP Desktop", click: () => emitBrowserNotice(win, { type: "info", message: "WP Desktop: local WordPress browser and installer." }) }
+      ]
+    },
+    { type: "separator" },
+    {
+      label: "Close WP Desktop",
+      click: () => app.quit()
+    }
+  ]);
+
+  menu.popup({
+    window: win,
+    x: typeof position.x === "number" ? Math.round(position.x) : undefined,
+    y: typeof position.y === "number" ? Math.round(position.y) : undefined
+  });
+}
+
+function showBrowserTabContextMenu(win, tabId) {
+  const state = getBrowserState(win);
+  const tab = findTabById(win, tabId);
+  if (!tab) {
+    return false;
+  }
+
+  const index = state.tabs.findIndex((item) => item.id === tab.id);
+  const hasOtherTabs = state.tabs.length > 1;
+  const hasTabsToRight = index >= 0 && index < state.tabs.length - 1;
+
+  const menu = Menu.buildFromTemplate([
+    {
+      label: "New tab to the right",
+      click: () => createBrowserTab(win, getDefaultStartupUrl(), "auto", true, index + 1)
+    },
+    {
+      label: "Add tab to new group",
+      enabled: false
+    },
+    { type: "separator" },
+    {
+      label: "Refresh",
+      accelerator: "Ctrl+R",
+      click: () => {
+        activateBrowserTab(win, tab.id);
+        reloadActive(win);
+      }
+    },
+    {
+      label: "Duplicate tab",
+      accelerator: "Ctrl+Shift+K",
+      click: () => duplicateBrowserTab(win, tab.id)
+    },
+    {
+      label: "Move tab to",
+      submenu: [
+        {
+          label: "Start",
+          enabled: index > 0,
+          click: () => reorderTab(win, tab.id, 0)
+        },
+        {
+          label: "End",
+          enabled: hasTabsToRight,
+          click: () => reorderTab(win, tab.id, state.tabs.length - 1)
+        },
+        {
+          label: "New window",
+          click: () => createWindow({ startupUrl: tab.url, startupMode: tab.mode || "auto" })
+        }
+      ]
+    },
+    {
+      label: tab.pinned ? "Unpin tab" : "Pin tab",
+      click: () => setTabPinned(win, tab.id, !tab.pinned)
+    },
+    {
+      label: tab.muted ? "Unmute tab" : "Mute tab",
+      accelerator: "Ctrl+M",
+      click: () => setTabMuted(win, tab.id, !tab.muted)
+    },
+    {
+      label: "Nickname tab",
+      click: async () => {
+        const result = await showTabNicknameDialog(win, {
+          nickname: tab.nickname || "",
+          title: tab.title || tab.url
+        });
+
+        if (result?.action === "save") {
+          setTabNickname(win, tab.id, result.nickname || "");
+        }
+      }
+    },
+    { type: "separator" },
+    {
+      label: "Send tab to your devices",
+      enabled: false
+    },
+    {
+      label: "Reopen closed tab",
+      accelerator: "Ctrl+Shift+T",
+      enabled: state.closedTabs.length > 0,
+      click: () => reopenClosedBrowserTab(win)
+    },
+    {
+      label: "Turn on vertical tabs",
+      enabled: false
+    },
+    { type: "separator" },
+    {
+      label: "Close tab",
+      accelerator: "Ctrl+W",
+      click: () => closeBrowserTab(win, tab.id)
+    },
+    {
+      label: "Close other tabs",
+      enabled: hasOtherTabs,
+      click: () => {
+        state.tabs
+          .filter((item) => item.id !== tab.id)
+          .map((item) => item.id)
+          .forEach((id) => closeBrowserTab(win, id));
+      }
+    },
+    {
+      label: "Close tabs to the right",
+      enabled: hasTabsToRight,
+      click: () => {
+        state.tabs
+          .slice(index + 1)
+          .map((item) => item.id)
+          .forEach((id) => closeBrowserTab(win, id));
+      }
+    },
+    {
+      label: "More tools",
+      submenu: [
+        {
+          label: "Open in new window",
+          click: () => createWindow({ startupUrl: tab.url, startupMode: tab.mode || "auto" })
+        },
+        {
+          label: "Open in InPrivate window",
+          click: () => createWindow({ startupUrl: tab.url, startupMode: "isolated" })
+        },
+        {
+          label: "Copy tab URL",
+          click: () => clipboard.writeText(tab.url)
+        }
+      ]
+    }
+  ]);
+
+  menu.popup({ window: win });
+  return true;
 }
 
 function sendUrlToWindow(win, startupUrl, startupMode = "auto") {
@@ -2756,6 +3893,28 @@ ipcMain.handle("browser:autofill-credentials", async (event, payload) => {
   return autofillActiveBrowserTab(win, payload || {});
 });
 
+ipcMain.handle("browser:show-app-menu", (event, payload) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win) {
+    return false;
+  }
+
+  showBrowserAppMenu(win, payload || {});
+  return true;
+});
+
+ipcMain.handle("browser:find-in-page", (event, text) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const webContents = win ? getActiveWebContents(win) : null;
+  const query = String(text || "").trim();
+  if (!webContents || !query) {
+    return false;
+  }
+
+  webContents.findInPage(query, { findNext: false, forward: true });
+  return true;
+});
+
 ipcMain.handle("browser:update-layout", (event, payload) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win) {
@@ -2917,6 +4076,24 @@ ipcMain.handle("browser:show-bookmark-context-menu", (event, payload) => {
   return true;
 });
 
+ipcMain.handle("browser:show-tab-context-menu", (event, tabId) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win || !tabId) {
+    return false;
+  }
+
+  return showBrowserTabContextMenu(win, tabId);
+});
+
+ipcMain.handle("browser:set-tab-nickname", (event, payload) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win || !payload?.tabId) {
+    return false;
+  }
+
+  return setTabNickname(win, payload.tabId, payload.nickname || "");
+});
+
 ipcMain.handle("browser:show-bookmark-save-dialog", async (event, payload) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win) {
@@ -2927,11 +4104,13 @@ ipcMain.handle("browser:show-bookmark-save-dialog", async (event, payload) => {
 });
 
 ipcMain.handle("db:test", async (_event, config) => {
+  const settings = getSettings();
+  const effective = getEffectiveDbProfile(settings);
   const connection = await mysql.createConnection({
-    host: config.host || "127.0.0.1",
-    port: Number(config.port) || 3306,
-    user: config.user || "root",
-    password: config.password || ""
+    host: config?.host || effective.host,
+    port: Number(config?.port || effective.port) || 3306,
+    user: config?.user || effective.user,
+    password: config?.password ?? effective.password
   });
 
   const [rows] = await connection.query("SELECT VERSION() AS version");
@@ -3011,8 +4190,41 @@ ipcMain.handle("settings:get", async () => {
     htdocsPath: getResolvedHtdocsPath(settings),
     apacheRunning,
     detectedDbProfile: detectXamppDbProfile(getResolvedHtdocsPath(settings)),
-    xamppPaths
+    effectiveDbProfile: getEffectiveDbProfile(settings),
+    mysqlConfigContent: readMysqlConfigContent(settings),
+    xamppPaths,
+    ...buildGoogleOAuthSettingsPayload(settings)
   };
+});
+
+ipcMain.handle("settings:save-google-oauth-config", async (_event, payload) => {
+  const settings = getSettings();
+  settings.googleOAuthClientId = String(payload?.clientId || "").trim();
+  settings.googleOAuthScopes = normalizeGoogleScopes(payload?.scopes);
+  saveSettings(settings);
+
+  const apacheRunning = await isApacheRunning();
+  return {
+    ...settings,
+    htdocsPath: getResolvedHtdocsPath(settings),
+    apacheRunning,
+    detectedDbProfile: detectXamppDbProfile(getResolvedHtdocsPath(settings)),
+    effectiveDbProfile: getEffectiveDbProfile(settings),
+    mysqlConfigContent: readMysqlConfigContent(settings),
+    xamppPaths: getXamppPathsSummary(settings),
+    ...buildGoogleOAuthSettingsPayload(settings)
+  };
+});
+
+ipcMain.handle("oauth:get-google-status", () => getGoogleOAuthStatus());
+
+ipcMain.handle("oauth:begin-google-signin", async () => {
+  return beginGoogleOAuthFlow();
+});
+
+ipcMain.handle("oauth:signout-google", () => {
+  clearGoogleOAuthState();
+  return getGoogleOAuthStatus();
 });
 
 ipcMain.handle("settings:set-htdocs", async (_event, htdocsPath) => {
@@ -3028,6 +4240,8 @@ ipcMain.handle("settings:set-htdocs", async (_event, htdocsPath) => {
     htdocsPath: resolvedHtdocsPath,
     apacheRunning,
     detectedDbProfile: detectXamppDbProfile(resolvedHtdocsPath),
+    effectiveDbProfile: getEffectiveDbProfile(settings),
+    mysqlConfigContent: readMysqlConfigContent(settings),
     xamppPaths
   };
 });
@@ -3045,7 +4259,66 @@ ipcMain.handle("settings:set-xampp-root", async (_event, xamppRootPath) => {
     htdocsPath: resolvedHtdocsPath,
     apacheRunning,
     detectedDbProfile: detectXamppDbProfile(resolvedHtdocsPath),
+    effectiveDbProfile: getEffectiveDbProfile(settings),
+    mysqlConfigContent: readMysqlConfigContent(settings),
     xamppPaths
+  };
+});
+
+ipcMain.handle("settings:set-local-session-sharing", async (_event, enabled) => {
+  const settings = getSettings();
+  settings.shareLocalSiteSessions = enabled !== false;
+  saveSettings(settings);
+  const apacheRunning = await isApacheRunning();
+  return {
+    ...settings,
+    htdocsPath: getResolvedHtdocsPath(settings),
+    apacheRunning,
+    detectedDbProfile: detectXamppDbProfile(getResolvedHtdocsPath(settings)),
+    effectiveDbProfile: getEffectiveDbProfile(settings),
+    mysqlConfigContent: readMysqlConfigContent(settings),
+    xamppPaths: getXamppPathsSummary(settings)
+  };
+});
+
+ipcMain.handle("settings:set-online-session-sharing", async (_event, enabled) => {
+  const settings = getSettings();
+  settings.shareOnlineSiteSessions = enabled === true;
+  saveSettings(settings);
+  const apacheRunning = await isApacheRunning();
+  return {
+    ...settings,
+    htdocsPath: getResolvedHtdocsPath(settings),
+    apacheRunning,
+    detectedDbProfile: detectXamppDbProfile(getResolvedHtdocsPath(settings)),
+    effectiveDbProfile: getEffectiveDbProfile(settings),
+    mysqlConfigContent: readMysqlConfigContent(settings),
+    xamppPaths: getXamppPathsSummary(settings),
+    ...buildGoogleOAuthSettingsPayload(settings)
+  };
+});
+
+ipcMain.handle("settings:save-mysql-config", async (_event, payload) => {
+  const settings = getSettings();
+  const xamppPaths = getXamppPathsSummary(settings);
+  if (!xamppPaths.mysqlConfigPath) {
+    throw new Error("MySQL config file was not found.");
+  }
+
+  fs.writeFileSync(xamppPaths.mysqlConfigPath, String(payload.content || ""), "utf8");
+  settings.dbUser = String(payload.dbUser || "root").trim() || "root";
+  settings.dbPassword = payload.dbPassword ?? "";
+  saveSettings(settings);
+
+  const apacheRunning = await isApacheRunning();
+  return {
+    ...settings,
+    htdocsPath: getResolvedHtdocsPath(settings),
+    apacheRunning,
+    detectedDbProfile: detectXamppDbProfile(getResolvedHtdocsPath(settings)),
+    effectiveDbProfile: getEffectiveDbProfile(settings),
+    mysqlConfigContent: readMysqlConfigContent(settings),
+    xamppPaths: getXamppPathsSummary(settings)
   };
 });
 
@@ -3093,8 +4366,8 @@ ipcMain.handle("installer:run", async (_event, payload) => {
 
   const dbName = sanitizeDbName(path.basename(targetPath));
   const db = { created: false, name: dbName };
-  const detectedDbProfile = detectXamppDbProfile(basePath || resolvedHtdocsPath);
-  const databaseProfile = resolveDbProfile(payload.database || {}, detectedDbProfile);
+  const settingsDbProfile = getEffectiveDbProfile(settings);
+  const databaseProfile = resolveDbProfile(payload.database || {}, settingsDbProfile);
 
   if (payload.database?.create) {
     const connection = await mysql.createConnection({
@@ -3155,6 +4428,12 @@ ipcMain.handle("installer:run", async (_event, payload) => {
 
 ipcMain.handle("shell:open-external", async (_event, url) => {
   await shell.openExternal(url);
+});
+
+ipcMain.handle("browser:continue-google-signin", async (_event, url) => {
+  const handoffUrl = getGoogleSignInHandoffUrl(url);
+  await shell.openExternal(handoffUrl);
+  return handoffUrl;
 });
 
 ipcMain.handle("shell:open-path", async (_event, targetPath) => {
