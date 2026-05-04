@@ -40,7 +40,7 @@
 
       <section class="sidebar-note">
         <h2>Session rules</h2>
-        <p id="session-rules-copy">Local sites keep their login. Every non-local tab gets its own temporary session.</p>
+        <p id="session-rules-copy">All tabs use one persistent browser profile so cookies, local storage, and sign-in state behave like a normal browser.</p>
       </section>
     </aside>
 
@@ -535,40 +535,6 @@
 
               <div class="settings-note">
                 Host and port are parsed from <code>my.ini</code>. User and password are stored in app settings and used together with the XAMPP MySQL config.
-              </div>
-            </div>
-
-            <div class="settings-card settings-card-wide">
-              <div class="card-header">
-                <div>
-                  <span class="eyebrow">Google OAuth</span>
-                  <h3>App sign-in</h3>
-                </div>
-              </div>
-
-              <div class="form-grid four-up">
-                <label class="field field-span-2">
-                  <span>OAuth client ID</span>
-                  <input id="settings-google-client-id" type="text" placeholder="Paste your Google Desktop app client ID">
-                </label>
-                <label class="field field-span-2">
-                  <span>Scopes</span>
-                  <input id="settings-google-scopes" type="text" placeholder="openid email profile">
-                </label>
-              </div>
-
-              <div class="button-row compact">
-                <button id="save-google-oauth-button" type="button">Save OAuth settings</button>
-                <button id="google-signin-button" type="button" class="primary-button">Sign in with Google</button>
-                <button id="google-signout-button" type="button">Sign out</button>
-              </div>
-
-              <div id="google-oauth-status" class="settings-note">
-                Not connected.
-              </div>
-
-              <div class="settings-note">
-                Use a Google OAuth desktop client with a loopback redirect. WP Desktop opens Google sign-in in your default browser and stores returned tokens encrypted in the app vault.
               </div>
             </div>
 

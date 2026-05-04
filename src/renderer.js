@@ -17,10 +17,7 @@ const state = {
   isEditingAddress: false,
   htdocsPath: "",
   apacheRunning: false,
-  xamppPaths: null,
-  googleOAuthClientId: "",
-  googleOAuthScopes: ["openid", "email", "profile"],
-  googleOAuthStatus: null
+  xamppPaths: null
 };
 
 const progressState = {
@@ -55,7 +52,7 @@ state.effectiveDbProfile = {
 };
 state.mysqlConfigContent = "";
 state.shareLocalSiteSessions = true;
-state.shareOnlineSiteSessions = false;
+state.shareOnlineSiteSessions = true;
 
 const elements = {
   appShell: document.getElementById("app-shell"),
@@ -169,12 +166,6 @@ const elements = {
   settingsShareOnlineSessions: document.getElementById("settings-share-online-sessions"),
   settingsMysqlEditor: document.getElementById("settings-mysql-editor"),
   saveMysqlConfigButton: document.getElementById("save-mysql-config-button"),
-  settingsGoogleClientId: document.getElementById("settings-google-client-id"),
-  settingsGoogleScopes: document.getElementById("settings-google-scopes"),
-  saveGoogleOAuthButton: document.getElementById("save-google-oauth-button"),
-  googleSigninButton: document.getElementById("google-signin-button"),
-  googleSignoutButton: document.getElementById("google-signout-button"),
-  googleOAuthStatus: document.getElementById("google-oauth-status"),
   settingsPhpExe: document.getElementById("settings-php-exe"),
   settingsPhpConfig: document.getElementById("settings-php-config"),
   settingsPhpMyAdmin: document.getElementById("settings-phpmyadmin"),
@@ -638,45 +629,19 @@ function renderXamppSettings() {
 
 function renderSessionRules() {
   if (elements.settingsShareLocalSessions) {
-    elements.settingsShareLocalSessions.checked = state.shareLocalSiteSessions !== false;
+    elements.settingsShareLocalSessions.checked = true;
+    elements.settingsShareLocalSessions.disabled = true;
   }
   if (elements.settingsShareOnlineSessions) {
-    elements.settingsShareOnlineSessions.checked = state.shareOnlineSiteSessions === true;
+    elements.settingsShareOnlineSessions.checked = true;
+    elements.settingsShareOnlineSessions.disabled = true;
   }
 
   if (!elements.sessionRulesCopy) {
     return;
   }
 
-  const localCopy = state.shareLocalSiteSessions === false
-    ? "Local tabs are isolated."
-    : "Local sites share their login across tabs.";
-  const onlineCopy = state.shareOnlineSiteSessions === true
-    ? "Online tabs from the same site share one session too."
-    : "Online tabs stay isolated per tab.";
-  elements.sessionRulesCopy.textContent = `${localCopy} ${onlineCopy}`;
-}
-
-function renderGoogleOAuthSettings() {
-  if (elements.settingsGoogleClientId) {
-    elements.settingsGoogleClientId.value = state.googleOAuthClientId || "";
-  }
-  if (elements.settingsGoogleScopes) {
-    elements.settingsGoogleScopes.value = (state.googleOAuthScopes || ["openid", "email", "profile"]).join(" ");
-  }
-
-  const oauthStatus = state.googleOAuthStatus || null;
-  const connected = Boolean(oauthStatus?.connected);
-  const statusText = connected
-    ? `Connected as ${oauthStatus.name || oauthStatus.email || "Google account"}${oauthStatus.hasRefreshToken ? " with offline access." : "."}`
-    : "Not connected.";
-
-  if (elements.googleOAuthStatus) {
-    elements.googleOAuthStatus.textContent = statusText;
-  }
-  if (elements.googleSignoutButton) {
-    elements.googleSignoutButton.disabled = !connected;
-  }
+  elements.sessionRulesCopy.textContent = "All tabs share one persistent browser profile. Cookies, local storage, and sign-in state are preserved across restarts.";
 }
 
 function getBrowserToolSections() {
@@ -1099,29 +1064,7 @@ function renderBrowserOverlay() {
 
   const overlay = document.createElement("div");
   overlay.className = "browser-error-card";
-  if (active.error.type === "google_auth_blocked") {
-    overlay.innerHTML = `
-      <span class="eyebrow">Google sign-in</span>
-      <h3>Google requires sign-in in your default browser</h3>
-      <p><strong>URL:</strong> ${active.error.url}</p>
-      <p><strong>Reason:</strong> ${active.error.description}</p>
-      <div class="button-row compact">
-        <button type="button" id="browser-google-continue">Continue with Google</button>
-        <button type="button" id="browser-google-close">Close tab</button>
-      </div>
-    `;
-
-    overlay.querySelector("#browser-google-continue").addEventListener("click", async () => {
-      const openedUrl = await window.desktopAPI.browserContinueGoogleSignin(active.error.url);
-      setBrowserFeedback(`Opened Google sign-in in your default browser: ${openedUrl}`, "info");
-    });
-    overlay.querySelector("#browser-google-close").addEventListener("click", () => {
-      if (active.id) {
-        window.desktopAPI.browserCloseTab(active.id);
-      }
-    });
-  } else {
-    overlay.innerHTML = `
+  overlay.innerHTML = `
       <span class="eyebrow">Local site error</span>
       <h3>Could not open this local site</h3>
       <p><strong>URL:</strong> ${active.error.url}</p>
@@ -1132,13 +1075,12 @@ function renderBrowserOverlay() {
       </div>
     `;
 
-    overlay.querySelector("#browser-error-retry").addEventListener("click", () => {
-      window.desktopAPI.browserReload();
-    });
-    overlay.querySelector("#browser-error-open-installer").addEventListener("click", () => {
-      showScreen("installer");
-    });
-  }
+  overlay.querySelector("#browser-error-retry").addEventListener("click", () => {
+    window.desktopAPI.browserReload();
+  });
+  overlay.querySelector("#browser-error-open-installer").addEventListener("click", () => {
+    showScreen("installer");
+  });
 
   elements.browserOverlay.appendChild(overlay);
   syncBrowserLayoutSoon();
@@ -1300,17 +1242,8 @@ function applySettingsPayload(settings) {
   state.xamppPaths = settings.xamppPaths || null;
   state.effectiveDbProfile = settings.effectiveDbProfile || getEffectiveDbProfile();
   state.mysqlConfigContent = settings.mysqlConfigContent || "";
-  state.shareLocalSiteSessions = settings.shareLocalSiteSessions !== false;
-  state.shareOnlineSiteSessions = settings.shareOnlineSiteSessions === true;
-  if (Object.prototype.hasOwnProperty.call(settings, "googleOAuthClientId")) {
-    state.googleOAuthClientId = settings.googleOAuthClientId || "";
-  }
-  if (Object.prototype.hasOwnProperty.call(settings, "googleOAuthScopes")) {
-    state.googleOAuthScopes = settings.googleOAuthScopes || ["openid", "email", "profile"];
-  }
-  if (Object.prototype.hasOwnProperty.call(settings, "googleOAuthStatus")) {
-    state.googleOAuthStatus = settings.googleOAuthStatus || null;
-  }
+  state.shareLocalSiteSessions = true;
+  state.shareOnlineSiteSessions = true;
 
   elements.htdocsPath.value = state.htdocsPath;
   elements.settingsHtdocsPath.value = state.htdocsPath;
@@ -1321,30 +1254,19 @@ function applySettingsPayload(settings) {
 
   renderXamppSettings();
   renderSessionRules();
-  renderGoogleOAuthSettings();
   renderSiteDetails();
 }
 
 async function updateLocalSessionSharing() {
-  const enabled = elements.settingsShareLocalSessions.checked;
-  const result = await window.desktopAPI.setLocalSessionSharing(enabled);
+  const result = await window.desktopAPI.setLocalSessionSharing(true);
   applySettingsPayload(result);
-  setStatus(
-    enabled
-      ? "Local tabs now share their session. Opened local tabs keep their current session until reloaded or reopened."
-      : "Local tab isolation enabled. New local tabs will use their own session."
-  );
+  setStatus("The browser always uses one persistent session profile.");
 }
 
 async function updateOnlineSessionSharing() {
-  const enabled = elements.settingsShareOnlineSessions.checked;
-  const result = await window.desktopAPI.setOnlineSessionSharing(enabled);
+  const result = await window.desktopAPI.setOnlineSessionSharing(true);
   applySettingsPayload(result);
-  setStatus(
-    enabled
-      ? "Online tabs from the same site now share their session. Existing tabs keep their current session until reloaded or reopened."
-      : "Online tab isolation enabled. New online tabs will use their own session."
-  );
+  setStatus("The browser always uses one persistent session profile.");
 }
 
 async function pickAndSaveXamppRoot() {
@@ -1396,43 +1318,6 @@ async function saveMysqlConfigFromSettings() {
     setStatus("Saved MySQL config and DB credentials.");
   } catch (error) {
     setStatus(`Saving MySQL config failed: ${error.message}`);
-  }
-}
-
-async function saveGoogleOAuthConfigFromSettings() {
-  try {
-    const result = await window.desktopAPI.saveGoogleOAuthConfig({
-      clientId: elements.settingsGoogleClientId.value,
-      scopes: elements.settingsGoogleScopes.value
-    });
-    applySettingsPayload(result);
-    setStatus("Saved Google OAuth settings.");
-  } catch (error) {
-    setStatus(`Saving Google OAuth settings failed: ${error.message}`);
-  }
-}
-
-async function beginGoogleSigninFromSettings() {
-  try {
-    setStatus("Opening Google sign-in in your default browser...");
-    await saveGoogleOAuthConfigFromSettings();
-    const status = await window.desktopAPI.beginGoogleSignin();
-    state.googleOAuthStatus = status;
-    renderGoogleOAuthSettings();
-    setStatus(`Google connected as ${status.name || status.email || "your account"}.`);
-  } catch (error) {
-    setStatus(`Google sign-in failed: ${error.message}`);
-  }
-}
-
-async function signOutGoogleFromSettings() {
-  try {
-    const status = await window.desktopAPI.signOutGoogle();
-    state.googleOAuthStatus = status;
-    renderGoogleOAuthSettings();
-    setStatus("Signed out of Google in WP Desktop.");
-  } catch (error) {
-    setStatus(`Google sign-out failed: ${error.message}`);
   }
 }
 
@@ -1709,9 +1594,6 @@ elements.openMysqlConfigButton.addEventListener("click", () =>
 elements.settingsShareLocalSessions.addEventListener("change", () => void updateLocalSessionSharing());
 elements.settingsShareOnlineSessions.addEventListener("change", () => void updateOnlineSessionSharing());
 elements.saveMysqlConfigButton.addEventListener("click", () => void saveMysqlConfigFromSettings());
-elements.saveGoogleOAuthButton.addEventListener("click", () => void saveGoogleOAuthConfigFromSettings());
-elements.googleSigninButton.addEventListener("click", () => void beginGoogleSigninFromSettings());
-elements.googleSignoutButton.addEventListener("click", () => void signOutGoogleFromSettings());
 elements.openControlPanelButton.addEventListener("click", () =>
   void openExistingPath(state.xamppPaths?.controlPanelPath, "XAMPP control panel was not found.")
 );

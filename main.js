@@ -1,13 +1,11 @@
 const path = require("path");
 const fs = require("fs");
 const net = require("net");
-const http = require("http");
-const crypto = require("crypto");
 const { spawn } = require("child_process");
 const {
   app,
   BrowserWindow,
-  WebContentsView,
+  BrowserView,
   Menu,
   clipboard,
   dialog,
@@ -23,24 +21,6 @@ const AdmZip = require("adm-zip");
 let lastFocusedWindow = null;
 const browserWindows = new Map();
 const configuredBrowserPartitions = new Set();
-const AUTO_ALLOWED_BROWSER_PERMISSIONS = new Set([
-  "fullscreen",
-  "notifications",
-  "pointerLock",
-  "keyboardLock",
-  "idle-detection",
-  "local-fonts",
-  "storage-access",
-  "top-level-storage-access",
-  "clipboard-sanitized-write"
-]);
-const PROMPTED_BROWSER_PERMISSIONS = new Set([
-  "geolocation",
-  "media",
-  "display-capture",
-  "clipboard-read",
-  "openExternal"
-]);
 
 function ignoreBrokenPipe(error) {
   if (error?.code === "EPIPE") {
@@ -61,11 +41,6 @@ process.on("uncaughtException", (error) => {
   throw error;
 });
 
-app.disableHardwareAcceleration();
-app.commandLine.appendSwitch("disable-http-cache");
-app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
-app.userAgentFallback = getBrowserUserAgent();
-
 function getVaultPath() {
   return path.join(app.getPath("userData"), "vault.bin");
 }
@@ -85,8 +60,7 @@ function getBrowserHistoryPath() {
 function getDefaultVault() {
   return {
     installerDb: null,
-    siteCredentials: {},
-    googleOAuth: null
+    siteCredentials: {}
   };
 }
 
@@ -106,8 +80,7 @@ function getVault() {
 
     return {
       installerDb: parsed.installerDb || null,
-      siteCredentials: parsed.siteCredentials || {},
-      googleOAuth: parsed.googleOAuth || null
+      siteCredentials: parsed.siteCredentials || {}
     };
   } catch (_) {
     return getDefaultVault();
@@ -344,12 +317,6 @@ function getDefaultSettings() {
     htdocsPath: getDefaultHtdocsPath(),
     dbUser: "root",
     dbPassword: "",
-    googleOAuthClientId: "",
-    googleOAuthScopes: [
-      "openid",
-      "email",
-      "profile"
-    ],
     shareLocalSiteSessions: true,
     shareOnlineSiteSessions: false,
     downloadDirectory: app.getPath("downloads"),
@@ -388,10 +355,6 @@ function normalizeSettings(input = {}) {
     htdocsPath: input.htdocsPath || (input.xamppRootPath ? path.join(input.xamppRootPath, "htdocs") : getDefaultHtdocsPath()),
     dbUser: String(input.dbUser || "root").trim() || "root",
     dbPassword: input.dbPassword ?? "",
-    googleOAuthClientId: String(input.googleOAuthClientId || "").trim(),
-    googleOAuthScopes: Array.isArray(input.googleOAuthScopes)
-      ? input.googleOAuthScopes.map((scope) => String(scope || "").trim()).filter(Boolean)
-      : ["openid", "email", "profile"],
     shareLocalSiteSessions: input.shareLocalSiteSessions !== false,
     shareOnlineSiteSessions: input.shareOnlineSiteSessions === true,
     downloadDirectory: input.downloadDirectory || app.getPath("downloads"),
@@ -443,11 +406,6 @@ function resolveDbProfile(primaryProfile, fallbackProfile) {
 
 function getDefaultStartupUrl() {
   return "http://localhost/";
-}
-
-function getBrowserUserAgent() {
-  const chromeVersion = process.versions.chrome || "126.0.0.0";
-  return `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion} Safari/537.36`;
 }
 
 function findLaunchUrl(argv = process.argv) {
@@ -567,11 +525,7 @@ async function fetchRemoteSearchSuggestions(query) {
   }
 
   try {
-    const response = await fetch(`https://duckduckgo.com/ac/?q=${encodeURIComponent(raw)}&type=list`, {
-      headers: {
-        "user-agent": getBrowserUserAgent()
-      }
-    });
+    const response = await fetch(`https://duckduckgo.com/ac/?q=${encodeURIComponent(raw)}&type=list`);
 
     if (!response.ok) {
       return [];
@@ -592,106 +546,21 @@ async function fetchRemoteSearchSuggestions(query) {
 }
 
 function getPartitionForUrl(url, tabId, mode = "auto") {
-  if (mode === "personal") {
-    try {
-      const parsed = new URL(url);
-      return `persist:personal-${parsed.origin.replace(/[^a-z0-9]/gi, "-").toLowerCase()}`;
-    } catch (_) {
-      return `persist:personal-${tabId}`;
-    }
-  }
-
-  if (mode === "isolated") {
-    return `isolated-${tabId}`;
-  }
-
-  try {
-    const parsed = new URL(url);
-    const isLocal = ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname);
-    const settings = getSettings();
-    if (isLocal) {
-      if (settings.shareLocalSiteSessions === false) {
-        return `isolated-${tabId}`;
-      }
-      return `persist:local-${parsed.origin.replace(/[^a-z0-9]/gi, "-").toLowerCase()}`;
-    }
-
-    if (settings.shareOnlineSiteSessions === true) {
-      return `persist:remote-${parsed.origin.replace(/[^a-z0-9]/gi, "-").toLowerCase()}`;
-    }
-  } catch (_) {
-    return `isolated-${tabId}`;
-  }
-
-  return `isolated-${tabId}`;
+  return "persist:main";
 }
 
 function buildBrowserWebPreferences(partition) {
   return {
     partition,
-    sandbox: false,
+    sandbox: true,
     contextIsolation: true,
     nodeIntegration: false,
     javascript: true,
+    nativeWindowOpen: true,
     webSecurity: true,
     allowRunningInsecureContent: false,
     spellcheck: true
   };
-}
-
-function getPermissionOrigin(details = {}) {
-  const candidate = details.requestingUrl || details.requestingOrigin || details.externalURL || "";
-
-  try {
-    return new URL(candidate).origin;
-  } catch (_) {
-    return candidate || "this site";
-  }
-}
-
-function promptBrowserPermission(win, permission, details) {
-  const target = getPermissionOrigin(details);
-  const response = dialog.showMessageBoxSync(win, {
-    type: "question",
-    buttons: ["Allow", "Block"],
-    defaultId: 0,
-    cancelId: 1,
-    title: "Site permission request",
-    message: `${target} wants to use ${permission}.`,
-    detail: "Allow access only if you trust this site."
-  });
-
-  return response === 0;
-}
-
-function checkBrowserPermission(permission, details) {
-  const origin = getPermissionOrigin(details);
-  const savedDecision = getStoredPermissionDecision(origin, permission);
-  if (savedDecision) {
-    return savedDecision === "allow";
-  }
-
-  return AUTO_ALLOWED_BROWSER_PERMISSIONS.has(permission);
-}
-
-function requestBrowserPermission(win, permission, details) {
-  const origin = getPermissionOrigin(details);
-  const savedDecision = getStoredPermissionDecision(origin, permission);
-  if (savedDecision) {
-    return savedDecision === "allow";
-  }
-
-  if (AUTO_ALLOWED_BROWSER_PERMISSIONS.has(permission)) {
-    return true;
-  }
-
-  if (PROMPTED_BROWSER_PERMISSIONS.has(permission)) {
-    const allowed = promptBrowserPermission(win, permission, details);
-    savePermissionDecision(origin, permission, allowed ? "allow" : "block");
-    return allowed;
-  }
-
-  return false;
 }
 
 function getStoredPermissionDecision(origin, permission) {
@@ -895,12 +764,6 @@ function configureBrowserSession(win, partition) {
   }
 
   const browserSession = session.fromPartition(partition);
-  browserSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin, details) =>
-    checkBrowserPermission(permission, { requestingOrigin, ...(details || {}) })
-  );
-  browserSession.setPermissionRequestHandler((_webContents, permission, callback, details) => {
-    callback(requestBrowserPermission(win, permission, details));
-  });
   attachDownloadTracking(win, browserSession);
   configuredBrowserPartitions.add(partition);
 }
@@ -1728,7 +1591,7 @@ function detachActiveView(win) {
   const active = state.tabs.find((tab) => tab.id === state.attachedTabId);
   if (active) {
     try {
-      win.contentView.removeChildView(active.view);
+      win.removeBrowserView(active.view);
     } catch (_) {
       // Ignore double-removal.
     }
@@ -1748,11 +1611,12 @@ function attachActiveView(win) {
 
   if (state.attachedTabId !== active.id) {
     detachActiveView(win);
-    win.contentView.addChildView(active.view);
+    win.setBrowserView(active.view);
     state.attachedTabId = active.id;
   }
 
   active.view.setBounds(state.browserBounds);
+  active.view.setAutoResize({ width: true, height: true });
 }
 
 function buildContextMenu(win, tab, params) {
@@ -1812,7 +1676,12 @@ function buildContextMenu(win, tab, params) {
     {
       label: "Visual Search",
       enabled: Boolean(linkUrl),
-      click: () => shell.openExternal(`https://www.google.com/searchbyimage?image_url=${encodeURIComponent(linkUrl)}`)
+      click: () => createBrowserTab(
+        win,
+        `https://www.google.com/searchbyimage?image_url=${encodeURIComponent(linkUrl)}`,
+        "auto",
+        true
+      )
     },
     {
       label: "More tools",
@@ -1916,300 +1785,6 @@ function snapshotClosedTab(tab) {
     pinned: Boolean(tab.pinned),
     muted: Boolean(tab.muted)
   };
-}
-
-function isGoogleSignInRejectedUrl(url) {
-  try {
-    const parsed = new URL(url);
-    return parsed.hostname.toLowerCase() === "accounts.google.com" && parsed.pathname.toLowerCase().includes("/signin/rejected");
-  } catch (_) {
-    return false;
-  }
-}
-
-function getGoogleSignInHandoffUrl(url) {
-  const fallbackUrl = "https://accounts.google.com/ServiceLogin";
-
-  try {
-    const parsed = new URL(url);
-    if (!isGoogleSignInRejectedUrl(url)) {
-      return parsed.toString();
-    }
-
-    const continueTarget = parsed.searchParams.get("continue") || "";
-    const flowEntry = parsed.searchParams.get("flowEntry") || "ServiceLogin";
-    const flowName = parsed.searchParams.get("flowName") || "GlifWebSignIn";
-    const hl = parsed.searchParams.get("hl") || "";
-
-    const handoffUrl = new URL(fallbackUrl);
-    if (/^https?:\/\//i.test(continueTarget)) {
-      handoffUrl.searchParams.set("continue", continueTarget);
-    }
-    handoffUrl.searchParams.set("flowEntry", flowEntry);
-    handoffUrl.searchParams.set("flowName", flowName);
-    if (hl) {
-      handoffUrl.searchParams.set("hl", hl);
-    }
-
-    return handoffUrl.toString();
-  } catch (_) {
-    return fallbackUrl;
-  }
-}
-
-function normalizeGoogleScopes(input) {
-  const rawScopes = Array.isArray(input)
-    ? input
-    : String(input || "")
-        .split(/[\s,]+/)
-        .map((value) => value.trim())
-        .filter(Boolean);
-
-  const scopes = Array.from(new Set(rawScopes));
-  if (!scopes.includes("openid")) {
-    scopes.unshift("openid");
-  }
-  if (!scopes.includes("email")) {
-    scopes.push("email");
-  }
-  if (!scopes.includes("profile")) {
-    scopes.push("profile");
-  }
-  return scopes;
-}
-
-function getGoogleOAuthConfig(settings = getSettings()) {
-  return {
-    clientId: String(settings.googleOAuthClientId || "").trim(),
-    scopes: normalizeGoogleScopes(settings.googleOAuthScopes)
-  };
-}
-
-function getGoogleOAuthVaultState() {
-  return getVault().googleOAuth || null;
-}
-
-function getGoogleOAuthStatus() {
-  const stored = getGoogleOAuthVaultState();
-  const tokens = stored?.tokens || null;
-  const user = stored?.user || null;
-  const expiresAt = Number(tokens?.expiresAt || 0) || null;
-  const scopes = normalizeGoogleScopes(stored?.scopes || []);
-
-  return {
-    connected: Boolean(tokens?.refreshToken || tokens?.accessToken),
-    email: user?.email || "",
-    name: user?.name || "",
-    picture: user?.picture || "",
-    expiresAt,
-    scopes,
-    hasRefreshToken: Boolean(tokens?.refreshToken)
-  };
-}
-
-function saveGoogleOAuthState(payload) {
-  const vault = getVault();
-  vault.googleOAuth = payload || null;
-  saveVault(vault);
-}
-
-function clearGoogleOAuthState() {
-  const vault = getVault();
-  vault.googleOAuth = null;
-  saveVault(vault);
-}
-
-function createPkcePair() {
-  const codeVerifier = crypto.randomBytes(48).toString("base64url");
-  const codeChallenge = crypto.createHash("sha256").update(codeVerifier).digest("base64url");
-  return { codeVerifier, codeChallenge };
-}
-
-function createOAuthState() {
-  return crypto.randomBytes(24).toString("base64url");
-}
-
-function buildGoogleOAuthSettingsPayload(settings = getSettings()) {
-  const config = getGoogleOAuthConfig(settings);
-  return {
-    googleOAuthClientId: config.clientId,
-    googleOAuthScopes: config.scopes,
-    googleOAuthStatus: getGoogleOAuthStatus()
-  };
-}
-
-function startLoopbackCallbackServer(expectedState) {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    let resultResolver = null;
-    const finish = (payload) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      resultResolver?.(payload);
-      server.close();
-    };
-
-    const server = http.createServer((request, response) => {
-      try {
-        const requestUrl = new URL(request.url || "/", "http://127.0.0.1");
-        const code = requestUrl.searchParams.get("code") || "";
-        const state = requestUrl.searchParams.get("state") || "";
-        const error = requestUrl.searchParams.get("error") || "";
-        const errorDescription = requestUrl.searchParams.get("error_description") || "";
-
-        response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-        if (error) {
-          response.end("<html><body><h2>Google sign-in cancelled</h2><p>You can close this window and return to WP Desktop.</p></body></html>");
-          finish({ error, errorDescription });
-          return;
-        }
-
-        if (!code || state !== expectedState) {
-          response.end("<html><body><h2>Sign-in failed</h2><p>The returned Google OAuth state was invalid. You can close this window.</p></body></html>");
-          finish({ error: "invalid_state", errorDescription: "State mismatch or missing code." });
-          return;
-        }
-
-        response.end("<html><body><h2>Sign-in complete</h2><p>You can close this window and return to WP Desktop.</p></body></html>");
-        finish({ code });
-      } catch (error) {
-        response.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
-        response.end("<html><body><h2>Sign-in failed</h2><p>You can close this window and return to WP Desktop.</p></body></html>");
-        finish({ error: "callback_failure", errorDescription: error.message });
-      }
-    });
-
-    server.on("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (!address || typeof address !== "object") {
-        server.close();
-        reject(new Error("Could not start local OAuth callback server."));
-        return;
-      }
-
-      resolve({
-        redirectUri: `http://127.0.0.1:${address.port}/oauth/google/callback`,
-        waitForResult: () => new Promise((waitResolve) => {
-          resultResolver = waitResolve;
-        }),
-        close: () => {
-          if (!settled) {
-            finish({ error: "cancelled", errorDescription: "Sign-in window was closed." });
-          }
-        }
-      });
-    });
-  });
-}
-
-async function exchangeGoogleAuthorizationCode({ clientId, code, codeVerifier, redirectUri }) {
-  const response = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/x-www-form-urlencoded"
-    },
-    body: new URLSearchParams({
-      client_id: clientId,
-      code,
-      code_verifier: codeVerifier,
-      grant_type: "authorization_code",
-      redirect_uri: redirectUri
-    }).toString()
-  });
-
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(payload.error_description || payload.error || "Google token exchange failed.");
-  }
-
-  return payload;
-}
-
-async function fetchGoogleUserProfile(accessToken) {
-  const response = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
-    headers: {
-      Authorization: `Bearer ${accessToken}`
-    }
-  });
-
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(payload.error_description || payload.error || "Could not load Google account profile.");
-  }
-
-  return payload;
-}
-
-async function beginGoogleOAuthFlow() {
-  const settings = getSettings();
-  const config = getGoogleOAuthConfig(settings);
-  if (!config.clientId) {
-    throw new Error("Set a Google OAuth client ID in Settings first.");
-  }
-
-  const oauthState = createOAuthState();
-  const pkce = createPkcePair();
-  const callback = await startLoopbackCallbackServer(oauthState);
-  const authUrl = new URL("https://accounts.google.com/o/oauth2/v2/auth");
-  authUrl.searchParams.set("client_id", config.clientId);
-  authUrl.searchParams.set("redirect_uri", callback.redirectUri);
-  authUrl.searchParams.set("response_type", "code");
-  authUrl.searchParams.set("scope", config.scopes.join(" "));
-  authUrl.searchParams.set("state", oauthState);
-  authUrl.searchParams.set("code_challenge", pkce.codeChallenge);
-  authUrl.searchParams.set("code_challenge_method", "S256");
-  authUrl.searchParams.set("access_type", "offline");
-  authUrl.searchParams.set("prompt", "consent");
-
-  await shell.openExternal(authUrl.toString());
-
-  let result;
-  try {
-    result = await Promise.race([
-      callback.waitForResult(),
-      new Promise((resolve) => setTimeout(() => resolve({
-        error: "timeout",
-        errorDescription: "Timed out waiting for the Google sign-in callback."
-      }), 180000))
-    ]);
-  } finally {
-    callback.close?.();
-  }
-
-  if (!result?.code) {
-    throw new Error(result?.errorDescription || result?.error || "Google sign-in did not return an authorization code.");
-  }
-
-  const tokenPayload = await exchangeGoogleAuthorizationCode({
-    clientId: config.clientId,
-    code: result.code,
-    codeVerifier: pkce.codeVerifier,
-    redirectUri: callback.redirectUri
-  });
-  const user = await fetchGoogleUserProfile(tokenPayload.access_token);
-
-  saveGoogleOAuthState({
-    scopes: config.scopes,
-    user: {
-      email: user.email || "",
-      name: user.name || "",
-      picture: user.picture || ""
-    },
-    tokens: {
-      accessToken: tokenPayload.access_token || "",
-      refreshToken: tokenPayload.refresh_token || getGoogleOAuthVaultState()?.tokens?.refreshToken || "",
-      idToken: tokenPayload.id_token || "",
-      tokenType: tokenPayload.token_type || "Bearer",
-      scope: tokenPayload.scope || config.scopes.join(" "),
-      expiresAt: Date.now() + (Number(tokenPayload.expires_in || 0) * 1000)
-    },
-    updatedAt: new Date().toISOString()
-  });
-
-  return getGoogleOAuthStatus();
 }
 
 function rememberClosedTab(win, tab) {
@@ -2449,7 +2024,6 @@ function buildBookmarkDialogHtml(requestId, payload = {}) {
       </div>
     </div>
     <script>
-      const { ipcRenderer } = require("electron");
       const requestId = ${JSON.stringify(requestId)};
       const input = document.getElementById("title-input");
       const closeButton = document.getElementById("close-button");
@@ -2457,7 +2031,7 @@ function buildBookmarkDialogHtml(requestId, payload = {}) {
       const removeButton = document.getElementById("remove-button");
       const moreButton = document.getElementById("more-button");
 
-      const send = (result) => ipcRenderer.send("browser:bookmark-dialog-result", { requestId, result });
+      const send = (result) => window.dialogAPI.sendBookmarkDialogResult({ requestId, result });
 
       closeButton.addEventListener("click", () => send({ action: "cancel" }));
       doneButton.addEventListener("click", () => {
@@ -2532,9 +2106,11 @@ function showBookmarkSaveDialog(win, payload = {}) {
       title: payload.mode === "edit" ? "Edit favorite" : "Favorite added",
       backgroundColor: "#232323",
       webPreferences: {
-        sandbox: false,
-        contextIsolation: false,
-        nodeIntegration: true
+        preload: path.join(__dirname, "dialog-preload.js"),
+        sandbox: true,
+        contextIsolation: true,
+        nodeIntegration: false,
+        webSecurity: true
       }
     });
 
@@ -2558,7 +2134,7 @@ function wireTabEvents(win, tab) {
   const wc = tab.view.webContents;
 
   wc.setWindowOpenHandler((details) => {
-    createBrowserTab(win, details.url, "auto", true);
+    createBrowserTab(win, details.url, tab.mode || "auto", true);
     return { action: "deny" };
   });
 
@@ -2582,26 +2158,13 @@ function wireTabEvents(win, tab) {
 
   wc.on("did-navigate", (_event, url) => {
     tab.url = url;
-    tab.error = isGoogleSignInRejectedUrl(url)
-      ? {
-          type: "google_auth_blocked",
-          url,
-          description: "Google blocked sign-in inside this embedded browser."
-        }
-      : null;
+    tab.error = null;
     recordBrowserHistoryVisit(tab.url, tab.title);
     emitBrowserState(win);
   });
 
   wc.on("did-navigate-in-page", (_event, url) => {
     tab.url = url;
-    if (isGoogleSignInRejectedUrl(url)) {
-      tab.error = {
-        type: "google_auth_blocked",
-        url,
-        description: "Google blocked sign-in inside this embedded browser."
-      };
-    }
     recordBrowserHistoryVisit(tab.url, tab.title);
     emitBrowserState(win);
   });
@@ -2633,7 +2196,7 @@ function createBrowserTab(win, url, mode = "auto", activate = true, insertIndex 
   const id = `tab-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`;
   const partition = getPartitionForUrl(resolvedUrl, id, mode);
   configureBrowserSession(win, partition);
-  const view = new WebContentsView({
+  const view = new BrowserView({
     webPreferences: buildBrowserWebPreferences(partition)
   });
 
@@ -2652,7 +2215,6 @@ function createBrowserTab(win, url, mode = "auto", activate = true, insertIndex 
   };
 
   wireTabEvents(win, tab);
-  view.webContents.setUserAgent(getBrowserUserAgent());
   view.webContents.setAudioMuted(tab.muted);
   insertTabAt(state, tab, insertIndex);
 
@@ -2663,6 +2225,7 @@ function createBrowserTab(win, url, mode = "auto", activate = true, insertIndex 
   wcSafeLoadURL(view.webContents, resolvedUrl);
   attachActiveView(win);
   emitBrowserState(win);
+  return tab;
 }
 
 function wcSafeLoadURL(webContents, url) {
@@ -2732,11 +2295,10 @@ function navigateActiveBrowserTab(win, url) {
 
     active.view.webContents.close({ waitForBeforeUnload: false });
     configureBrowserSession(win, nextPartition);
-    active.view = new WebContentsView({
+    active.view = new BrowserView({
       webPreferences: buildBrowserWebPreferences(nextPartition)
     });
     wireTabEvents(win, active);
-    active.view.webContents.setUserAgent(getBrowserUserAgent());
     wcSafeLoadURL(active.view.webContents, resolvedUrl);
     if (wasActive) {
       attachActiveView(win);
@@ -3017,7 +2579,6 @@ function buildTabNicknameDialogHtml(requestId, payload = {}) {
       </div>
     </div>
     <script>
-      const { ipcRenderer } = require("electron");
       const requestId = ${JSON.stringify(requestId)};
       const input = document.getElementById("nickname-input");
       const closeButton = document.getElementById("close-button");
@@ -3025,7 +2586,7 @@ function buildTabNicknameDialogHtml(requestId, payload = {}) {
       const clearButton = document.getElementById("clear-button");
 
       const send = (result) => {
-        ipcRenderer.send("browser:tab-nickname-dialog-result", {
+        window.dialogAPI.sendTabNicknameDialogResult({
           requestId,
           result
         });
@@ -3098,9 +2659,11 @@ function showTabNicknameDialog(win, payload = {}) {
       title: "Nickname tab",
       backgroundColor: "#232323",
       webPreferences: {
-        sandbox: false,
-        contextIsolation: false,
-        nodeIntegration: true
+        preload: path.join(__dirname, "dialog-preload.js"),
+        sandbox: true,
+        contextIsolation: true,
+        nodeIntegration: false,
+        webSecurity: true
       }
     });
 
@@ -3668,17 +3231,6 @@ function showSiteContextMenu(win, site) {
   Menu.buildFromTemplate(template).popup({ window: win });
 }
 
-function registerAsBrowser() {
-  if (process.defaultApp) {
-    app.setAsDefaultProtocolClient("http", process.execPath, [path.resolve(process.argv[1])]);
-    app.setAsDefaultProtocolClient("https", process.execPath, [path.resolve(process.argv[1])]);
-    return;
-  }
-
-  app.setAsDefaultProtocolClient("http");
-  app.setAsDefaultProtocolClient("https");
-}
-
 function createWindow(options = {}) {
   const isSplit = Boolean(options.splitScreen);
   const workArea = screen.getPrimaryDisplay().workAreaSize;
@@ -3690,8 +3242,10 @@ function createWindow(options = {}) {
     backgroundColor: "#f3f1ee",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
+      sandbox: true,
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      webSecurity: true
     }
   });
 
@@ -3739,7 +3293,6 @@ app.on("second-instance", (_event, argv) => {
 });
 
 app.whenReady().then(() => {
-  registerAsBrowser();
   createWindow({ startupUrl: findLaunchUrl() || getDefaultStartupUrl() });
 
   app.on("activate", () => {
@@ -3747,16 +3300,6 @@ app.whenReady().then(() => {
       createWindow({ startupUrl: getDefaultStartupUrl() });
     }
   });
-});
-
-app.on("open-url", (event, url) => {
-  event.preventDefault();
-  const target = lastFocusedWindow || BrowserWindow.getAllWindows()[0];
-  if (target) {
-    sendUrlToWindow(target, url);
-  } else {
-    createWindow({ startupUrl: url });
-  }
 });
 
 app.on("window-all-closed", () => {
@@ -4192,39 +3735,8 @@ ipcMain.handle("settings:get", async () => {
     detectedDbProfile: detectXamppDbProfile(getResolvedHtdocsPath(settings)),
     effectiveDbProfile: getEffectiveDbProfile(settings),
     mysqlConfigContent: readMysqlConfigContent(settings),
-    xamppPaths,
-    ...buildGoogleOAuthSettingsPayload(settings)
+    xamppPaths
   };
-});
-
-ipcMain.handle("settings:save-google-oauth-config", async (_event, payload) => {
-  const settings = getSettings();
-  settings.googleOAuthClientId = String(payload?.clientId || "").trim();
-  settings.googleOAuthScopes = normalizeGoogleScopes(payload?.scopes);
-  saveSettings(settings);
-
-  const apacheRunning = await isApacheRunning();
-  return {
-    ...settings,
-    htdocsPath: getResolvedHtdocsPath(settings),
-    apacheRunning,
-    detectedDbProfile: detectXamppDbProfile(getResolvedHtdocsPath(settings)),
-    effectiveDbProfile: getEffectiveDbProfile(settings),
-    mysqlConfigContent: readMysqlConfigContent(settings),
-    xamppPaths: getXamppPathsSummary(settings),
-    ...buildGoogleOAuthSettingsPayload(settings)
-  };
-});
-
-ipcMain.handle("oauth:get-google-status", () => getGoogleOAuthStatus());
-
-ipcMain.handle("oauth:begin-google-signin", async () => {
-  return beginGoogleOAuthFlow();
-});
-
-ipcMain.handle("oauth:signout-google", () => {
-  clearGoogleOAuthState();
-  return getGoogleOAuthStatus();
 });
 
 ipcMain.handle("settings:set-htdocs", async (_event, htdocsPath) => {
@@ -4293,8 +3805,7 @@ ipcMain.handle("settings:set-online-session-sharing", async (_event, enabled) =>
     detectedDbProfile: detectXamppDbProfile(getResolvedHtdocsPath(settings)),
     effectiveDbProfile: getEffectiveDbProfile(settings),
     mysqlConfigContent: readMysqlConfigContent(settings),
-    xamppPaths: getXamppPathsSummary(settings),
-    ...buildGoogleOAuthSettingsPayload(settings)
+    xamppPaths: getXamppPathsSummary(settings)
   };
 });
 
@@ -4424,16 +3935,6 @@ ipcMain.handle("installer:run", async (_event, payload) => {
     db,
     site: siteRecord
   };
-});
-
-ipcMain.handle("shell:open-external", async (_event, url) => {
-  await shell.openExternal(url);
-});
-
-ipcMain.handle("browser:continue-google-signin", async (_event, url) => {
-  const handoffUrl = getGoogleSignInHandoffUrl(url);
-  await shell.openExternal(handoffUrl);
-  return handoffUrl;
 });
 
 ipcMain.handle("shell:open-path", async (_event, targetPath) => {

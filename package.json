@@ -27,6 +27,7 @@
     "files": [
       "main.js",
       "preload.js",
+      "dialog-preload.js",
       "src/**/*",
       "package.json",
       "node_modules/**/*"
