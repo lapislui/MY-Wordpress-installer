@@ -21,6 +21,7 @@ const AdmZip = require("adm-zip");
 let lastFocusedWindow = null;
 const browserWindows = new Map();
 const configuredBrowserPartitions = new Set();
+const VAULT_CAPTURE_LOG_PREFIX = "__WP_DESKTOP_SAVE_CREDENTIAL__:";
 
 function ignoreBrokenPipe(error) {
   if (error?.code === "EPIPE") {
@@ -64,6 +65,135 @@ function getDefaultVault() {
   };
 }
 
+function normalizeVaultCredentialEntry(entry, fallbackId = "") {
+  const username = String(entry?.username || "");
+  const password = String(entry?.password || "");
+  const timestamp = new Date().toISOString();
+
+  return {
+    id: String(entry?.id || fallbackId || `cred-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`),
+    username,
+    password,
+    createdAt: entry?.createdAt || timestamp,
+    updatedAt: entry?.updatedAt || timestamp
+  };
+}
+
+function normalizeVaultCredentialCollection(value, key = "") {
+  if (value && typeof value === "object" && Array.isArray(value.entries)) {
+    const entries = value.entries
+      .map((entry, index) => normalizeVaultCredentialEntry(entry, `${key || "site"}-${index + 1}`))
+      .filter((entry) => entry.username || entry.password);
+    const selectedId = entries.some((entry) => entry.id === value.selectedId)
+      ? value.selectedId
+      : entries[0]?.id || null;
+    return { entries, selectedId };
+  }
+
+  if (value && typeof value === "object" && ("username" in value || "password" in value)) {
+    const entry = normalizeVaultCredentialEntry(value, `${key || "site"}-1`);
+    if (!entry.username && !entry.password) {
+      return { entries: [], selectedId: null };
+    }
+    return { entries: [entry], selectedId: entry.id };
+  }
+
+  return { entries: [], selectedId: null };
+}
+
+function getVaultCredentialCollection(vault, key) {
+  return normalizeVaultCredentialCollection(vault?.siteCredentials?.[key], key);
+}
+
+function getPreferredVaultCredential(vault, key) {
+  const collection = getVaultCredentialCollection(vault, key);
+  return (
+    collection.entries.find((entry) => entry.id === collection.selectedId) ||
+    collection.entries[0] ||
+    null
+  );
+}
+
+function saveVaultCredential(vault, payload) {
+  const key = String(payload?.key || "");
+  if (!key) {
+    throw new Error("Missing credential key.");
+  }
+
+  const username = String(payload?.username || "");
+  const password = String(payload?.password || "");
+  const collection = getVaultCredentialCollection(vault, key);
+  const now = new Date().toISOString();
+  let selectedEntry =
+    collection.entries.find((entry) => entry.id === payload?.id) ||
+    collection.entries.find((entry) => entry.username === username && entry.password === password) ||
+    null;
+
+  if (selectedEntry) {
+    selectedEntry.username = username;
+    selectedEntry.password = password;
+    selectedEntry.updatedAt = now;
+  } else {
+    selectedEntry = normalizeVaultCredentialEntry(
+      {
+        username,
+        password,
+        createdAt: now,
+        updatedAt: now
+      },
+      `${key}-${collection.entries.length + 1}`
+    );
+    collection.entries.unshift(selectedEntry);
+  }
+
+  collection.entries = collection.entries.filter((entry) => entry.username || entry.password);
+  collection.selectedId = selectedEntry.id;
+  vault.siteCredentials[key] = collection;
+  return collection;
+}
+
+function removeVaultCredential(vault, key, credentialId = "") {
+  if (!key) {
+    return { entries: [], selectedId: null };
+  }
+
+  if (!vault.siteCredentials[key]) {
+    return { entries: [], selectedId: null };
+  }
+
+  if (!credentialId) {
+    delete vault.siteCredentials[key];
+    return { entries: [], selectedId: null };
+  }
+
+  const collection = getVaultCredentialCollection(vault, key);
+  collection.entries = collection.entries.filter((entry) => entry.id !== credentialId);
+  collection.selectedId = collection.entries[0]?.id || null;
+
+  if (!collection.entries.length) {
+    delete vault.siteCredentials[key];
+    return { entries: [], selectedId: null };
+  }
+
+  vault.siteCredentials[key] = collection;
+  return collection;
+}
+
+function serializeVaultCredentialResponse(value, key = "") {
+  const collection = normalizeVaultCredentialCollection(value, key);
+  const preferred =
+    collection.entries.find((entry) => entry.id === collection.selectedId) ||
+    collection.entries[0] ||
+    null;
+
+  return {
+    entries: collection.entries,
+    selectedId: collection.selectedId,
+    username: preferred?.username || "",
+    password: preferred?.password || ""
+  };
+}
+
 function getVault() {
   const vaultPath = getVaultPath();
 
@@ -80,7 +210,12 @@ function getVault() {
 
     return {
       installerDb: parsed.installerDb || null,
-      siteCredentials: parsed.siteCredentials || {}
+      siteCredentials: Object.fromEntries(
+        Object.entries(parsed.siteCredentials || {}).map(([key, value]) => [
+          key,
+          normalizeVaultCredentialCollection(value, key)
+        ])
+      )
     };
   } catch (_) {
     return getDefaultVault();
@@ -982,6 +1117,45 @@ function sanitizeDbName(name) {
   return name.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "wordpress";
 }
 
+function getSiteRootFolderNameFromUrl(url, settings = getSettings()) {
+  try {
+    const parsed = new URL(url);
+
+    if (parsed.protocol === "file:") {
+      const filePath = decodeURIComponent(parsed.pathname || "").replace(/^\/+/, "");
+      const normalizedPath = filePath.replace(/\//g, path.sep);
+      const sitePath = hasWordPressFiles(normalizedPath)
+        ? normalizedPath
+        : path.dirname(normalizedPath);
+      return path.basename(sitePath);
+    }
+
+    if (!["localhost", "127.0.0.1", "::1"].includes(parsed.hostname)) {
+      return "";
+    }
+
+    const pathname = decodeURIComponent(parsed.pathname || "");
+    const segments = pathname.split("/").filter(Boolean);
+    if (!segments.length) {
+      return "";
+    }
+
+    const htdocsPath = getResolvedHtdocsPath(settings);
+    if (!htdocsPath) {
+      return segments[0];
+    }
+
+    const sitePath = path.join(htdocsPath, ...segments);
+    if (hasWordPressFiles(sitePath)) {
+      return path.basename(sitePath);
+    }
+
+    return segments[0];
+  } catch (_) {
+    return "";
+  }
+}
+
 function parseWpConfig(sitePath) {
   const configPath = path.join(sitePath, "wp-config.php");
   if (!fs.existsSync(configPath)) {
@@ -1050,9 +1224,28 @@ function getBackupTimestamp() {
   ].join("");
 }
 
-function getBackupDefaultPath(siteName) {
+function getSiteBackupDirectory(sitePath) {
+  const resolvedSitePath = path.resolve(sitePath || "");
+  if (!resolvedSitePath) {
+    return path.join(app.getPath("documents"), "WP Desktop Backups");
+  }
+
+  return path.join(path.dirname(resolvedSitePath), "backups");
+}
+
+function getBackupDefaultPath(siteName, sitePath = "") {
   const safeName = (siteName || "wordpress-site").replace(/[^a-z0-9_-]/gi, "-");
-  return path.join(app.getPath("documents"), `${safeName}-backup-${getBackupTimestamp()}.zip`);
+  return path.join(getSiteBackupDirectory(sitePath), `${safeName}-backup-${getBackupTimestamp()}.zip`);
+}
+
+function copyIfExists(sourcePath, destinationPath) {
+  if (!sourcePath || !fs.existsSync(sourcePath)) {
+    return false;
+  }
+
+  ensureDir(path.dirname(destinationPath));
+  fs.cpSync(sourcePath, destinationPath, { recursive: true, force: true });
+  return true;
 }
 
 async function createSqlDump({ connection, dbName }) {
@@ -1100,14 +1293,9 @@ async function createSqlDump({ connection, dbName }) {
 async function backupSiteResources(payload) {
   const site = payload?.site || payload;
   const manualDatabase = payload?.database || {};
-  const savePath = String(payload?.savePath || "").trim();
 
   if (!site?.path || !site?.id) {
     throw new Error("Missing site details.");
-  }
-
-  if (!savePath || path.extname(savePath).toLowerCase() !== ".zip") {
-    throw new Error("Select a valid backup zip path.");
   }
 
   const settings = getSettings();
@@ -1130,14 +1318,24 @@ async function backupSiteResources(payload) {
     },
     detectedDb
   );
+  const savePath = String(payload?.savePath || "").trim() || getBackupDefaultPath(site.name, resolvedSitePath);
+
+  if (path.extname(savePath).toLowerCase() !== ".zip") {
+    throw new Error("Select a valid backup zip path.");
+  }
 
   ensureDir(path.dirname(savePath));
 
   const tempRoot = fs.mkdtempSync(path.join(app.getPath("temp"), "wpdesktop-backup-"));
+  const packageRoot = path.join(tempRoot, `${site.name || path.basename(resolvedSitePath)}-backup`);
   const sqlPath = path.join(tempRoot, `${site.name || "site"}-database.sql`);
   const metadataPath = path.join(tempRoot, "backup.json");
 
   try {
+    ensureDir(packageRoot);
+    ensureDir(path.join(packageRoot, "database"));
+    ensureDir(path.join(packageRoot, "site-content"));
+
     const connection = await mysql.createConnection({
       host: databaseProfile.host,
       port: Number(databaseProfile.port) || 3306,
@@ -1165,14 +1363,23 @@ async function backupSiteResources(payload) {
         port: String(databaseProfile.port || 3306),
         user: databaseProfile.user
       },
+      backup: {
+        includes: ["wp-content/plugins", "wp-content/themes", "wp-content/uploads", "wp-config.php"]
+      },
       createdAt: new Date().toISOString()
     };
     fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2), "utf8");
 
+    const wpContentPath = path.join(resolvedSitePath, "wp-content");
+    copyIfExists(path.join(wpContentPath, "plugins"), path.join(packageRoot, "site-content", "plugins"));
+    copyIfExists(path.join(wpContentPath, "themes"), path.join(packageRoot, "site-content", "themes"));
+    copyIfExists(path.join(wpContentPath, "uploads"), path.join(packageRoot, "site-content", "uploads"));
+    copyIfExists(path.join(resolvedSitePath, "wp-config.php"), path.join(packageRoot, "wp-config.php"));
+    fs.copyFileSync(sqlPath, path.join(packageRoot, "database", `${dbName}.sql`));
+    fs.copyFileSync(metadataPath, path.join(packageRoot, "backup.json"));
+
     const zip = new AdmZip();
-    zip.addLocalFolder(resolvedSitePath, site.name || path.basename(resolvedSitePath));
-    zip.addLocalFile(sqlPath, "database");
-    zip.addLocalFile(metadataPath);
+    zip.addLocalFolder(packageRoot, path.basename(packageRoot));
     zip.writeZip(savePath);
 
     return {
@@ -1205,6 +1412,12 @@ async function deleteSiteResources(payload) {
   if (resolvedHtdocsPath && !isPathInside(resolvedHtdocsPath, resolvedSitePath)) {
     throw new Error("Refusing to delete a site outside the configured htdocs folder.");
   }
+
+  const backupResult = await backupSiteResources({
+    site,
+    database: manualDatabase,
+    savePath: payload?.savePath || getBackupDefaultPath(site.name, resolvedSitePath)
+  });
 
   const installerDb = getVault().installerDb || {};
   const wpConfig = parseWpConfig(resolvedSitePath) || {};
@@ -1302,6 +1515,7 @@ async function deleteSiteResources(payload) {
 
   return {
     ok: true,
+    backupPath: backupResult?.savePath || null,
     deletedSiteId: site.id,
     deletedPath: resolvedSitePath,
     deletedDatabase: dbName
@@ -2397,6 +2611,7 @@ function wireTabEvents(win, tab) {
   wc.on("did-stop-loading", () => {
     tab.isLoading = false;
     emitBrowserState(win);
+    void maybeAutoFillWordPressBootstrap(tab);
   });
 
   wc.on("page-title-updated", (event, title) => {
@@ -2411,12 +2626,14 @@ function wireTabEvents(win, tab) {
     tab.error = null;
     recordBrowserHistoryVisit(tab.url, tab.title);
     emitBrowserState(win);
+    void maybeAutoFillWordPressBootstrap(tab);
   });
 
   wc.on("did-navigate-in-page", (_event, url) => {
     tab.url = url;
     recordBrowserHistoryVisit(tab.url, tab.title);
     emitBrowserState(win);
+    void maybeAutoFillWordPressBootstrap(tab);
   });
 
   wc.on("did-fail-load", (event, errorCode, errorDescription, validatedURL) => {
@@ -2437,6 +2654,37 @@ function wireTabEvents(win, tab) {
 
   wc.on("context-menu", (_event, params) => {
     buildContextMenu(win, tab, params);
+  });
+
+  wc.on("console-message", (_event, _level, message) => {
+    if (!String(message || "").startsWith(VAULT_CAPTURE_LOG_PREFIX)) {
+      return;
+    }
+
+    try {
+      const payload = JSON.parse(String(message).slice(VAULT_CAPTURE_LOG_PREFIX.length));
+      if (!payload?.token || payload.token !== tab.pendingCredentialCaptureToken) {
+        return;
+      }
+
+      const key = String(payload.key || "");
+      const username = String(payload.username || "");
+      const password = String(payload.password || "");
+      if (!key || (!username && !password)) {
+        return;
+      }
+
+      const vault = getVault();
+      saveVaultCredential(vault, { key, username, password });
+      saveVault(vault);
+      tab.pendingCredentialCaptureToken = null;
+      win.webContents.send("browser:notice", {
+        message: `Saved credentials for ${key} to the vault.`,
+        type: "success"
+      });
+    } catch (_) {
+      // Ignore malformed page messages.
+    }
   });
 }
 
@@ -2463,6 +2711,7 @@ function createBrowserTab(win, url, mode = "auto", activate = true, insertIndex 
     error: null,
     pinned: Boolean(tabOptions.pinned),
     muted: Boolean(tabOptions.muted),
+    pendingCredentialCaptureToken: null,
     view
   };
 
@@ -2605,24 +2854,38 @@ function reloadActive(win) {
   emitBrowserState(win);
 }
 
-async function autofillActiveBrowserTab(win, credentials = {}) {
-  const state = getBrowserState(win);
-  const active = state.tabs.find((tab) => tab.id === state.activeTabId);
-  if (!active?.view?.webContents) {
-    return { ok: false, message: "No active page available for autofill." };
-  }
+function getWordPressBootstrapAutofillPayload(url, settings = getSettings()) {
+  const dbProfile = getEffectiveDbProfile(settings);
+  const siteRootFolderName = getSiteRootFolderNameFromUrl(url || "", settings);
 
-  const username = String(credentials.username || "");
-  const password = String(credentials.password || "");
+  return {
+    dbConfig: {
+      dbName: sanitizeDbName(siteRootFolderName || "wordpress"),
+      dbUser: dbProfile.user || "root",
+      dbPassword: dbProfile.password || "",
+      dbHost: dbProfile.port && dbProfile.port !== "3306"
+        ? `${dbProfile.host}:${dbProfile.port}`
+        : dbProfile.host,
+      tablePrefix: "wp_"
+    },
+    installConfig: {
+      siteTitle: siteRootFolderName || "WordPress",
+      username: "admin",
+      password: "root",
+      email: "aparichitawora@gmail.com",
+      discourageSearchEngines: true
+    }
+  };
+}
 
-  if (!username && !password) {
-    return { ok: false, message: "Save a username or password before using autofill." };
-  }
+function buildWordPressBootstrapAutofillScript(payload, options = {}) {
+  const autoSubmitCapture = Boolean(options.autoSubmitCapture);
 
-  const script = `
+  return `
     (() => {
-      const usernameValue = ${JSON.stringify(username)};
-      const passwordValue = ${JSON.stringify(password)};
+      const dbConfig = ${JSON.stringify(payload.dbConfig)};
+      const installConfig = ${JSON.stringify(payload.installConfig)};
+      const autoSubmitCapture = ${JSON.stringify(autoSubmitCapture)};
 
       const fireInputEvents = (element) => {
         element.dispatchEvent(new Event("input", { bubbles: true }));
@@ -2641,6 +2904,190 @@ async function autofillActiveBrowserTab(win, credentials = {}) {
         }
 
         return null;
+      };
+
+      const fillField = (selectors, value) => {
+        if (!value && value !== "") {
+          return { filled: false, selector: null };
+        }
+
+        const field = pickFirstVisible(selectors);
+        if (!field) {
+          return { filled: false, selector: null };
+        }
+
+        field.focus();
+        field.value = value;
+        fireInputEvents(field);
+        return {
+          filled: true,
+          selector: field.id || field.name || field.type || null
+        };
+      };
+
+      const isWordPressDatabaseSetupPage = () => {
+        const bodyText = String(document.body?.innerText || "");
+        return (
+          /\\/wp-admin\\/setup-config\\.php/i.test(window.location.pathname) &&
+          Boolean(document.querySelector("#dbname, input[name='dbname'], #uname, input[name='uname'], #dbhost, input[name='dbhost']"))
+        ) || /database connection details/i.test(bodyText);
+      };
+
+      if (isWordPressDatabaseSetupPage()) {
+        const dbNameResult = fillField(["#dbname", "input[name='dbname']"], dbConfig.dbName);
+        const dbUserResult = fillField(["#uname", "input[name='uname']"], dbConfig.dbUser);
+        const dbPasswordResult = fillField(["#pwd", "input[name='pwd']"], dbConfig.dbPassword);
+        const dbHostResult = fillField(["#dbhost", "input[name='dbhost']"], dbConfig.dbHost);
+        const prefixField = pickFirstVisible(["#prefix", "input[name='prefix']"]);
+        let filledPrefix = false;
+
+        if (prefixField) {
+          prefixField.focus();
+          prefixField.value = dbConfig.tablePrefix;
+          fireInputEvents(prefixField);
+          filledPrefix = true;
+        }
+
+        return {
+          mode: "wordpress-db",
+          filledDbName: dbNameResult.filled,
+          filledDbUser: dbUserResult.filled,
+          filledDbPassword: dbPasswordResult.filled,
+          filledDbHost: dbHostResult.filled,
+          filledPrefix
+        };
+      }
+
+      const isWordPressInstallPage = () => {
+        const bodyText = String(document.body?.innerText || "");
+        return (
+          /\\/wp-admin\\/install\\.php/i.test(window.location.pathname) &&
+          Boolean(
+            document.querySelector("#weblog_title, input[name='weblog_title'], #user_login, input[name='user_name'], #admin_email, input[name='admin_email']")
+          )
+        ) || /Please provide the following information/i.test(bodyText);
+      };
+
+      if (isWordPressInstallPage()) {
+        const siteTitleResult = fillField(["#weblog_title", "input[name='weblog_title']"], installConfig.siteTitle);
+        const usernameResult = fillField(["#user_login", "input[name='user_name']", "input[name='user_login']"], installConfig.username);
+        const passwordResult = fillField(["#pass1-text", "#pass1", "input[name='admin_password']"], installConfig.password);
+        const hiddenPasswordConfirm = document.querySelector("input[name='admin_password2'], #pass2");
+        if (hiddenPasswordConfirm && !hiddenPasswordConfirm.disabled) {
+          hiddenPasswordConfirm.value = installConfig.password;
+          fireInputEvents(hiddenPasswordConfirm);
+        }
+        const emailResult = fillField(["#admin_email", "input[name='admin_email']"], installConfig.email);
+
+        const weakCheckbox = document.querySelector("#pw-weak, input[name='pw_weak']");
+        if (weakCheckbox && !weakCheckbox.checked) {
+          weakCheckbox.click();
+        }
+
+        const searchVisibilityCheckbox = document.querySelector("#blog_public, input[name='blog_public']");
+        let filledSearchVisibility = false;
+        if (searchVisibilityCheckbox) {
+          const shouldCheck = Boolean(installConfig.discourageSearchEngines);
+          if (Boolean(searchVisibilityCheckbox.checked) !== shouldCheck) {
+            searchVisibilityCheckbox.click();
+          }
+          filledSearchVisibility = Boolean(searchVisibilityCheckbox.checked) === shouldCheck;
+        }
+
+        if (autoSubmitCapture) {
+          const form = document.querySelector("form");
+          if (form && !form.dataset.wpDesktopBootstrapAutofill) {
+            form.dataset.wpDesktopBootstrapAutofill = "true";
+          }
+        }
+
+        return {
+          mode: "wordpress-install",
+          filledSiteTitle: siteTitleResult.filled,
+          filledInstallUsername: usernameResult.filled,
+          filledInstallPassword: passwordResult.filled,
+          filledInstallEmail: emailResult.filled,
+          filledSearchVisibility
+        };
+      }
+
+      return { mode: "none" };
+    })();
+  `;
+}
+
+function shouldAutoFillWordPressBootstrap(url) {
+  try {
+    const parsed = new URL(url);
+    if (!["localhost", "127.0.0.1", "::1"].includes(parsed.hostname)) {
+      return false;
+    }
+
+    return /\/wp-admin\/(setup-config\.php|install\.php)$/i.test(parsed.pathname);
+  } catch (_) {
+    return false;
+  }
+}
+
+async function maybeAutoFillWordPressBootstrap(tab) {
+  if (!tab?.view?.webContents || !shouldAutoFillWordPressBootstrap(tab.url || "")) {
+    return;
+  }
+
+  const payload = getWordPressBootstrapAutofillPayload(tab.url || "");
+  const script = buildWordPressBootstrapAutofillScript(payload, { autoSubmitCapture: false });
+
+  try {
+    await tab.view.webContents.executeJavaScript(script, true);
+  } catch (_) {
+    // Ignore autofill failures on transitional setup pages.
+  }
+}
+
+async function autofillActiveBrowserTab(win, credentials = {}) {
+  const state = getBrowserState(win);
+  const active = state.tabs.find((tab) => tab.id === state.activeTabId);
+  if (!active?.view?.webContents) {
+    return { ok: false, message: "No active page available for autofill." };
+  }
+
+  const username = String(credentials.username || "");
+  const password = String(credentials.password || "");
+  const { dbConfig, installConfig } = getWordPressBootstrapAutofillPayload(active.url || "");
+  const captureToken = `vault-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+  active.pendingCredentialCaptureToken = captureToken;
+
+  if (!username && !password && !dbConfig.dbName) {
+    return { ok: false, message: "Save a username or password before using autofill." };
+  }
+
+  const bootstrapScript = buildWordPressBootstrapAutofillScript({ dbConfig, installConfig }, { autoSubmitCapture: true });
+  const script = `
+    (() => {
+      const usernameValue = ${JSON.stringify(username)};
+      const passwordValue = ${JSON.stringify(password)};
+      const bootstrapResult = ${bootstrapScript};
+      if (bootstrapResult?.mode === "wordpress-db" || bootstrapResult?.mode === "wordpress-install") {
+        return bootstrapResult;
+      }
+
+      const pickFirstVisible = (selectors) => {
+        for (const selector of selectors) {
+          const node = document.querySelector(selector);
+          if (!node) continue;
+
+          const style = window.getComputedStyle(node);
+          if (style.display === "none" || style.visibility === "hidden") continue;
+          if (node.disabled || node.readOnly) continue;
+          return node;
+        }
+
+        return null;
+      };
+
+      const fireInputEvents = (element) => {
+        element.dispatchEvent(new Event("input", { bubbles: true }));
+        element.dispatchEvent(new Event("change", { bubbles: true }));
       };
 
       const usernameField = pickFirstVisible([
@@ -2694,7 +3141,42 @@ async function autofillActiveBrowserTab(win, credentials = {}) {
 
   try {
     const result = await active.view.webContents.executeJavaScript(script, true);
+    if (result?.mode === "wordpress-db") {
+      active.pendingCredentialCaptureToken = null;
+      if (result.filledDbName || result.filledDbUser || result.filledDbPassword || result.filledDbHost || result.filledPrefix) {
+        return {
+          ok: true,
+          message: `WordPress database fields filled for "${dbName}".`,
+          details: result
+        };
+      }
+
+      return {
+        ok: false,
+        message: "WordPress database setup form was detected, but no editable database fields were found.",
+        details: result || null
+      };
+    }
+
+    if (result?.mode === "wordpress-install") {
+      if (result.filledSiteTitle || result.filledInstallUsername || result.filledInstallPassword || result.filledInstallEmail) {
+        return {
+          ok: true,
+          message: `WordPress install fields filled for "${installConfig.siteTitle}" and the credentials will be saved on submit.`,
+          details: result
+        };
+      }
+
+      active.pendingCredentialCaptureToken = null;
+      return {
+        ok: false,
+        message: "WordPress install page was detected, but no editable setup fields were found.",
+        details: result || null
+      };
+    }
+
     if (result?.filledUsername || result?.filledPassword) {
+      active.pendingCredentialCaptureToken = null;
       return {
         ok: true,
         message: "Credentials filled into the current page.",
@@ -2702,12 +3184,14 @@ async function autofillActiveBrowserTab(win, credentials = {}) {
       };
     }
 
+    active.pendingCredentialCaptureToken = null;
     return {
       ok: false,
       message: "No compatible login fields were found on the current page.",
       details: result || null
     };
   } catch (error) {
+    active.pendingCredentialCaptureToken = null;
     return {
       ok: false,
       message: `Autofill failed: ${error.message}`
@@ -3908,8 +4392,8 @@ app.on("login", (event, _webContents, details, authInfo, callback) => {
     }
   })();
   const authKey = `${authInfo.host}:${authInfo.port || ""}:${authInfo.realm || ""}`;
-  const siteCredentials = getVault().siteCredentials;
-  const saved = siteCredentials[urlKey] || siteCredentials[authKey];
+  const vault = getVault();
+  const saved = getPreferredVaultCredential(vault, urlKey) || getPreferredVaultCredential(vault, authKey);
 
   if (!saved) {
     return;
@@ -4287,30 +4771,25 @@ ipcMain.handle("vault:get-site-credentials", (_event, key) => {
   if (!key) {
     return null;
   }
-  return getVault().siteCredentials[key] || null;
+  return serializeVaultCredentialResponse(getVault().siteCredentials[key], key);
 });
 
 ipcMain.handle("vault:save-site-credentials", (_event, payload) => {
-  if (!payload.key) {
-    throw new Error("Missing credential key.");
-  }
-
   const vault = getVault();
-  vault.siteCredentials[payload.key] = {
-    username: payload.username || "",
-    password: payload.password || ""
-  };
+  const collection = saveVaultCredential(vault, payload);
   saveVault(vault);
-  return true;
+  return serializeVaultCredentialResponse(collection, payload.key);
 });
 
-ipcMain.handle("vault:clear-site-credentials", (_event, key) => {
+ipcMain.handle("vault:clear-site-credentials", (_event, payload) => {
+  const key = typeof payload === "string" ? payload : payload?.key;
+  const id = typeof payload === "string" ? "" : payload?.id || "";
   if (!key) {
     return true;
   }
 
   const vault = getVault();
-  delete vault.siteCredentials[key];
+  removeVaultCredential(vault, key, id);
   saveVault(vault);
   return true;
 });

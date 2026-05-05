@@ -12,6 +12,7 @@ const state = {
   },
   lastInstall: null,
   vaultOpen: false,
+  currentVaultCredentials: null,
   sites: [],
   selectedSiteId: null,
   isEditingAddress: false,
@@ -88,6 +89,7 @@ const elements = {
   vaultPanel: document.getElementById("vault-panel"),
   bookmarksList: document.getElementById("bookmarks-list"),
   vaultSiteLabel: document.getElementById("vault-site-label"),
+  vaultCredentialList: document.getElementById("vault-credential-list"),
   vaultUsername: document.getElementById("vault-username"),
   vaultPassword: document.getElementById("vault-password"),
   vaultSaveButton: document.getElementById("vault-save-button"),
@@ -492,12 +494,60 @@ function getCredentialKeyFromUrl(url) {
   }
 }
 
+function maskPassword(value) {
+  const password = String(value || "");
+  if (!password) {
+    return "empty";
+  }
+
+  return "\u2022".repeat(Math.min(Math.max(password.length, 4), 12));
+}
+
+function renderVaultCredentialOptions(saved) {
+  const select = elements.vaultCredentialList;
+  const entries = Array.isArray(saved?.entries) ? saved.entries : [];
+  const selectedId = saved?.selectedId || "";
+
+  select.innerHTML = "";
+
+  const newOption = document.createElement("option");
+  newOption.value = "";
+  newOption.textContent = "New credential";
+  select.appendChild(newOption);
+
+  entries.forEach((entry, index) => {
+    const option = document.createElement("option");
+    option.value = entry.id;
+    option.textContent = `${entry.username || `Credential ${index + 1}`} (${maskPassword(entry.password)})`;
+    select.appendChild(option);
+  });
+
+  select.value = entries.some((entry) => entry.id === selectedId) ? selectedId : "";
+}
+
+function loadVaultCredentialFromSelection(saved) {
+  const selectedId = elements.vaultCredentialList.value;
+  const entries = Array.isArray(saved?.entries) ? saved.entries : [];
+  const selected = entries.find((entry) => entry.id === selectedId);
+
+  if (!selected) {
+    elements.vaultUsername.value = "";
+    elements.vaultPassword.value = "";
+    return;
+  }
+
+  elements.vaultUsername.value = selected.username || "";
+  elements.vaultPassword.value = selected.password || "";
+}
+
 async function syncVaultPanel() {
   const active = getActiveBrowserTab();
   const key = active ? getCredentialKeyFromUrl(active.url) : null;
 
   if (!key) {
     elements.vaultSiteLabel.textContent = "Open a page to manage saved credentials.";
+    state.currentVaultCredentials = null;
+    renderVaultCredentialOptions(null);
     elements.vaultUsername.value = "";
     elements.vaultPassword.value = "";
     return;
@@ -505,6 +555,12 @@ async function syncVaultPanel() {
 
   elements.vaultSiteLabel.textContent = key;
   const saved = await window.desktopAPI.getSiteCredentials(key);
+  state.currentVaultCredentials = saved;
+  renderVaultCredentialOptions(saved);
+  if (elements.vaultCredentialList.value) {
+    loadVaultCredentialFromSelection(saved);
+    return;
+  }
   elements.vaultUsername.value = saved?.username || "";
   elements.vaultPassword.value = saved?.password || "";
 }
@@ -1366,12 +1422,17 @@ async function saveCurrentSiteCredentials() {
     return;
   }
 
-  await window.desktopAPI.saveSiteCredentials({
+  const saved = await window.desktopAPI.saveSiteCredentials({
     key,
     username: elements.vaultUsername.value,
     password: elements.vaultPassword.value
   });
 
+  state.currentVaultCredentials = saved;
+  renderVaultCredentialOptions(saved);
+  if (saved?.selectedId) {
+    elements.vaultCredentialList.value = saved.selectedId;
+  }
   setStatus(`Saved credentials for ${key}.`);
 }
 
@@ -1383,10 +1444,10 @@ async function clearCurrentSiteCredentials() {
     return;
   }
 
-  await window.desktopAPI.clearSiteCredentials(key);
-  elements.vaultUsername.value = "";
-  elements.vaultPassword.value = "";
-  setStatus(`Cleared credentials for ${key}.`);
+  const selectedId = elements.vaultCredentialList.value;
+  await window.desktopAPI.clearSiteCredentials(selectedId ? { key, id: selectedId } : { key });
+  await syncVaultPanel();
+  setStatus(selectedId ? `Removed one saved credential for ${key}.` : `Cleared credentials for ${key}.`);
 }
 
 function autofillCurrentPage() {
@@ -1453,7 +1514,7 @@ async function deleteSelectedSite() {
 
   try {
     const effectiveDbProfile = getEffectiveDbProfile();
-    await window.desktopAPI.deleteSite({
+    const result = await window.desktopAPI.deleteSite({
       site,
       database: {
         host: effectiveDbProfile.host,
@@ -1466,7 +1527,7 @@ async function deleteSelectedSite() {
       state.selectedSiteId = null;
     }
     await refreshSites();
-    setStatus(`Deleted ${site.name}.`);
+    setStatus(`Deleted ${site.name}. Backup saved to ${result?.backupPath || "the backups folder"}.`);
   } catch (error) {
     setStatus(`Delete failed: ${error.message}`);
   } finally {
@@ -1485,11 +1546,6 @@ async function backupSelectedSite() {
     return;
   }
 
-  const savePath = await window.desktopAPI.saveBackup(site.name);
-  if (!savePath) {
-    return;
-  }
-
   setBackupProgress(true);
   showSiteTab("tools");
   setStatus(`Creating backup for ${site.name}...`);
@@ -1498,7 +1554,6 @@ async function backupSelectedSite() {
     const effectiveDbProfile = getEffectiveDbProfile();
     const result = await window.desktopAPI.backupSite({
       site,
-      savePath,
       database: {
         host: effectiveDbProfile.host,
         port: effectiveDbProfile.port,
@@ -1584,6 +1639,9 @@ elements.bookmarkPageButton.addEventListener("click", () => void openBookmarkSav
 elements.vaultSaveButton.addEventListener("click", () => void saveCurrentSiteCredentials());
 elements.vaultClearButton.addEventListener("click", () => void clearCurrentSiteCredentials());
 elements.vaultFillButton.addEventListener("click", autofillCurrentPage);
+elements.vaultCredentialList.addEventListener("change", () => {
+  loadVaultCredentialFromSelection(state.currentVaultCredentials);
+});
 elements.pickDownloadDirectoryButton.addEventListener("click", async () => {
   const selected = await window.desktopAPI.browserPickDownloadDirectory();
   if (selected) {
