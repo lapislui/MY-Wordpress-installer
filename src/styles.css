@@ -307,6 +307,11 @@ input {
   min-width: 34px;
 }
 
+.bookmark-folder-chip {
+  background: #eef3f8;
+  border-color: #c5d5e6;
+}
+
 .bookmark-bar-empty {
   color: var(--muted);
 }

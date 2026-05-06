@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld("desktopAPI", {
   browserClearDownloads: () => ipcRenderer.invoke("browser:clear-downloads"),
   browserClearPermission: (payload) => ipcRenderer.invoke("browser:clear-permission", payload),
   browserAddBookmark: (payload) => ipcRenderer.invoke("browser:add-bookmark", payload),
+  browserAddBookmarkFolder: (payload) => ipcRenderer.invoke("browser:add-bookmark-folder", payload),
   browserRemoveBookmark: (bookmarkId) => ipcRenderer.invoke("browser:remove-bookmark", bookmarkId),
   browserUpdateBookmark: (payload) => ipcRenderer.invoke("browser:update-bookmark", payload),
   browserCopyBookmark: (bookmarkId) => ipcRenderer.invoke("browser:copy-bookmark", bookmarkId),

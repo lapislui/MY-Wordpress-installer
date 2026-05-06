@@ -474,15 +474,60 @@ function normalizeSettings(input = {}) {
         ])).filter(([, rules]) => Object.keys(rules).length > 0)
       )
     : {};
+  const normalizeBookmarkNode = (node) => {
+    if (!node || typeof node !== "object") {
+      return null;
+    }
+
+    const type = node.type === "folder" ? "folder" : "bookmark";
+    const id = String(node.id || "").trim();
+    const title = String(node.title || "").trim();
+    if (!id || !title) {
+      return null;
+    }
+
+    if (type === "folder") {
+      const children = Array.isArray(node.children)
+        ? node.children.map(normalizeBookmarkNode).filter(Boolean)
+        : [];
+      return { id, type, title, children };
+    }
+
+    const url = String(node.url || "").trim();
+    if (!/^https?:\/\//i.test(url)) {
+      return null;
+    }
+    return {
+      id,
+      type: "bookmark",
+      title,
+      url,
+      iconOnly: Boolean(node.iconOnly)
+    };
+  };
+
   const bookmarks = Array.isArray(input.browserBookmarks)
     ? input.browserBookmarks
-        .map((bookmark) => ({
-          id: String(bookmark?.id || "").trim(),
-          title: String(bookmark?.title || "").trim(),
-          url: String(bookmark?.url || "").trim(),
-          iconOnly: Boolean(bookmark?.iconOnly)
-        }))
-        .filter((bookmark) => bookmark.id && /^https?:\/\//i.test(bookmark.url))
+        .map((bookmark) => {
+          if (bookmark?.type === "folder" || Array.isArray(bookmark?.children)) {
+            return normalizeBookmarkNode(bookmark);
+          }
+
+          const id = String(bookmark?.id || "").trim();
+          const title = String(bookmark?.title || "").trim();
+          const url = String(bookmark?.url || "").trim();
+          if (!id || !title || !/^https?:\/\//i.test(url)) {
+            return null;
+          }
+          return {
+            id,
+            type: "bookmark",
+            title,
+            url,
+            iconOnly: Boolean(bookmark?.iconOnly)
+          };
+        })
+        .filter(Boolean)
     : [];
 
   return {
@@ -820,10 +865,59 @@ function getBrowserBookmarks() {
   return getSettings().browserBookmarks || [];
 }
 
-function saveBrowserBookmark({ title, url }) {
+function flattenBrowserBookmarks(nodes, output = []) {
+  (nodes || []).forEach((node) => {
+    if (!node) {
+      return;
+    }
+
+    if (node.type === "folder") {
+      flattenBrowserBookmarks(node.children || [], output);
+      return;
+    }
+
+    output.push(node);
+  });
+  return output;
+}
+
+function findBookmarkNodeAndParent(nodes, nodeId, parent = null) {
+  for (let index = 0; index < (nodes || []).length; index += 1) {
+    const node = nodes[index];
+    if (node?.id === nodeId) {
+      return { node, parent, index };
+    }
+
+    if (node?.type === "folder") {
+      const found = findBookmarkNodeAndParent(node.children || [], nodeId, node);
+      if (found) {
+        return found;
+      }
+    }
+  }
+
+  return null;
+}
+
+function insertBookmarkNode(bookmarks, node, parentId = null) {
+  if (!parentId) {
+    bookmarks.unshift(node);
+    return true;
+  }
+
+  const found = findBookmarkNodeAndParent(bookmarks, parentId);
+  if (!found?.node || found.node.type !== "folder") {
+    return false;
+  }
+
+  found.node.children = [node, ...(found.node.children || [])];
+  return true;
+}
+
+function saveBrowserBookmark({ title, url, parentId = null }) {
   const normalizedUrl = ensureUrl(url);
   const settings = getSettings();
-  const existing = (settings.browserBookmarks || []).find((bookmark) => bookmark.url === normalizedUrl);
+  const existing = flattenBrowserBookmarks(settings.browserBookmarks || []).find((bookmark) => bookmark.url === normalizedUrl);
   if (existing) {
     existing.title = title || existing.title || normalizedUrl;
     saveSettings(settings);
@@ -832,11 +926,13 @@ function saveBrowserBookmark({ title, url }) {
 
   const bookmark = {
     id: `bookmark-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    type: "bookmark",
     title: title || normalizedUrl,
     url: normalizedUrl,
     iconOnly: false
   };
-  settings.browserBookmarks = [bookmark, ...(settings.browserBookmarks || [])];
+  settings.browserBookmarks = settings.browserBookmarks || [];
+  insertBookmarkNode(settings.browserBookmarks, bookmark, parentId);
   saveSettings(settings);
   return bookmark;
 }
@@ -847,11 +943,13 @@ function removeBrowserBookmark(bookmarkId) {
   }
 
   const settings = getSettings();
-  const beforeCount = (settings.browserBookmarks || []).length;
-  settings.browserBookmarks = (settings.browserBookmarks || []).filter((bookmark) => bookmark.id !== bookmarkId);
-  if (settings.browserBookmarks.length === beforeCount) {
+  const found = findBookmarkNodeAndParent(settings.browserBookmarks || [], bookmarkId);
+  if (!found) {
     return false;
   }
+
+  const bucket = found.parent ? found.parent.children : settings.browserBookmarks;
+  bucket.splice(found.index, 1);
 
   saveSettings(settings);
   return true;
@@ -863,18 +961,19 @@ function updateBrowserBookmark(bookmarkId, changes = {}) {
   }
 
   const settings = getSettings();
-  const bookmark = (settings.browserBookmarks || []).find((item) => item.id === bookmarkId);
-  if (!bookmark) {
+  const found = findBookmarkNodeAndParent(settings.browserBookmarks || [], bookmarkId);
+  if (!found?.node) {
     throw new Error("Bookmark not found.");
   }
+  const bookmark = found.node;
 
   if (typeof changes.title === "string") {
     bookmark.title = changes.title.trim() || bookmark.title || bookmark.url;
   }
-  if (typeof changes.url === "string") {
+  if (bookmark.type !== "folder" && typeof changes.url === "string") {
     bookmark.url = ensureUrl(changes.url);
   }
-  if (typeof changes.iconOnly === "boolean") {
+  if (bookmark.type !== "folder" && typeof changes.iconOnly === "boolean") {
     bookmark.iconOnly = changes.iconOnly;
   }
 
@@ -882,10 +981,29 @@ function updateBrowserBookmark(bookmarkId, changes = {}) {
   return bookmark;
 }
 
+function createBrowserBookmarkFolder({ title, parentId = null }) {
+  const settings = getSettings();
+  const folder = {
+    id: `bookmark-folder-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    type: "folder",
+    title: String(title || "New folder").trim() || "New folder",
+    children: []
+  };
+
+  settings.browserBookmarks = settings.browserBookmarks || [];
+  if (!insertBookmarkNode(settings.browserBookmarks, folder, parentId)) {
+    throw new Error("Folder target was not found.");
+  }
+
+  saveSettings(settings);
+  return folder;
+}
+
 function copyBrowserBookmark(bookmarkId, removeAfterCopy = false) {
   const settings = getSettings();
-  const bookmark = (settings.browserBookmarks || []).find((item) => item.id === bookmarkId);
-  if (!bookmark) {
+  const found = findBookmarkNodeAndParent(settings.browserBookmarks || [], bookmarkId);
+  const bookmark = found?.node;
+  if (!bookmark || bookmark.type === "folder") {
     throw new Error("Bookmark not found.");
   }
 
@@ -895,7 +1013,8 @@ function copyBrowserBookmark(bookmarkId, removeAfterCopy = false) {
   }));
 
   if (removeAfterCopy) {
-    settings.browserBookmarks = (settings.browserBookmarks || []).filter((item) => item.id !== bookmarkId);
+    const bucket = found.parent ? found.parent.children : settings.browserBookmarks;
+    bucket.splice(found.index, 1);
     saveSettings(settings);
   }
 
@@ -1614,7 +1733,7 @@ async function getBrowserSuggestions(win, query) {
   };
 
   const historyEntries = getBrowserHistory();
-  const bookmarkEntries = getBrowserBookmarks();
+  const bookmarkEntries = flattenBrowserBookmarks(getBrowserBookmarks());
   const tabEntries = state.tabs.map((tab) => ({
     title: tab.title,
     url: tab.url
@@ -4620,6 +4739,15 @@ ipcMain.handle("browser:add-bookmark", (event, payload) => {
     emitBrowserState(win);
   }
   return bookmark;
+});
+
+ipcMain.handle("browser:add-bookmark-folder", (event, payload) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const folder = createBrowserBookmarkFolder(payload || {});
+  if (win) {
+    emitBrowserState(win);
+  }
+  return folder;
 });
 
 ipcMain.handle("browser:remove-bookmark", (event, bookmarkId) => {

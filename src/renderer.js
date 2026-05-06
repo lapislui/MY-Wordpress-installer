@@ -13,6 +13,7 @@ const state = {
   lastInstall: null,
   vaultOpen: false,
   currentVaultCredentials: null,
+  bookmarkFolderTrail: [],
   sites: [],
   selectedSiteId: null,
   isEditingAddress: false,
@@ -319,7 +320,7 @@ async function openBookmarkSaveDialogForCurrentPage() {
     return;
   }
 
-  const existing = state.browser.bookmarks.find((bookmark) => bookmark.url === active.url) || null;
+  const existing = flattenBookmarkNodes(state.browser.bookmarks).find((bookmark) => bookmark.url === active.url) || null;
 
   try {
     const result = await window.desktopAPI.browserShowBookmarkSaveDialog({
@@ -927,22 +928,34 @@ function renderBookmarks() {
     return;
   }
 
-  state.browser.bookmarks.forEach((bookmark) => {
+  const renderBookmarkBarNode = (node) => {
     const chip = document.createElement("button");
     chip.type = "button";
-    chip.className = "bookmark-chip";
-    chip.textContent = bookmark.iconOnly
-      ? (bookmark.title || bookmark.url).trim().charAt(0).toUpperCase() || "*"
-      : (bookmark.title || bookmark.url);
-    chip.title = bookmark.url;
+    chip.className = `bookmark-chip${node.type === "folder" ? " bookmark-folder-chip" : ""}`;
+    chip.textContent = node.type === "folder"
+      ? `📁 ${node.title}`
+      : node.iconOnly
+        ? (node.title || node.url).trim().charAt(0).toUpperCase() || "*"
+        : (node.title || node.url);
+    chip.title = node.type === "folder" ? node.title : node.url;
+
+    if (node.type === "folder") {
+      chip.addEventListener("click", (event) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        openBookmarkFolderMenu(rect, [node.id]);
+      });
+      elements.bookmarkBar.appendChild(chip);
+      return;
+    }
+
     chip.addEventListener("click", () => {
-      openUrlInAppBrowser(bookmark.url);
+      openUrlInAppBrowser(node.url);
     });
     chip.addEventListener("contextmenu", async (event) => {
       event.preventDefault();
       try {
         await window.desktopAPI.browserShowBookmarkContextMenu({
-          bookmark,
+          bookmark: node,
           showBookmarksBar: state.browser.showBookmarksBar
         });
       } catch (error) {
@@ -950,30 +963,81 @@ function renderBookmarks() {
       }
     });
     elements.bookmarkBar.appendChild(chip);
+  };
 
+  const renderBookmarkTreeNode = (node, depth = 0) => {
     const item = document.createElement("div");
     item.className = "browser-tool-item";
+    item.style.marginLeft = `${depth * 16}px`;
+
+    if (node.type === "folder") {
+      item.innerHTML = `
+        <div class="browser-tool-item-copy">
+          <strong>📁 ${node.title}</strong>
+          <span>${(node.children || []).length} item${(node.children || []).length === 1 ? "" : "s"}</span>
+        </div>
+        <div class="button-row compact">
+          <button type="button" data-add-folder="${node.id}">New folder</button>
+          <button type="button" data-remove-bookmark="${node.id}">Remove</button>
+        </div>
+      `;
+
+      item.querySelector("[data-add-folder]")?.addEventListener("click", async () => {
+        const title = window.prompt("Folder name", "New folder")?.trim();
+        if (!title) {
+          return;
+        }
+        await window.desktopAPI.browserAddBookmarkFolder({ title, parentId: node.id });
+      });
+
+      item.querySelector("[data-remove-bookmark]")?.addEventListener("click", async () => {
+        await window.desktopAPI.browserRemoveBookmark(node.id);
+      });
+
+      elements.bookmarksList.appendChild(item);
+      (node.children || []).forEach((child) => renderBookmarkTreeNode(child, depth + 1));
+      return;
+    }
+
     item.innerHTML = `
       <div class="browser-tool-item-copy">
-        <strong>${bookmark.title || bookmark.url}</strong>
-        <span>${bookmark.url}</span>
+        <strong>${node.title || node.url}</strong>
+        <span>${node.url}</span>
       </div>
       <div class="button-row compact">
-        <button type="button" data-open-bookmark="${bookmark.id}">Open</button>
-        <button type="button" data-remove-bookmark="${bookmark.id}">Remove</button>
+        <button type="button" data-open-bookmark="${node.id}">Open</button>
+        <button type="button" data-remove-bookmark="${node.id}">Remove</button>
       </div>
     `;
 
     item.querySelector("[data-open-bookmark]")?.addEventListener("click", () => {
-      openUrlInAppBrowser(bookmark.url);
+      openUrlInAppBrowser(node.url);
     });
 
     item.querySelector("[data-remove-bookmark]")?.addEventListener("click", async () => {
-      await window.desktopAPI.browserRemoveBookmark(bookmark.id);
-      setBrowserFeedback(`Removed bookmark for ${bookmark.title || bookmark.url}.`, "info");
+      await window.desktopAPI.browserRemoveBookmark(node.id);
+      setBrowserFeedback(`Removed bookmark for ${node.title || node.url}.`, "info");
     });
 
     elements.bookmarksList.appendChild(item);
+  };
+
+  const newRootFolderChip = document.createElement("button");
+  newRootFolderChip.type = "button";
+  newRootFolderChip.className = "bookmark-chip bookmark-folder-chip";
+  newRootFolderChip.textContent = "+ Folder";
+  newRootFolderChip.addEventListener("click", async () => {
+    const title = window.prompt("Folder name", "New folder")?.trim();
+    if (!title) {
+      return;
+    }
+    await window.desktopAPI.browserAddBookmarkFolder({ title });
+  });
+  elements.bookmarkBar.appendChild(newRootFolderChip);
+
+  state.browser.bookmarks.forEach((node) => {
+    renderBookmarkBarNode(node);
+    renderBookmarkTreeNode(node, 0);
   });
 }
 
@@ -1075,6 +1139,112 @@ function toggleCreateSiteModal(open) {
   }
 
   elements.createSiteModal.classList.toggle("hidden", !open);
+}
+
+function flattenBookmarkNodes(nodes, output = []) {
+  (nodes || []).forEach((node) => {
+    if (!node) {
+      return;
+    }
+
+    if (node.type === "folder") {
+      flattenBookmarkNodes(node.children || [], output);
+      return;
+    }
+
+    output.push(node);
+  });
+
+  return output;
+}
+
+function findBookmarkNode(nodes, nodeId) {
+  for (const node of nodes || []) {
+    if (!node) {
+      continue;
+    }
+
+    if (node.id === nodeId) {
+      return node;
+    }
+
+    if (node.type === "folder") {
+      const nested = findBookmarkNode(node.children || [], nodeId);
+      if (nested) {
+        return nested;
+      }
+    }
+  }
+
+  return null;
+}
+
+function hideBookmarkFolderMenu() {
+  state.bookmarkFolderTrail = [];
+  elements.bookmarkContextMenu.classList.add("hidden");
+  elements.bookmarkContextMenu.innerHTML = "";
+}
+
+function openBookmarkFolderMenu(anchorRect, trail = []) {
+  const folderId = trail.at(-1);
+  const folder = folderId ? findBookmarkNode(state.browser.bookmarks, folderId) : null;
+  if (!folder || folder.type !== "folder") {
+    hideBookmarkFolderMenu();
+    return;
+  }
+
+  state.bookmarkFolderTrail = trail;
+  const menu = elements.bookmarkContextMenu;
+  menu.innerHTML = "";
+
+  if (trail.length > 1) {
+    const backButton = document.createElement("button");
+    backButton.type = "button";
+    backButton.textContent = "< Back";
+    backButton.addEventListener("click", () => {
+      openBookmarkFolderMenu(anchorRect, trail.slice(0, -1));
+    });
+    menu.appendChild(backButton);
+  }
+
+  (folder.children || []).forEach((child) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = child.type === "folder" ? `📁 ${child.title}` : child.title || child.url;
+    button.addEventListener("click", () => {
+      if (child.type === "folder") {
+        openBookmarkFolderMenu(anchorRect, [...trail, child.id]);
+        return;
+      }
+      hideBookmarkFolderMenu();
+      openUrlInAppBrowser(child.url);
+    });
+    menu.appendChild(button);
+  });
+
+  const divider = document.createElement("div");
+  divider.className = "bookmark-context-divider";
+  menu.appendChild(divider);
+
+  const newFolderButton = document.createElement("button");
+  newFolderButton.type = "button";
+  newFolderButton.textContent = "New folder";
+  newFolderButton.addEventListener("click", async () => {
+    const title = window.prompt("Folder name", "New folder")?.trim();
+    if (!title) {
+      return;
+    }
+    await window.desktopAPI.browserAddBookmarkFolder({
+      title,
+      parentId: folder.id
+    });
+    openBookmarkFolderMenu(anchorRect, trail);
+  });
+  menu.appendChild(newFolderButton);
+
+  menu.classList.remove("hidden");
+  menu.style.left = `${anchorRect.left}px`;
+  menu.style.top = `${anchorRect.bottom + 6}px`;
 }
 
 function openUrlInAppBrowser(url, mode = "auto") {
