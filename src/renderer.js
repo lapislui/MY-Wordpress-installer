@@ -29,7 +29,8 @@ const progressState = {
 
 const uiState = {
   sidebarCollapsed: false,
-  browserFocusMode: false
+  browserFocusMode: false,
+  showTabSessionInfo: false
 };
 
 let browserFeedbackTimer = null;
@@ -63,6 +64,7 @@ const elements = {
   screens: document.querySelectorAll(".screen"),
   browserLayout: document.getElementById("browser-layout"),
   tabStrip: document.getElementById("tab-strip"),
+  tabStripTooltipLayer: document.getElementById("tab-strip-tooltip-layer"),
   browserHost: document.getElementById("browser-host"),
   browserStage: document.getElementById("browser-stage"),
   browserOverlay: document.getElementById("browser-overlay"),
@@ -72,6 +74,7 @@ const elements = {
   backButton: document.getElementById("back-button"),
   forwardButton: document.getElementById("forward-button"),
   reloadButton: document.getElementById("reload-button"),
+  tabSessionInfoButton: document.getElementById("tab-session-info-button"),
   newTabButton: document.getElementById("new-tab-button"),
   browserMenuButton: document.getElementById("browser-menu-button"),
   bookmarkPageButton: document.getElementById("bookmark-page-button"),
@@ -720,6 +723,18 @@ function getTabGroupLabel(tab) {
   return groupName ? `Group: ${groupName}` : "Group: none";
 }
 
+function getTabSessionInfoCopy(tab) {
+  if (!tab) {
+    return "No active tab is available.";
+  }
+
+  const profileName = String(tab.sessionProfileName || tab.partition || "temporary-session").trim();
+  const groupName = String(tab.groupName || "").trim();
+  return groupName
+    ? `Persist session: ${profileName}. Tab group: ${groupName}.`
+    : `Persist session: ${profileName}.`;
+}
+
 function getBrowserToolSections() {
   return Array.from(document.querySelectorAll(".browser-tool-section[data-tool-section]"));
 }
@@ -1076,19 +1091,16 @@ function openUrlInAppBrowser(url, mode = "auto") {
 
 function renderBrowserTabs() {
   elements.tabStrip.innerHTML = "";
-
-  state.browser.tabs.forEach((tab) => {
+  elements.tabStripTooltipLayer.innerHTML = "";
+  const renderTabButton = (tab) => {
     const button = document.createElement("button");
+    button.dataset.tabId = tab.id;
     button.className = `tab-button${tab.id === state.browser.activeTabId ? " active" : ""}${tab.pinned ? " pinned" : ""}`;
     const title = escapeHtml(tab.title || tab.url);
-    const groupLabel = escapeHtml(getTabGroupLabel(tab));
-    const sessionLabel = escapeHtml(getTabSessionLabel(tab));
-    button.title = `${tab.title || tab.url}\n${getTabGroupLabel(tab)}\n${getTabSessionLabel(tab)}`;
+    button.title = `${tab.title || tab.url}\n${getTabSessionInfoCopy(tab)}`;
     button.innerHTML = `
       <span class="tab-copy">
         <span class="tab-title">${tab.pinned ? "[Pin] " : ""}${title}${tab.muted ? " [Muted]" : ""}</span>
-        <span class="tab-group">${groupLabel}</span>
-        <span class="tab-session">${sessionLabel}</span>
       </span>
       <span class="tab-close" data-close="${tab.id}">x</span>
     `;
@@ -1111,10 +1123,76 @@ function renderBrowserTabs() {
       }
     });
 
-    elements.tabStrip.appendChild(button);
-  });
+    return button;
+  };
 
+  let index = 0;
+  while (index < state.browser.tabs.length) {
+    const currentTab = state.browser.tabs[index];
+
+    if (currentTab.groupId) {
+      const cluster = document.createElement("div");
+      const activeInGroup = state.browser.tabs.some((tab) => tab.groupId === currentTab.groupId && tab.id === state.browser.activeTabId);
+      cluster.className = `tab-group-cluster${activeInGroup ? " active" : ""}`;
+
+      const label = document.createElement("button");
+      label.type = "button";
+      label.className = "tab-group-chip";
+      label.textContent = currentTab.groupName || "Group";
+      label.title = `${currentTab.groupName || "Group"}\n${getTabSessionLabel(currentTab)}`;
+      label.addEventListener("click", () => {
+        window.desktopAPI.browserActivateTab(currentTab.id);
+      });
+      cluster.appendChild(label);
+
+      while (index < state.browser.tabs.length && state.browser.tabs[index].groupId === currentTab.groupId) {
+        cluster.appendChild(renderTabButton(state.browser.tabs[index]));
+        index += 1;
+      }
+
+      elements.tabStrip.appendChild(cluster);
+      continue;
+    }
+
+    elements.tabStrip.appendChild(renderTabButton(currentTab));
+    index += 1;
+  }
+
+  renderTabSessionTooltips();
   renderBrowserOverlay();
+}
+
+function renderTabSessionTooltips() {
+  const layer = elements.tabStripTooltipLayer;
+  if (!layer) {
+    return;
+  }
+
+  layer.innerHTML = "";
+  layer.classList.toggle("hidden", !uiState.showTabSessionInfo);
+  if (!uiState.showTabSessionInfo) {
+    return;
+  }
+
+  const shellRect = layer.parentElement?.getBoundingClientRect();
+  if (!shellRect) {
+    return;
+  }
+
+  state.browser.tabs.forEach((tab) => {
+    const tabButton = elements.tabStrip.querySelector(`[data-tab-id="${tab.id}"]`);
+    if (!tabButton) {
+      return;
+    }
+
+    const tabRect = tabButton.getBoundingClientRect();
+    const tooltip = document.createElement("div");
+    tooltip.className = "tab-session-tooltip";
+    tooltip.textContent = getTabSessionInfoCopy(tab);
+    tooltip.style.left = `${tabRect.left - shellRect.left + tabRect.width / 2}px`;
+    tooltip.style.bottom = `${shellRect.bottom - tabRect.top + 10}px`;
+    layer.appendChild(tooltip);
+  });
 }
 
 function renderBrowserOverlay() {
@@ -1639,6 +1717,21 @@ elements.bookmarkPageButton.addEventListener("click", () => void openBookmarkSav
 elements.vaultSaveButton.addEventListener("click", () => void saveCurrentSiteCredentials());
 elements.vaultClearButton.addEventListener("click", () => void clearCurrentSiteCredentials());
 elements.vaultFillButton.addEventListener("click", autofillCurrentPage);
+elements.tabSessionInfoButton.addEventListener("click", () => {
+  uiState.showTabSessionInfo = !uiState.showTabSessionInfo;
+  elements.tabSessionInfoButton.classList.toggle("active", uiState.showTabSessionInfo);
+  renderBrowserTabs();
+});
+elements.tabStrip.addEventListener("scroll", () => {
+  if (uiState.showTabSessionInfo) {
+    renderTabSessionTooltips();
+  }
+});
+window.addEventListener("resize", () => {
+  if (uiState.showTabSessionInfo) {
+    renderTabSessionTooltips();
+  }
+});
 elements.vaultCredentialList.addEventListener("change", () => {
   loadVaultCredentialFromSelection(state.currentVaultCredentials);
 });
