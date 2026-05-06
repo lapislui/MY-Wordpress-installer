@@ -729,10 +729,7 @@ function getTabSessionInfoCopy(tab) {
   }
 
   const profileName = String(tab.sessionProfileName || tab.partition || "temporary-session").trim();
-  const groupName = String(tab.groupName || "").trim();
-  return groupName
-    ? `Persist session: ${profileName}. Tab group: ${groupName}.`
-    : `Persist session: ${profileName}.`;
+  return `Persist session: ${profileName}.`;
 }
 
 function getBrowserToolSections() {
@@ -1132,6 +1129,7 @@ function renderBrowserTabs() {
 
     if (currentTab.groupId) {
       const cluster = document.createElement("div");
+      cluster.dataset.groupId = currentTab.groupId;
       const activeInGroup = state.browser.tabs.some((tab) => tab.groupId === currentTab.groupId && tab.id === state.browser.activeTabId);
       cluster.className = `tab-group-cluster${activeInGroup ? " active" : ""}`;
 
@@ -1179,18 +1177,32 @@ function renderTabSessionTooltips() {
     return;
   }
 
+  const renderedGroups = new Set();
+
   state.browser.tabs.forEach((tab) => {
-    const tabButton = elements.tabStrip.querySelector(`[data-tab-id="${tab.id}"]`);
-    if (!tabButton) {
+    let anchor = null;
+    let tooltipText = getTabSessionInfoCopy(tab);
+
+    if (tab.groupId) {
+      if (renderedGroups.has(tab.groupId)) {
+        return;
+      }
+      renderedGroups.add(tab.groupId);
+      anchor = elements.tabStrip.querySelector(`.tab-group-cluster[data-group-id="${tab.groupId}"]`);
+    } else {
+      anchor = elements.tabStrip.querySelector(`[data-tab-id="${tab.id}"]`);
+    }
+
+    if (!anchor) {
       return;
     }
 
-    const tabRect = tabButton.getBoundingClientRect();
+    const anchorRect = anchor.getBoundingClientRect();
     const tooltip = document.createElement("div");
     tooltip.className = "tab-session-tooltip";
-    tooltip.textContent = getTabSessionInfoCopy(tab);
-    tooltip.style.left = `${tabRect.left - shellRect.left + tabRect.width / 2}px`;
-    tooltip.style.bottom = `${shellRect.bottom - tabRect.top + 10}px`;
+    tooltip.textContent = tooltipText;
+    tooltip.style.left = `${anchorRect.left - shellRect.left + anchorRect.width / 2}px`;
+    tooltip.style.bottom = `${shellRect.bottom - anchorRect.top + 10}px`;
     layer.appendChild(tooltip);
   });
 }
