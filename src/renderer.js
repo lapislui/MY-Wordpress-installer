@@ -12,6 +12,7 @@ const state = {
   },
   lastInstall: null,
   vaultOpen: false,
+  currentVaultCredentials: null,
   sites: [],
   selectedSiteId: null,
   isEditingAddress: false,
@@ -27,10 +28,33 @@ const progressState = {
 };
 
 const uiState = {
-  sidebarCollapsed: false
+  sidebarCollapsed: false,
+  browserFocusMode: false,
+  showTabSessionInfo: false
 };
 
 let browserFeedbackTimer = null;
+let addressSuggestionsToken = 0;
+let draggedBrowserToolSection = null;
+const BROWSER_TOOL_ORDER_KEY = "wp-desktop.browser-tool-order";
+const BROWSER_TOOL_COLLAPSE_KEY = "wp-desktop.browser-tool-collapse";
+const DEFAULT_BROWSER_TOOL_ORDER = ["sessions", "credentials", "bookmarks", "downloads", "permissions"];
+const DEFAULT_BROWSER_TOOL_COLLAPSE = {
+  sessions: false,
+  credentials: false,
+  bookmarks: true,
+  downloads: true,
+  permissions: true
+};
+state.effectiveDbProfile = {
+  host: "127.0.0.1",
+  port: "3306",
+  user: "root",
+  password: ""
+};
+state.mysqlConfigContent = "";
+state.shareLocalSiteSessions = true;
+state.shareOnlineSiteSessions = true;
 
 const elements = {
   appShell: document.getElementById("app-shell"),
@@ -40,16 +64,21 @@ const elements = {
   screens: document.querySelectorAll(".screen"),
   browserLayout: document.getElementById("browser-layout"),
   tabStrip: document.getElementById("tab-strip"),
+  tabStripTooltipLayer: document.getElementById("tab-strip-tooltip-layer"),
   browserHost: document.getElementById("browser-host"),
   browserStage: document.getElementById("browser-stage"),
   browserOverlay: document.getElementById("browser-overlay"),
   addressForm: document.getElementById("address-form"),
   addressInput: document.getElementById("address-input"),
+  addressSuggestions: document.getElementById("address-suggestions"),
   backButton: document.getElementById("back-button"),
   forwardButton: document.getElementById("forward-button"),
   reloadButton: document.getElementById("reload-button"),
+  tabSessionInfoButton: document.getElementById("tab-session-info-button"),
   newTabButton: document.getElementById("new-tab-button"),
+  browserMenuButton: document.getElementById("browser-menu-button"),
   bookmarkPageButton: document.getElementById("bookmark-page-button"),
+  browserFullscreenButton: document.getElementById("browser-fullscreen-button"),
   browserFeedback: document.getElementById("browser-feedback"),
   bookmarkBar: document.getElementById("bookmark-bar"),
   bookmarkContextMenu: document.getElementById("bookmark-context-menu"),
@@ -63,6 +92,7 @@ const elements = {
   vaultPanel: document.getElementById("vault-panel"),
   bookmarksList: document.getElementById("bookmarks-list"),
   vaultSiteLabel: document.getElementById("vault-site-label"),
+  vaultCredentialList: document.getElementById("vault-credential-list"),
   vaultUsername: document.getElementById("vault-username"),
   vaultPassword: document.getElementById("vault-password"),
   vaultSaveButton: document.getElementById("vault-save-button"),
@@ -77,6 +107,7 @@ const elements = {
   sitesRunningCount: document.getElementById("sites-running-count"),
   htdocsPath: document.getElementById("htdocs-path"),
   pickHtdocsButton: document.getElementById("pick-htdocs-button"),
+  openSidebarPhpMyAdminButton: document.getElementById("open-sidebar-phpmyadmin-button"),
   serverStatus: document.getElementById("server-status"),
   createSiteButton: document.getElementById("create-site-button"),
   createSiteModal: document.getElementById("create-site-modal"),
@@ -125,6 +156,7 @@ const elements = {
   settingsPickHtdocsButton: document.getElementById("settings-pick-htdocs-button"),
   settingsXamppRoot: document.getElementById("settings-xampp-root"),
   settingsHtdocsPath: document.getElementById("settings-htdocs-path"),
+  sessionRulesCopy: document.getElementById("session-rules-copy"),
   xamppSettingsNote: document.getElementById("xampp-settings-note"),
   openXamppRootButton: document.getElementById("open-xampp-root-button"),
   openSettingsHtdocsButton: document.getElementById("open-settings-htdocs-button"),
@@ -133,6 +165,12 @@ const elements = {
   settingsApacheConfig: document.getElementById("settings-apache-config"),
   settingsMysqlConfig: document.getElementById("settings-mysql-config"),
   settingsControlPanel: document.getElementById("settings-control-panel"),
+  settingsDbUser: document.getElementById("settings-db-user"),
+  settingsDbPassword: document.getElementById("settings-db-password"),
+  settingsShareLocalSessions: document.getElementById("settings-share-local-sessions"),
+  settingsShareOnlineSessions: document.getElementById("settings-share-online-sessions"),
+  settingsMysqlEditor: document.getElementById("settings-mysql-editor"),
+  saveMysqlConfigButton: document.getElementById("save-mysql-config-button"),
   settingsPhpExe: document.getElementById("settings-php-exe"),
   settingsPhpConfig: document.getElementById("settings-php-config"),
   settingsPhpMyAdmin: document.getElementById("settings-phpmyadmin"),
@@ -147,6 +185,9 @@ const elements = {
   siteTabs: document.querySelectorAll(".site-tab"),
   siteTabPanels: document.querySelectorAll(".site-tab-panel")
 };
+
+state.addressSuggestions = [];
+state.activeAddressSuggestionIndex = -1;
 
 function setStatus(message) {
   elements.statusText.textContent = message;
@@ -171,6 +212,104 @@ function setBrowserFeedback(message, type = "info") {
   browserFeedbackTimer = setTimeout(() => {
     elements.browserFeedback.classList.add("hidden");
   }, 2600);
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function hideAddressSuggestions() {
+  addressSuggestionsToken += 1;
+  state.addressSuggestions = [];
+  state.activeAddressSuggestionIndex = -1;
+  elements.addressSuggestions.innerHTML = "";
+  elements.addressSuggestions.classList.add("hidden");
+}
+
+function renderAddressSuggestions() {
+  const suggestions = state.addressSuggestions || [];
+  elements.addressSuggestions.innerHTML = "";
+
+  if (!suggestions.length) {
+    elements.addressSuggestions.classList.add("hidden");
+    return;
+  }
+
+  suggestions.forEach((suggestion, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `address-suggestion${index === state.activeAddressSuggestionIndex ? " active" : ""}`;
+    button.dataset.index = String(index);
+    button.innerHTML = `
+      <span class="address-suggestion-badge">${escapeHtml(suggestion.type)}</span>
+      <span class="address-suggestion-copy">
+        <span class="address-suggestion-title">${escapeHtml(suggestion.title || suggestion.value)}</span>
+        <span class="address-suggestion-meta">${escapeHtml(suggestion.secondaryText || suggestion.value)}</span>
+      </span>
+    `;
+
+    button.addEventListener("mousedown", (event) => {
+      event.preventDefault();
+    });
+
+    button.addEventListener("click", () => {
+      applyAddressSuggestion(index);
+    });
+
+    elements.addressSuggestions.appendChild(button);
+  });
+
+  elements.addressSuggestions.classList.remove("hidden");
+}
+
+async function requestAddressSuggestions(query) {
+  const token = ++addressSuggestionsToken;
+  let suggestions = [];
+
+  try {
+    suggestions = await window.desktopAPI.browserGetSuggestions(query);
+  } catch (_) {
+    suggestions = [];
+  }
+
+  if (token !== addressSuggestionsToken) {
+    return;
+  }
+
+  state.addressSuggestions = Array.isArray(suggestions) ? suggestions : [];
+  state.activeAddressSuggestionIndex = -1;
+  renderAddressSuggestions();
+}
+
+function moveAddressSuggestion(step) {
+  if (!state.addressSuggestions.length) {
+    return;
+  }
+
+  const length = state.addressSuggestions.length;
+  const nextIndex = state.activeAddressSuggestionIndex < 0
+    ? 0
+    : (state.activeAddressSuggestionIndex + step + length) % length;
+
+  state.activeAddressSuggestionIndex = nextIndex;
+  renderAddressSuggestions();
+}
+
+function applyAddressSuggestion(index = state.activeAddressSuggestionIndex) {
+  const suggestion = state.addressSuggestions[index];
+  if (!suggestion) {
+    return;
+  }
+
+  state.isEditingAddress = false;
+  hideAddressSuggestions();
+  elements.addressInput.value = suggestion.value;
+  window.desktopAPI.browserNavigate(suggestion.value);
 }
 
 async function openBookmarkSaveDialogForCurrentPage() {
@@ -268,8 +407,12 @@ async function openBookmarkSaveDialogForBookmark(bookmark) {
 
 function renderSidebarState() {
   elements.appShell.classList.toggle("sidebar-collapsed", uiState.sidebarCollapsed);
+  elements.appShell.classList.toggle("browser-focus-mode", uiState.browserFocusMode);
   elements.sidebarToggleButton.setAttribute("aria-label", uiState.sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar");
   elements.sidebarToggleButton.querySelector(".sidebar-toggle-glyph").textContent = uiState.sidebarCollapsed ? ">>" : "<<";
+  elements.browserFullscreenButton.setAttribute("aria-label", uiState.browserFocusMode ? "Exit Full Screen" : "Full Screen");
+  elements.browserFullscreenButton.title = uiState.browserFocusMode ? "Exit Full Screen" : "Full Screen";
+  elements.browserFullscreenButton.querySelector(".toolbar-icon-glyph").textContent = uiState.browserFocusMode ? "×" : "⛶";
   syncBrowserLayoutSoon();
 }
 
@@ -279,7 +422,20 @@ function toggleSidebar() {
   renderSidebarState();
 }
 
+function toggleBrowserFocusMode(forceValue) {
+  uiState.browserFocusMode = typeof forceValue === "boolean" ? forceValue : !uiState.browserFocusMode;
+  if (uiState.browserFocusMode && state.vaultOpen) {
+    state.vaultOpen = false;
+    renderVaultPanel();
+  }
+  renderSidebarState();
+}
+
 function showScreen(screenName) {
+  if (screenName !== "browser" && uiState.browserFocusMode) {
+    uiState.browserFocusMode = false;
+  }
+
   elements.navButtons.forEach((button) => {
     button.classList.toggle("active", button.dataset.screen === screenName);
   });
@@ -308,6 +464,8 @@ function showSiteTab(name) {
 elements.siteTabs.forEach((tab) => {
   tab.addEventListener("click", () => showSiteTab(tab.dataset.siteTab));
 });
+
+initBrowserToolSections();
 
 function ensureUrl(input) {
   const raw = input.trim();
@@ -339,12 +497,60 @@ function getCredentialKeyFromUrl(url) {
   }
 }
 
+function maskPassword(value) {
+  const password = String(value || "");
+  if (!password) {
+    return "empty";
+  }
+
+  return "\u2022".repeat(Math.min(Math.max(password.length, 4), 12));
+}
+
+function renderVaultCredentialOptions(saved) {
+  const select = elements.vaultCredentialList;
+  const entries = Array.isArray(saved?.entries) ? saved.entries : [];
+  const selectedId = saved?.selectedId || "";
+
+  select.innerHTML = "";
+
+  const newOption = document.createElement("option");
+  newOption.value = "";
+  newOption.textContent = "New credential";
+  select.appendChild(newOption);
+
+  entries.forEach((entry, index) => {
+    const option = document.createElement("option");
+    option.value = entry.id;
+    option.textContent = `${entry.username || `Credential ${index + 1}`} (${maskPassword(entry.password)})`;
+    select.appendChild(option);
+  });
+
+  select.value = entries.some((entry) => entry.id === selectedId) ? selectedId : "";
+}
+
+function loadVaultCredentialFromSelection(saved) {
+  const selectedId = elements.vaultCredentialList.value;
+  const entries = Array.isArray(saved?.entries) ? saved.entries : [];
+  const selected = entries.find((entry) => entry.id === selectedId);
+
+  if (!selected) {
+    elements.vaultUsername.value = "";
+    elements.vaultPassword.value = "";
+    return;
+  }
+
+  elements.vaultUsername.value = selected.username || "";
+  elements.vaultPassword.value = selected.password || "";
+}
+
 async function syncVaultPanel() {
   const active = getActiveBrowserTab();
   const key = active ? getCredentialKeyFromUrl(active.url) : null;
 
   if (!key) {
     elements.vaultSiteLabel.textContent = "Open a page to manage saved credentials.";
+    state.currentVaultCredentials = null;
+    renderVaultCredentialOptions(null);
     elements.vaultUsername.value = "";
     elements.vaultPassword.value = "";
     return;
@@ -352,21 +558,28 @@ async function syncVaultPanel() {
 
   elements.vaultSiteLabel.textContent = key;
   const saved = await window.desktopAPI.getSiteCredentials(key);
+  state.currentVaultCredentials = saved;
+  renderVaultCredentialOptions(saved);
+  if (elements.vaultCredentialList.value) {
+    loadVaultCredentialFromSelection(saved);
+    return;
+  }
   elements.vaultUsername.value = saved?.username || "";
   elements.vaultPassword.value = saved?.password || "";
 }
 
 function refreshControls() {
   const active = getActiveBrowserTab();
-  if (!state.isEditingAddress) {
+  if (!state.isEditingAddress && !state.addressSuggestions.length) {
     elements.addressInput.value = active?.url || "";
   }
+  const isBookmarked = Boolean(active?.url && state.browser.bookmarks.some((bookmark) => bookmark.url === active.url));
   elements.backButton.disabled = !state.browser.canGoBack;
   elements.forwardButton.disabled = !state.browser.canGoForward;
   elements.bookmarkPageButton.disabled = !active?.url;
-  elements.bookmarkPageButton.textContent = active?.url && state.browser.bookmarks.some((bookmark) => bookmark.url === active.url)
-    ? "Bookmarked"
-    : "Bookmark";
+  elements.bookmarkPageButton.innerHTML = `<span class="toolbar-icon-glyph">${isBookmarked ? "&#x2605;" : "&#x2606;"}</span>`;
+  elements.bookmarkPageButton.title = isBookmarked ? "Bookmarked" : "Bookmark";
+  elements.bookmarkPageButton.setAttribute("aria-label", isBookmarked ? "Bookmarked" : "Bookmark");
   renderBookmarks();
   renderDownloads();
   renderPermissions();
@@ -380,8 +593,66 @@ function renderVaultPanel() {
   syncBrowserLayoutSoon();
 }
 
+async function openBrowserMenu() {
+  const rect = elements.browserMenuButton.getBoundingClientRect();
+  await window.desktopAPI.browserShowAppMenu({
+    x: rect.left,
+    y: rect.bottom + 4
+  });
+}
+
+async function handleBrowserMenuCommand(payload) {
+  const action = payload?.action;
+  if (!action) {
+    return;
+  }
+
+  if (action === "favorites" || action === "downloads" || action === "passwords") {
+    showScreen("browser");
+    state.vaultOpen = true;
+    renderVaultPanel();
+    setBrowserFeedback(
+      action === "downloads"
+        ? "Open Browser Tools to review downloads."
+        : action === "passwords"
+          ? "Open Browser Tools to manage saved passwords."
+          : "Open Browser Tools to manage favorites.",
+      "info"
+    );
+    return;
+  }
+
+  if (action === "settings") {
+    showScreen("settings");
+    return;
+  }
+
+  if (action === "find") {
+    const query = window.prompt("Find on page", "");
+    if (!query?.trim()) {
+      return;
+    }
+
+    const found = await window.desktopAPI.browserFindInPage(query.trim());
+    if (!found) {
+      setBrowserFeedback("Could not search the current page.", "error");
+    }
+    return;
+  }
+
+}
+
 function formatPathValue(value) {
   return value || "Not found";
+}
+
+function getEffectiveDbProfile() {
+  return state.effectiveDbProfile || {
+    host: "127.0.0.1",
+    port: "3306",
+    user: "root",
+    password: ""
+  };
 }
 
 function bindSettingsPath(labelElement, buttonElement, targetPath) {
@@ -405,9 +676,195 @@ function renderXamppSettings() {
   bindSettingsPath(elements.settingsApacheConfig, elements.openApacheConfigButton, paths.apacheConfigPath);
   bindSettingsPath(elements.settingsMysqlConfig, elements.openMysqlConfigButton, paths.mysqlConfigPath);
   bindSettingsPath(elements.settingsControlPanel, elements.openControlPanelButton, paths.controlPanelPath);
+  elements.settingsDbUser.value = getEffectiveDbProfile().user || "root";
+  elements.settingsDbPassword.value = getEffectiveDbProfile().password || "";
+  elements.settingsMysqlEditor.value = state.mysqlConfigContent || "";
+  elements.settingsMysqlEditor.readOnly = !paths.mysqlConfigPath;
+  elements.saveMysqlConfigButton.disabled = !paths.mysqlConfigPath;
   bindSettingsPath(elements.settingsPhpExe, elements.openPhpExeButton, paths.phpExecutablePath);
   bindSettingsPath(elements.settingsPhpConfig, elements.openPhpConfigButton, paths.phpConfigPath);
   bindSettingsPath(elements.settingsPhpMyAdmin, elements.openPhpMyAdminFolderButton, paths.phpMyAdminPath);
+}
+
+function renderSessionRules() {
+  if (elements.settingsShareLocalSessions) {
+    elements.settingsShareLocalSessions.checked = state.shareLocalSiteSessions !== false;
+    elements.settingsShareLocalSessions.disabled = false;
+  }
+  if (elements.settingsShareOnlineSessions) {
+    elements.settingsShareOnlineSessions.checked = state.shareOnlineSiteSessions === true;
+    elements.settingsShareOnlineSessions.disabled = false;
+  }
+
+  if (!elements.sessionRulesCopy) {
+    return;
+  }
+
+  const localShared = !elements.settingsShareLocalSessions || elements.settingsShareLocalSessions.checked;
+  const onlineShared = Boolean(elements.settingsShareOnlineSessions?.checked);
+  const localRule = localShared
+    ? "Local tabs reuse persist:local-shared."
+    : "Each new local tab gets its own persistent profile.";
+  const onlineRule = onlineShared
+    ? "Online tabs reuse persist:online-shared."
+    : "Each new online tab gets its own persistent profile.";
+
+  const ruleText = `${localRule} ${onlineRule} Tabs in the same group always reuse that group's profile.`;
+  elements.sessionRulesCopy.textContent = ruleText;
+}
+
+function getTabSessionLabel(tab) {
+  const profileName = String(tab?.sessionProfileName || tab?.partition || "").trim();
+  return profileName ? `Profile: ${profileName}` : "Profile: temporary-session";
+}
+
+function getTabGroupLabel(tab) {
+  const groupName = String(tab?.groupName || "").trim();
+  return groupName ? `Group: ${groupName}` : "Group: none";
+}
+
+function getTabSessionInfoCopy(tab) {
+  if (!tab) {
+    return "No active tab is available.";
+  }
+
+  const profileName = String(tab.sessionProfileName || tab.partition || "temporary-session").trim();
+  return `Persist session: ${profileName}.`;
+}
+
+function getBrowserToolSections() {
+  return Array.from(document.querySelectorAll(".browser-tool-section[data-tool-section]"));
+}
+
+function readBrowserToolPrefs(key, fallback) {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) {
+      return fallback;
+    }
+
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : fallback;
+  } catch (_) {
+    return fallback;
+  }
+}
+
+function writeBrowserToolPrefs(key, value) {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch (_) {
+    // Ignore renderer preference persistence failures.
+  }
+}
+
+function saveBrowserToolOrder() {
+  const order = getBrowserToolSections().map((section) => section.dataset.toolSection);
+  writeBrowserToolPrefs(BROWSER_TOOL_ORDER_KEY, order);
+}
+
+function saveBrowserToolCollapseState() {
+  const collapsed = Object.fromEntries(
+    getBrowserToolSections().map((section) => [section.dataset.toolSection, section.classList.contains("collapsed")])
+  );
+  writeBrowserToolPrefs(BROWSER_TOOL_COLLAPSE_KEY, collapsed);
+}
+
+function applyBrowserToolSectionPrefs() {
+  const panel = elements.vaultPanel;
+  if (!panel) {
+    return;
+  }
+
+  const order = readBrowserToolPrefs(BROWSER_TOOL_ORDER_KEY, DEFAULT_BROWSER_TOOL_ORDER);
+  const collapsed = readBrowserToolPrefs(BROWSER_TOOL_COLLAPSE_KEY, DEFAULT_BROWSER_TOOL_COLLAPSE);
+  const sectionMap = new Map(getBrowserToolSections().map((section) => [section.dataset.toolSection, section]));
+
+  order.forEach((id) => {
+    const section = sectionMap.get(id);
+    if (section) {
+      panel.appendChild(section);
+    }
+  });
+
+  getBrowserToolSections().forEach((section) => {
+    section.classList.toggle("collapsed", Boolean(collapsed[section.dataset.toolSection]));
+  });
+}
+
+function toggleBrowserToolSection(section) {
+  section.classList.toggle("collapsed");
+  saveBrowserToolCollapseState();
+}
+
+function findBrowserToolDropTarget(pointerY, currentSection) {
+  const sections = getBrowserToolSections().filter((section) => section !== currentSection);
+
+  for (const section of sections) {
+    const rect = section.getBoundingClientRect();
+    if (pointerY < rect.top + rect.height / 2) {
+      return { section, position: "before" };
+    }
+  }
+
+  return { section: sections.at(-1) || null, position: "after" };
+}
+
+function initBrowserToolSections() {
+  getBrowserToolSections().forEach((section) => {
+    const toggleButton = section.querySelector("[data-tool-toggle]");
+    toggleButton?.addEventListener("click", (event) => {
+      if (event.target.closest(".browser-tool-drag")) {
+        return;
+      }
+
+      toggleBrowserToolSection(section);
+    });
+
+    section.addEventListener("dragstart", (event) => {
+      draggedBrowserToolSection = section;
+      section.classList.add("dragging");
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", section.dataset.toolSection || "");
+      }
+    });
+
+    section.addEventListener("dragend", () => {
+      draggedBrowserToolSection?.classList.remove("dragging");
+      draggedBrowserToolSection = null;
+      saveBrowserToolOrder();
+    });
+
+    section.addEventListener("dragover", (event) => {
+      if (!draggedBrowserToolSection || draggedBrowserToolSection === section) {
+        return;
+      }
+
+      event.preventDefault();
+      const target = findBrowserToolDropTarget(event.clientY, draggedBrowserToolSection);
+      if (!target.section) {
+        return;
+      }
+
+      if (target.position === "before") {
+        target.section.before(draggedBrowserToolSection);
+      } else {
+        target.section.after(draggedBrowserToolSection);
+      }
+    });
+
+    section.addEventListener("drop", (event) => {
+      if (!draggedBrowserToolSection) {
+        return;
+      }
+
+      event.preventDefault();
+      saveBrowserToolOrder();
+    });
+  });
+
+  applyBrowserToolSectionPrefs();
 }
 
 function setCreateProgress(active, message = "Preparing files, database, and local site records...") {
@@ -631,12 +1088,17 @@ function openUrlInAppBrowser(url, mode = "auto") {
 
 function renderBrowserTabs() {
   elements.tabStrip.innerHTML = "";
-
-  state.browser.tabs.forEach((tab) => {
+  elements.tabStripTooltipLayer.innerHTML = "";
+  const renderTabButton = (tab) => {
     const button = document.createElement("button");
-    button.className = `tab-button${tab.id === state.browser.activeTabId ? " active" : ""}`;
+    button.dataset.tabId = tab.id;
+    button.className = `tab-button${tab.id === state.browser.activeTabId ? " active" : ""}${tab.pinned ? " pinned" : ""}`;
+    const title = escapeHtml(tab.title || tab.url);
+    button.title = `${tab.title || tab.url}\n${getTabSessionInfoCopy(tab)}`;
     button.innerHTML = `
-      <span class="tab-title">${tab.title || tab.url}</span>
+      <span class="tab-copy">
+        <span class="tab-title">${tab.pinned ? "[Pin] " : ""}${title}${tab.muted ? " [Muted]" : ""}</span>
+      </span>
       <span class="tab-close" data-close="${tab.id}">x</span>
     `;
 
@@ -649,17 +1111,127 @@ function renderBrowserTabs() {
       window.desktopAPI.browserActivateTab(tab.id);
     });
 
-    elements.tabStrip.appendChild(button);
-  });
+    button.addEventListener("contextmenu", async (event) => {
+      event.preventDefault();
+      try {
+        await window.desktopAPI.browserShowTabContextMenu(tab.id);
+      } catch (error) {
+        setBrowserFeedback(`Tab menu failed: ${error.message}`, "error");
+      }
+    });
 
+    return button;
+  };
+
+  let index = 0;
+  while (index < state.browser.tabs.length) {
+    const currentTab = state.browser.tabs[index];
+
+    if (currentTab.groupId) {
+      const cluster = document.createElement("div");
+      cluster.dataset.groupId = currentTab.groupId;
+      const activeInGroup = state.browser.tabs.some((tab) => tab.groupId === currentTab.groupId && tab.id === state.browser.activeTabId);
+      cluster.className = `tab-group-cluster${activeInGroup ? " active" : ""}`;
+
+      const label = document.createElement("button");
+      label.type = "button";
+      label.className = "tab-group-chip";
+      label.textContent = currentTab.groupName || "Group";
+      label.title = `${currentTab.groupName || "Group"}\n${getTabSessionLabel(currentTab)}`;
+      label.addEventListener("click", () => {
+        window.desktopAPI.browserActivateTab(currentTab.id);
+      });
+      cluster.appendChild(label);
+
+      while (index < state.browser.tabs.length && state.browser.tabs[index].groupId === currentTab.groupId) {
+        cluster.appendChild(renderTabButton(state.browser.tabs[index]));
+        index += 1;
+      }
+
+      elements.tabStrip.appendChild(cluster);
+      continue;
+    }
+
+    elements.tabStrip.appendChild(renderTabButton(currentTab));
+    index += 1;
+  }
+
+  renderTabSessionTooltips();
   renderBrowserOverlay();
+}
+
+function renderTabSessionTooltips() {
+  const layer = elements.tabStripTooltipLayer;
+  if (!layer) {
+    return;
+  }
+
+  layer.innerHTML = "";
+  layer.classList.toggle("hidden", !uiState.showTabSessionInfo);
+  if (!uiState.showTabSessionInfo) {
+    return;
+  }
+
+  const shellRect = layer.parentElement?.getBoundingClientRect();
+  if (!shellRect) {
+    return;
+  }
+
+  const renderedGroups = new Set();
+
+  state.browser.tabs.forEach((tab) => {
+    let anchor = null;
+    let tooltipText = getTabSessionInfoCopy(tab);
+
+    if (tab.groupId) {
+      if (renderedGroups.has(tab.groupId)) {
+        return;
+      }
+      renderedGroups.add(tab.groupId);
+      anchor = elements.tabStrip.querySelector(`.tab-group-cluster[data-group-id="${tab.groupId}"]`);
+    } else {
+      anchor = elements.tabStrip.querySelector(`[data-tab-id="${tab.id}"]`);
+    }
+
+    if (!anchor) {
+      return;
+    }
+
+    const anchorRect = anchor.getBoundingClientRect();
+    const tooltip = document.createElement("div");
+    tooltip.className = "tab-session-tooltip";
+    tooltip.textContent = tooltipText;
+    tooltip.style.left = `${anchorRect.left - shellRect.left + anchorRect.width / 2}px`;
+    tooltip.style.bottom = `${shellRect.bottom - anchorRect.top + 10}px`;
+    layer.appendChild(tooltip);
+  });
 }
 
 function renderBrowserOverlay() {
   const active = getActiveBrowserTab();
   elements.browserOverlay.innerHTML = "";
 
-  if (!active?.error) {
+  if (!active) {
+    syncBrowserLayoutSoon();
+    return;
+  }
+
+  if (!active.error && active.isLoading) {
+    const overlay = document.createElement("div");
+    overlay.className = "browser-loading-card";
+    overlay.innerHTML = `
+      <div class="browser-loading-spinner" aria-hidden="true"></div>
+      <div class="browser-loading-copy">
+        <strong>Loading page</strong>
+        <span>${active.url || "Please wait..."}</span>
+      </div>
+    `;
+    elements.browserOverlay.appendChild(overlay);
+    syncBrowserLayoutSoon();
+    return;
+  }
+
+  if (!active.error) {
     syncBrowserLayoutSoon();
     return;
   }
@@ -667,15 +1239,15 @@ function renderBrowserOverlay() {
   const overlay = document.createElement("div");
   overlay.className = "browser-error-card";
   overlay.innerHTML = `
-    <span class="eyebrow">Local site error</span>
-    <h3>Could not open this local site</h3>
-    <p><strong>URL:</strong> ${active.error.url}</p>
-    <p><strong>Reason:</strong> ${active.error.description}</p>
-    <div class="button-row compact">
-      <button type="button" id="browser-error-retry">Retry</button>
-      <button type="button" id="browser-error-open-installer">Open Installer</button>
-    </div>
-  `;
+      <span class="eyebrow">Local site error</span>
+      <h3>Could not open this local site</h3>
+      <p><strong>URL:</strong> ${active.error.url}</p>
+      <p><strong>Reason:</strong> ${active.error.description}</p>
+      <div class="button-row compact">
+        <button type="button" id="browser-error-retry">Retry</button>
+        <button type="button" id="browser-error-open-installer">Open Installer</button>
+      </div>
+    `;
 
   overlay.querySelector("#browser-error-retry").addEventListener("click", () => {
     window.desktopAPI.browserReload();
@@ -702,10 +1274,23 @@ function syncBrowserLayoutSoon() {
     const visible = browserScreenActive && Boolean(active) && !active.error;
 
     if (!visible) {
+      elements.browserHost.style.setProperty("--browser-stage-offset", "0px");
       window.desktopAPI.browserUpdateLayout({ visible: false });
       return;
     }
 
+    const hostRect = elements.browserHost.getBoundingClientRect();
+    const suggestionsVisible = !elements.addressSuggestions.classList.contains("hidden");
+    let stageOffset = 0;
+
+    if (suggestionsVisible) {
+      const suggestionsRect = elements.addressSuggestions.getBoundingClientRect();
+      if (suggestionsRect.height > 0) {
+        stageOffset = Math.max(0, Math.ceil(suggestionsRect.bottom - hostRect.top + 8));
+      }
+    }
+
+    elements.browserHost.style.setProperty("--browser-stage-offset", `${stageOffset}px`);
     const rect = elements.browserStage.getBoundingClientRect();
     window.desktopAPI.browserUpdateLayout({
       visible: rect.width > 0 && rect.height > 0,
@@ -798,10 +1383,11 @@ function renderSiteDetails() {
   elements.detailPhpVersion.textContent = site.phpVersion || "-";
   elements.detailDbVersion.textContent = site.databaseVersion || "-";
   elements.detailWordpressVersion.textContent = site.wordpressVersion || "-";
-  elements.dbHost.value = site.dbHost || elements.dbHost.value || "127.0.0.1";
-  elements.dbPort.value = site.dbPort || elements.dbPort.value || "3306";
-  elements.dbUser.value = site.dbUser || elements.dbUser.value || "root";
-  elements.dbPassword.value = site.dbPassword ?? elements.dbPassword.value ?? "";
+  const effectiveDbProfile = getEffectiveDbProfile();
+  elements.dbHost.value = effectiveDbProfile.host || "127.0.0.1";
+  elements.dbPort.value = effectiveDbProfile.port || "3306";
+  elements.dbUser.value = effectiveDbProfile.user || "root";
+  elements.dbPassword.value = effectiveDbProfile.password || "";
   elements.backupSiteButton.disabled = progressState.backingUp || progressState.deleting;
   elements.deleteSiteButton.disabled = progressState.deleting;
   elements.overviewEmptyCard.classList.add("hidden");
@@ -828,6 +1414,10 @@ function applySettingsPayload(settings) {
   state.apacheRunning = Boolean(settings.apacheRunning);
   state.browser.downloadDirectory = settings.downloadDirectory || state.browser.downloadDirectory || "";
   state.xamppPaths = settings.xamppPaths || null;
+  state.effectiveDbProfile = settings.effectiveDbProfile || getEffectiveDbProfile();
+  state.mysqlConfigContent = settings.mysqlConfigContent || "";
+  state.shareLocalSiteSessions = settings.shareLocalSiteSessions !== false;
+  state.shareOnlineSiteSessions = settings.shareOnlineSiteSessions === true;
 
   elements.htdocsPath.value = state.htdocsPath;
   elements.settingsHtdocsPath.value = state.htdocsPath;
@@ -837,6 +1427,28 @@ function applySettingsPayload(settings) {
   }
 
   renderXamppSettings();
+  renderSessionRules();
+  renderSiteDetails();
+}
+
+async function updateLocalSessionSharing() {
+  const enabled = elements.settingsShareLocalSessions.checked;
+  const result = await window.desktopAPI.setLocalSessionSharing(enabled);
+  applySettingsPayload(result);
+  const message = enabled 
+    ? "All local tabs now share WordPress sign-ins."
+    : "Each local tab has its own isolated session.";
+  setStatus(message);
+}
+
+async function updateOnlineSessionSharing() {
+  const enabled = elements.settingsShareOnlineSessions.checked;
+  const result = await window.desktopAPI.setOnlineSessionSharing(enabled);
+  applySettingsPayload(result);
+  const message = enabled 
+    ? "Online tabs from the same site now share sessions."
+    : "Each online tab has its own isolated session.";
+  setStatus(message);
 }
 
 async function pickAndSaveXamppRoot() {
@@ -847,13 +1459,6 @@ async function pickAndSaveXamppRoot() {
 
   const result = await window.desktopAPI.setXamppRootPath(selected);
   applySettingsPayload(result);
-
-  if (result.detectedDbProfile) {
-    elements.dbHost.value = result.detectedDbProfile.host || "127.0.0.1";
-    elements.dbPort.value = result.detectedDbProfile.port || "3306";
-    elements.dbUser.value = result.detectedDbProfile.user || "root";
-    elements.dbPassword.value = result.detectedDbProfile.password || "";
-  }
 
   await refreshSites();
   setStatus("Updated XAMPP root path.");
@@ -868,13 +1473,6 @@ async function pickAndSaveHtdocsPath() {
   const result = await window.desktopAPI.setHtdocsPath(selected);
   applySettingsPayload(result);
 
-  if (result.detectedDbProfile) {
-    elements.dbHost.value = result.detectedDbProfile.host || "127.0.0.1";
-    elements.dbPort.value = result.detectedDbProfile.port || "3306";
-    elements.dbUser.value = result.detectedDbProfile.user || "root";
-    elements.dbPassword.value = result.detectedDbProfile.password || "";
-  }
-
   await refreshSites();
   setStatus("Updated XAMPP htdocs path.");
 }
@@ -888,6 +1486,23 @@ async function openExistingPath(targetPath, emptyMessage) {
   await window.desktopAPI.openPath(targetPath);
 }
 
+async function saveMysqlConfigFromSettings() {
+  setStatus("Saving MySQL settings...");
+
+  try {
+    const result = await window.desktopAPI.saveMysqlConfig({
+      dbUser: elements.settingsDbUser.value,
+      dbPassword: elements.settingsDbPassword.value,
+      content: elements.settingsMysqlEditor.value
+    });
+
+    applySettingsPayload(result);
+    setStatus("Saved MySQL config and DB credentials.");
+  } catch (error) {
+    setStatus(`Saving MySQL config failed: ${error.message}`);
+  }
+}
+
 async function saveCurrentSiteCredentials() {
   const active = getActiveBrowserTab();
   const key = active ? getCredentialKeyFromUrl(active.url) : null;
@@ -897,12 +1512,17 @@ async function saveCurrentSiteCredentials() {
     return;
   }
 
-  await window.desktopAPI.saveSiteCredentials({
+  const saved = await window.desktopAPI.saveSiteCredentials({
     key,
     username: elements.vaultUsername.value,
     password: elements.vaultPassword.value
   });
 
+  state.currentVaultCredentials = saved;
+  renderVaultCredentialOptions(saved);
+  if (saved?.selectedId) {
+    elements.vaultCredentialList.value = saved.selectedId;
+  }
   setStatus(`Saved credentials for ${key}.`);
 }
 
@@ -914,14 +1534,27 @@ async function clearCurrentSiteCredentials() {
     return;
   }
 
-  await window.desktopAPI.clearSiteCredentials(key);
-  elements.vaultUsername.value = "";
-  elements.vaultPassword.value = "";
-  setStatus(`Cleared credentials for ${key}.`);
+  const selectedId = elements.vaultCredentialList.value;
+  await window.desktopAPI.clearSiteCredentials(selectedId ? { key, id: selectedId } : { key });
+  await syncVaultPanel();
+  setStatus(selectedId ? `Removed one saved credential for ${key}.` : `Cleared credentials for ${key}.`);
 }
 
 function autofillCurrentPage() {
-  setStatus("Autofill is temporarily disabled in the rebuilt browser.");
+  void (async () => {
+    const active = getActiveBrowserTab();
+    if (!active?.url) {
+      setStatus("Open a login page before using autofill.");
+      return;
+    }
+
+    const result = await window.desktopAPI.browserAutofillCredentials({
+      username: elements.vaultUsername.value,
+      password: elements.vaultPassword.value
+    });
+
+    setStatus(result?.message || "Autofill finished.");
+  })();
 }
 
 async function openSelectedSiteTarget(kind) {
@@ -970,20 +1603,21 @@ async function deleteSelectedSite() {
   showSiteTab("tools");
 
   try {
-    await window.desktopAPI.deleteSite({
+    const effectiveDbProfile = getEffectiveDbProfile();
+    const result = await window.desktopAPI.deleteSite({
       site,
       database: {
-        host: elements.dbHost.value,
-        port: elements.dbPort.value,
-        user: elements.dbUser.value,
-        password: elements.dbPassword.value
+        host: effectiveDbProfile.host,
+        port: effectiveDbProfile.port,
+        user: effectiveDbProfile.user,
+        password: effectiveDbProfile.password
       }
     });
     if (state.selectedSiteId === site.id) {
       state.selectedSiteId = null;
     }
     await refreshSites();
-    setStatus(`Deleted ${site.name}.`);
+    setStatus(`Deleted ${site.name}. Backup saved to ${result?.backupPath || "the backups folder"}.`);
   } catch (error) {
     setStatus(`Delete failed: ${error.message}`);
   } finally {
@@ -1002,24 +1636,19 @@ async function backupSelectedSite() {
     return;
   }
 
-  const savePath = await window.desktopAPI.saveBackup(site.name);
-  if (!savePath) {
-    return;
-  }
-
   setBackupProgress(true);
   showSiteTab("tools");
   setStatus(`Creating backup for ${site.name}...`);
 
   try {
+    const effectiveDbProfile = getEffectiveDbProfile();
     const result = await window.desktopAPI.backupSite({
       site,
-      savePath,
       database: {
-        host: elements.dbHost.value,
-        port: elements.dbPort.value,
-        user: elements.dbUser.value,
-        password: elements.dbPassword.value
+        host: effectiveDbProfile.host,
+        port: effectiveDbProfile.port,
+        user: effectiveDbProfile.user,
+        password: effectiveDbProfile.password
       }
     });
     setStatus(`Backup saved to ${result.savePath}.`);
@@ -1032,23 +1661,66 @@ async function backupSelectedSite() {
 }
 
 elements.newTabButton.addEventListener("click", () => {
-  window.desktopAPI.browserCreateTab({ url: "https://wordpress.org", mode: "auto" });
+  window.desktopAPI.browserCreateTab({ url: "https://www.google.com", mode: "auto" });
 });
+elements.browserMenuButton.addEventListener("click", () => void openBrowserMenu());
 elements.vaultToggleButton.addEventListener("click", () => {
   state.vaultOpen = !state.vaultOpen;
   renderVaultPanel();
 });
+elements.browserFullscreenButton.addEventListener("click", () => toggleBrowserFocusMode());
 elements.addressForm.addEventListener("submit", (event) => {
   event.preventDefault();
+  if (state.activeAddressSuggestionIndex >= 0 && state.addressSuggestions.length) {
+    applyAddressSuggestion(state.activeAddressSuggestionIndex);
+    return;
+  }
+
   state.isEditingAddress = false;
+  hideAddressSuggestions();
   window.desktopAPI.browserNavigate(elements.addressInput.value);
 });
 elements.addressInput.addEventListener("focus", () => {
   state.isEditingAddress = true;
+  void requestAddressSuggestions(elements.addressInput.value);
+});
+elements.addressInput.addEventListener("input", () => {
+  state.isEditingAddress = true;
+  void requestAddressSuggestions(elements.addressInput.value);
+});
+elements.addressInput.addEventListener("keydown", (event) => {
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    moveAddressSuggestion(1);
+    return;
+  }
+
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    moveAddressSuggestion(-1);
+    return;
+  }
+
+  if (event.key === "Escape") {
+    hideAddressSuggestions();
+    return;
+  }
+
+  if (event.key === "Tab" && state.activeAddressSuggestionIndex >= 0 && state.addressSuggestions.length) {
+    event.preventDefault();
+    const suggestion = state.addressSuggestions[state.activeAddressSuggestionIndex];
+    if (suggestion) {
+      elements.addressInput.value = suggestion.value;
+      hideAddressSuggestions();
+    }
+  }
 });
 elements.addressInput.addEventListener("blur", () => {
-  state.isEditingAddress = false;
-  refreshControls();
+  window.setTimeout(() => {
+    state.isEditingAddress = false;
+    hideAddressSuggestions();
+    refreshControls();
+  }, 120);
 });
 elements.backButton.addEventListener("click", () => window.desktopAPI.browserGoBack());
 elements.forwardButton.addEventListener("click", () => window.desktopAPI.browserGoForward());
@@ -1057,6 +1729,24 @@ elements.bookmarkPageButton.addEventListener("click", () => void openBookmarkSav
 elements.vaultSaveButton.addEventListener("click", () => void saveCurrentSiteCredentials());
 elements.vaultClearButton.addEventListener("click", () => void clearCurrentSiteCredentials());
 elements.vaultFillButton.addEventListener("click", autofillCurrentPage);
+elements.tabSessionInfoButton.addEventListener("click", () => {
+  uiState.showTabSessionInfo = !uiState.showTabSessionInfo;
+  elements.tabSessionInfoButton.classList.toggle("active", uiState.showTabSessionInfo);
+  renderBrowserTabs();
+});
+elements.tabStrip.addEventListener("scroll", () => {
+  if (uiState.showTabSessionInfo) {
+    renderTabSessionTooltips();
+  }
+});
+window.addEventListener("resize", () => {
+  if (uiState.showTabSessionInfo) {
+    renderTabSessionTooltips();
+  }
+});
+elements.vaultCredentialList.addEventListener("change", () => {
+  loadVaultCredentialFromSelection(state.currentVaultCredentials);
+});
 elements.pickDownloadDirectoryButton.addEventListener("click", async () => {
   const selected = await window.desktopAPI.browserPickDownloadDirectory();
   if (selected) {
@@ -1077,6 +1767,9 @@ elements.createSiteModal.addEventListener("click", (event) => {
   }
 });
 elements.pickHtdocsButton.addEventListener("click", () => void pickAndSaveHtdocsPath());
+elements.openSidebarPhpMyAdminButton.addEventListener("click", () => {
+  openUrlInAppBrowser("http://localhost/phpmyadmin");
+});
 elements.pickXamppRootButton.addEventListener("click", () => void pickAndSaveXamppRoot());
 elements.settingsPickHtdocsButton.addEventListener("click", () => void pickAndSaveHtdocsPath());
 elements.openXamppRootButton.addEventListener("click", () =>
@@ -1097,6 +1790,9 @@ elements.openApacheConfigButton.addEventListener("click", () =>
 elements.openMysqlConfigButton.addEventListener("click", () =>
   void openExistingPath(state.xamppPaths?.mysqlConfigPath, "MySQL config file was not found.")
 );
+elements.settingsShareLocalSessions.addEventListener("change", () => void updateLocalSessionSharing());
+elements.settingsShareOnlineSessions.addEventListener("change", () => void updateOnlineSessionSharing());
+elements.saveMysqlConfigButton.addEventListener("click", () => void saveMysqlConfigFromSettings());
 elements.openControlPanelButton.addEventListener("click", () =>
   void openExistingPath(state.xamppPaths?.controlPanelPath, "XAMPP control panel was not found.")
 );
@@ -1135,12 +1831,8 @@ document.getElementById("test-db-button").addEventListener("click", async () => 
   setStatus("Testing MySQL connection...");
 
   try {
-    const result = await window.desktopAPI.testDb({
-      host: elements.dbHost.value,
-      port: elements.dbPort.value,
-      user: elements.dbUser.value,
-      password: elements.dbPassword.value
-    });
+    const effectiveDbProfile = getEffectiveDbProfile();
+    const result = await window.desktopAPI.testDb(effectiveDbProfile);
     setStatus(`Connected. MySQL ${result.version}`);
     elements.detailDbVersion.textContent = result.version;
   } catch (error) {
@@ -1158,30 +1850,18 @@ elements.installButton.addEventListener("click", async () => {
   setCreateProgress(true);
 
   try {
-    if (elements.saveDbProfile.checked) {
-      setCreateProgress(true, "Saving database profile...");
-      await window.desktopAPI.saveInstallerDbProfile({
-        host: elements.dbHost.value,
-        port: elements.dbPort.value,
-        user: elements.dbUser.value,
-        password: elements.dbPassword.value
-      });
-    } else {
-      setCreateProgress(true, "Clearing saved database profile...");
-      await window.desktopAPI.clearInstallerDbProfile();
-    }
-
     setCreateProgress(true, "Extracting WordPress files and preparing the local database...");
+    const effectiveDbProfile = getEffectiveDbProfile();
     const result = await window.desktopAPI.installWordPress({
       zipPath: elements.zipPath.value,
       basePath: elements.basePath.value,
       folderName: elements.folderName.value,
       database: {
         create: elements.createDb.checked,
-        host: elements.dbHost.value,
-        port: elements.dbPort.value,
-        user: elements.dbUser.value,
-        password: elements.dbPassword.value
+        host: effectiveDbProfile.host,
+        port: effectiveDbProfile.port,
+        user: effectiveDbProfile.user,
+        password: effectiveDbProfile.password
       }
     });
 
@@ -1216,6 +1896,12 @@ window.desktopAPI.onBrowserState((payload) => {
   refreshControls();
 });
 
+window.desktopAPI.onBrowserNotice((payload) => {
+  if (payload?.message) {
+    setBrowserFeedback(payload.message, payload.type || "info");
+  }
+});
+
 window.desktopAPI.onBrowserDownloadComplete((payload) => {
   if (payload?.filename) {
     setStatus(`Download complete: ${payload.filename}`);
@@ -1243,6 +1929,10 @@ window.desktopAPI.onBrowserFocus(() => {
   showScreen("browser");
 });
 
+window.desktopAPI.onBrowserMenuCommand((payload) => {
+  void handleBrowserMenuCommand(payload);
+});
+
 window.desktopAPI.onSitesChanged(() => {
   void refreshSites();
 });
@@ -1250,23 +1940,8 @@ window.desktopAPI.onSitesChanged(() => {
 async function loadSavedState() {
   const settings = await window.desktopAPI.getSettings();
   applySettingsPayload(settings);
-
-  const dbProfile = await window.desktopAPI.getInstallerDbProfile();
-  const detectedDbProfile = settings.detectedDbProfile || null;
-  const explicitSavedProfile = dbProfile && !(
-    (dbProfile.host || "127.0.0.1") === "127.0.0.1" &&
-    String(dbProfile.port || "3306") === "3306" &&
-    (dbProfile.user || "root") === "root" &&
-    (dbProfile.password || "") === ""
-  );
-  const effectiveDbProfile = explicitSavedProfile ? dbProfile : detectedDbProfile || dbProfile;
-
-  if (effectiveDbProfile) {
-    elements.dbHost.value = effectiveDbProfile.host || "127.0.0.1";
-    elements.dbPort.value = effectiveDbProfile.port || "3306";
-    elements.dbUser.value = effectiveDbProfile.user || "root";
-    elements.dbPassword.value = effectiveDbProfile.password || "";
-  }
+  elements.saveDbProfile.checked = false;
+  elements.saveDbProfile.disabled = true;
 
   const vaultInfo = await window.desktopAPI.getVaultInfo();
   setStatus(

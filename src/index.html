@@ -40,7 +40,7 @@
 
       <section class="sidebar-note">
         <h2>Session rules</h2>
-        <p>Local sites keep their login. Every non-local tab gets its own temporary session.</p>
+        <p id="session-rules-copy">All tabs use one persistent browser profile so cookies, local storage, and sign-in state behave like a normal browser.</p>
       </section>
     </aside>
 
@@ -48,17 +48,18 @@
       <section class="screen active" id="browser-screen">
         <header class="toolbar">
           <div class="toolbar-actions">
-            <button id="back-button" class="icon-button">Back</button>
-            <button id="forward-button" class="icon-button">Forward</button>
-            <button id="reload-button" class="icon-button">Reload</button>
+            <button id="back-button" class="icon-button toolbar-icon-button" type="button" title="Back" aria-label="Back"><span class="toolbar-icon-glyph">&#x2039;</span></button>
+            <button id="forward-button" class="icon-button toolbar-icon-button" type="button" title="Forward" aria-label="Forward"><span class="toolbar-icon-glyph">&#x203A;</span></button>
+            <button id="reload-button" class="icon-button toolbar-icon-button" type="button" title="Reload" aria-label="Reload"><span class="toolbar-icon-glyph">&#x21BB;</span></button>
           </div>
           <form id="address-form" class="address-form">
-            <input id="address-input" type="text" placeholder="Enter a URL or localhost path">
+            <input id="address-input" type="text" placeholder="Enter a URL, localhost path, or search" autocomplete="off" spellcheck="false">
+            <div id="address-suggestions" class="address-suggestions hidden" aria-live="polite"></div>
           </form>
           <div class="toolbar-actions">
-            <button id="bookmark-page-button" class="icon-button">Bookmark</button>
-            <button id="vault-toggle-button" class="icon-button">Browser Tools</button>
-            <button id="new-tab-button" class="primary-button">New Tab</button>
+            <button id="bookmark-page-button" class="icon-button toolbar-icon-button" type="button" title="Bookmark" aria-label="Bookmark"><span class="toolbar-icon-glyph">&#x2606;</span></button>
+            <button id="vault-toggle-button" class="icon-button toolbar-icon-button" type="button" title="Developer Tools" aria-label="Developer Tools"><span class="toolbar-icon-glyph">&lt;/&gt;</span></button>
+            <button id="browser-menu-button" class="icon-button toolbar-icon-button" type="button" title="Browser Menu" aria-label="Browser Menu"><span class="toolbar-icon-glyph">&#x22EE;</span></button>
           </div>
         </header>
         <div id="browser-feedback" class="browser-feedback hidden" aria-live="polite"></div>
@@ -87,10 +88,23 @@
             </div>
           </div>
         </div>
-
         <div id="browser-layout" class="browser-layout">
           <div class="browser-main">
-            <div id="tab-strip" class="tab-strip"></div>
+            <div class="tab-strip-shell">
+              <div id="tab-strip" class="tab-strip"></div>
+              <div id="tab-strip-tooltip-layer" class="tab-strip-tooltip-layer"></div>
+              <div class="tab-strip-actions">
+                <button id="tab-session-info-button" class="icon-button toolbar-icon-button tab-strip-info-button" type="button" title="Session Info" aria-label="Session Info">
+                  <span class="toolbar-icon-glyph">i</span>
+                </button>
+                <button id="new-tab-button" class="primary-button toolbar-icon-button tab-strip-new-tab-button" type="button" title="New Tab" aria-label="New Tab">
+                  <span class="toolbar-icon-glyph">+</span>
+                </button>
+                <button id="browser-fullscreen-button" class="icon-button toolbar-icon-button tab-strip-fullscreen-button" type="button" title="Full Screen" aria-label="Full Screen">
+                  <span class="toolbar-icon-glyph">&#x26F6;</span>
+                </button>
+              </div>
+            </div>
             <div id="browser-host" class="browser-host">
               <div id="browser-stage" class="browser-stage"></div>
               <div id="browser-overlay" class="browser-overlay"></div>
@@ -103,59 +117,124 @@
                 <h3>Passwords, downloads, permissions</h3>
               </div>
             </div>
-            <section class="browser-tool-section">
-              <div class="row-heading">
-                <div>
+            <section class="browser-tool-section" data-tool-section="bookmarks" draggable="true">
+              <button class="browser-tool-section-header" type="button" data-tool-toggle>
+                <div class="browser-tool-section-heading">
                   <span class="eyebrow">Bookmarks</span>
                   <p class="panel-copy">Saved pages you can reopen quickly.</p>
                 </div>
+                <span class="browser-tool-section-actions">
+                  <span class="browser-tool-drag" aria-hidden="true">&#x2630;</span>
+                  <span class="browser-tool-chevron" aria-hidden="true">&#x203A;</span>
+                </span>
+              </button>
+              <div class="browser-tool-section-body">
+                <div id="bookmarks-list" class="browser-tool-list"></div>
               </div>
-              <div id="bookmarks-list" class="browser-tool-list"></div>
             </section>
-            <section class="browser-tool-section">
-              <span class="eyebrow">Credential vault</span>
-              <p class="panel-copy" id="vault-site-label">Open a page to manage saved credentials.</p>
-              <label class="field">
-                <span>Username</span>
-                <input id="vault-username" type="text" placeholder="Username or email">
-              </label>
-              <label class="field">
-                <span>Password</span>
-                <input id="vault-password" type="password" placeholder="Password">
-              </label>
-              <div class="button-row compact">
-                <button id="vault-save-button" type="button">Save</button>
-                <button id="vault-fill-button" type="button">Autofill</button>
-                <button id="vault-clear-button" type="button">Clear</button>
+            <section class="browser-tool-section" data-tool-section="credentials" draggable="true">
+              <button class="browser-tool-section-header" type="button" data-tool-toggle>
+                <div class="browser-tool-section-heading">
+                  <span class="eyebrow">Credential vault</span>
+                  <p class="panel-copy" id="vault-site-label">Open a page to manage saved credentials.</p>
+                </div>
+                <span class="browser-tool-section-actions">
+                  <span class="browser-tool-drag" aria-hidden="true">&#x2630;</span>
+                  <span class="browser-tool-chevron" aria-hidden="true">&#x203A;</span>
+                </span>
+              </button>
+              <div class="browser-tool-section-body">
+                <label class="field">
+                  <span>Saved entries</span>
+                  <select id="vault-credential-list">
+                    <option value="">New credential</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Username</span>
+                  <input id="vault-username" type="text" placeholder="Username or email">
+                </label>
+                <label class="field">
+                  <span>Password</span>
+                  <input id="vault-password" type="password" placeholder="Password">
+                </label>
+                <div class="button-row compact">
+                  <button id="vault-save-button" type="button">Save</button>
+                  <button id="vault-fill-button" type="button">Autofill</button>
+                  <button id="vault-clear-button" type="button">Clear</button>
+                </div>
+                <div class="vault-note">Saved values are encrypted with the OS-backed Electron storage.</div>
+                <div class="vault-note">Passkeys and Windows Hello are available on persistent local sessions when the site supports WebAuthn.</div>
               </div>
-              <div class="vault-note">Saved values are encrypted with the OS-backed Electron storage.</div>
-              <div class="vault-note">Passkeys and Windows Hello are available on persistent local sessions when the site supports WebAuthn.</div>
             </section>
-            <section class="browser-tool-section">
-              <div class="row-heading">
-                <div>
+            <section class="browser-tool-section" data-tool-section="sessions" draggable="true">
+              <button class="browser-tool-section-header" type="button" data-tool-toggle>
+                <div class="browser-tool-section-heading">
+                  <span class="eyebrow">Browser sessions</span>
+                  <p class="panel-copy">Control whether local and online tabs reuse the same site login session.</p>
+                </div>
+                <span class="browser-tool-section-actions">
+                  <span class="browser-tool-drag" aria-hidden="true">&#x2630;</span>
+                  <span class="browser-tool-chevron" aria-hidden="true">&#x203A;</span>
+                </span>
+              </button>
+              <div class="browser-tool-section-body">
+                <label class="checkbox-row">
+                  <input id="settings-share-local-sessions" type="checkbox" checked>
+                  <span>Share login across local tabs</span>
+                </label>
+                <div class="vault-note">
+                  Turn this off to isolate each localhost tab in its own browser session. New local tabs will stop sharing WordPress sign-ins with each other.
+                </div>
+                <label class="checkbox-row">
+                  <input id="settings-share-online-sessions" type="checkbox">
+                  <span>Share login across online tabs</span>
+                </label>
+                <div class="vault-note">
+                  Turn this on to let tabs from the same online site reuse one persistent session. Leave it off to keep non-local browsing isolated per tab.
+                </div>
+              </div>
+            </section>
+            <section class="browser-tool-section" data-tool-section="downloads" draggable="true">
+              <button class="browser-tool-section-header" type="button" data-tool-toggle>
+                <div class="browser-tool-section-heading">
                   <span class="eyebrow">Downloads</span>
                   <p class="panel-copy">Files save to your chosen browser download folder.</p>
                 </div>
-                <button id="clear-downloads-button" type="button">Clear finished</button>
-              </div>
-              <label class="field">
-                <span>Download folder</span>
-                <div class="picker-row">
-                  <input id="download-directory" type="text" readonly>
-                  <button id="pick-download-directory-button" type="button">Change</button>
+                <span class="browser-tool-section-actions">
+                  <span class="browser-tool-drag" aria-hidden="true">&#x2630;</span>
+                  <span class="browser-tool-chevron" aria-hidden="true">&#x203A;</span>
+                </span>
+              </button>
+              <div class="browser-tool-section-body">
+                <div class="row-heading">
+                  <div></div>
+                  <button id="clear-downloads-button" type="button">Clear finished</button>
                 </div>
-              </label>
-              <div id="downloads-list" class="browser-tool-list"></div>
+                <label class="field">
+                  <span>Download folder</span>
+                  <div class="picker-row">
+                    <input id="download-directory" type="text" readonly>
+                    <button id="pick-download-directory-button" type="button">Change</button>
+                  </div>
+                </label>
+                <div id="downloads-list" class="browser-tool-list"></div>
+              </div>
             </section>
-            <section class="browser-tool-section">
-              <div class="row-heading">
-                <div>
+            <section class="browser-tool-section" data-tool-section="permissions" draggable="true">
+              <button class="browser-tool-section-header" type="button" data-tool-toggle>
+                <div class="browser-tool-section-heading">
                   <span class="eyebrow">Saved permissions</span>
                   <p class="panel-copy">Per-site decisions for geolocation, camera, screen share, and similar APIs.</p>
                 </div>
+                <span class="browser-tool-section-actions">
+                  <span class="browser-tool-drag" aria-hidden="true">&#x2630;</span>
+                  <span class="browser-tool-chevron" aria-hidden="true">&#x203A;</span>
+                </span>
+              </button>
+              <div class="browser-tool-section-body">
+                <div id="permissions-list" class="browser-tool-list"></div>
               </div>
-              <div id="permissions-list" class="browser-tool-list"></div>
             </section>
           </aside>
         </div>
@@ -179,6 +258,9 @@
                   <button id="pick-htdocs-button" type="button">Set</button>
                 </div>
               </label>
+              <div class="button-row compact sidebar-utility-actions">
+                <button id="open-sidebar-phpmyadmin-button" type="button">Database</button>
+              </div>
               <div id="server-status" class="server-status">Apache status: unknown</div>
             </div>
             <div id="sites-running-count" class="sites-running-count">0 sites running</div>
@@ -273,19 +355,19 @@
                   <div class="form-grid four-up">
                     <label class="field">
                       <span>Host</span>
-                      <input id="db-host" type="text" value="127.0.0.1">
+                      <input id="db-host" type="text" value="127.0.0.1" readonly>
                     </label>
                     <label class="field">
                       <span>Port</span>
-                      <input id="db-port" type="number" value="3306">
+                      <input id="db-port" type="number" value="3306" readonly>
                     </label>
                     <label class="field">
                       <span>User</span>
-                      <input id="db-user" type="text" value="root">
+                      <input id="db-user" type="text" value="root" readonly>
                     </label>
                     <label class="field">
                       <span>Password</span>
-                      <input id="db-password" type="password" placeholder="Leave empty if none">
+                      <input id="db-password" type="password" placeholder="Managed from Settings" readonly>
                     </label>
                   </div>
 
@@ -300,7 +382,7 @@
                     </div>
                   </div>
 
-                  <p class="panel-copy">These MySQL details are used for testing, creating, and deleting site databases.</p>
+                  <p class="panel-copy">These MySQL details are loaded from XAMPP MySQL settings. Edit <code>my.ini</code> and DB credentials from the Settings screen.</p>
 
                   <div class="button-row compact">
                     <button id="open-phpmyadmin-button" type="button">Open phpMyAdmin</button>
@@ -433,6 +515,39 @@
               </div>
             </div>
 
+            <div class="settings-card settings-card-wide">
+              <div class="card-header">
+                <div>
+                  <span class="eyebrow">Database config</span>
+                  <h3>MySQL settings editor</h3>
+                </div>
+              </div>
+
+              <div class="form-grid four-up">
+                <label class="field">
+                  <span>Database user</span>
+                  <input id="settings-db-user" type="text" value="root">
+                </label>
+                <label class="field">
+                  <span>Database password</span>
+                  <input id="settings-db-password" type="password" placeholder="Leave empty if none">
+                </label>
+              </div>
+
+              <label class="field">
+                <span>my.ini content</span>
+                <textarea id="settings-mysql-editor" class="config-editor" spellcheck="false" placeholder="MySQL config file content will appear here"></textarea>
+              </label>
+
+              <div class="button-row compact">
+                <button id="save-mysql-config-button" type="button" class="primary-button">Save MySQL config</button>
+              </div>
+
+              <div class="settings-note">
+                Host and port are parsed from <code>my.ini</code>. User and password are stored in app settings and used together with the XAMPP MySQL config.
+              </div>
+            </div>
+
             <div class="settings-card">
               <div class="card-header">
                 <div>
@@ -510,8 +625,8 @@
       </label>
 
       <label class="checkbox-row">
-        <input id="save-db-profile" type="checkbox" checked>
-        <span>Save MySQL credentials securely for next time</span>
+        <input id="save-db-profile" type="checkbox">
+        <span>MySQL credentials are managed from Settings &gt; MySQL settings</span>
       </label>
 
       <div class="button-row compact">
