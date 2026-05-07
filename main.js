@@ -1285,6 +1285,10 @@ async function buildSitesFromHtdocs() {
       const saved = savedMap.get(id) || savedMap.get(fallbackId) || {};
       const wpConfig = parseWpConfig(folderPath) || {};
       const siteUrl = `http://localhost/${relativePath}`;
+      const savedMultisite = saved.multisite || {};
+      const multisiteEnabled = savedMultisite.enabled === true || wpConfig.allowMultisite === true || wpConfig.networkConfigured === true;
+      const multisitePrepared = savedMultisite.prepared === true || wpConfig.allowMultisite === true || wpConfig.networkConfigured === true;
+      const multisiteNetworkConfigured = savedMultisite.networkConfigured === true || wpConfig.networkConfigured === true;
 
       return {
         id,
@@ -1308,7 +1312,12 @@ async function buildSitesFromHtdocs() {
         lastStartedAt: saved.lastStartedAt || null,
         status: apacheRunning ? "running" : "stopped",
         sslPath: saved.sslPath || `${siteName}.crt`,
-        isWordPress: true
+        isWordPress: true,
+        multisite: {
+          enabled: multisiteEnabled,
+          prepared: multisitePrepared,
+          networkConfigured: multisiteNetworkConfigured
+        }
       };
     })
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -1428,7 +1437,12 @@ function parseWpConfig(sitePath) {
     dbPassword: readConstant("DB_PASSWORD") || "",
     dbHost: host,
     dbPort: port,
-    allowMultisite: Boolean(source.match(/define\(\s*['"]WP_ALLOW_MULTISITE['"]\s*,\s*true\s*\)/i))
+    allowMultisite: Boolean(source.match(/define\(\s*['"]WP_ALLOW_MULTISITE['"]\s*,\s*true\s*\)/i)),
+    networkConfigured: Boolean(
+      source.match(/define\(\s*['"]MULTISITE['"]\s*,\s*true\s*\)/i) &&
+      source.match(/define\(\s*['"]DOMAIN_CURRENT_SITE['"]\s*,/i) &&
+      source.match(/define\(\s*['"]PATH_CURRENT_SITE['"]\s*,/i)
+    )
   };
 }
 
@@ -1479,54 +1493,72 @@ function applyWordPressMultisiteNetworkConfig(sitePath, wpConfigSnippet, htacces
   fs.writeFileSync(htaccessPath, `${normalizedHtaccessSnippet}\n`, "utf8");
 }
 
-async function maybeApplyMultisiteNetworkConfigFromPage(win, tab) {
-  if (!tab?.view?.webContents || !tab.url) {
-    return;
+function buildGeneratedMultisiteConfig(site, settings = getSettings()) {
+  const htdocsPath = getResolvedHtdocsPath(settings);
+  if (!htdocsPath || !site?.path) {
+    throw new Error("XAMPP htdocs or site path is missing.");
   }
 
-  let parsedUrl;
-  try {
-    parsedUrl = new URL(tab.url);
-  } catch (_) {
-    return;
-  }
+  const relativePath = (site.relativePath || path.relative(htdocsPath, site.path))
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "");
+  const pathCurrentSite = relativePath ? `/${relativePath}/` : "/";
 
-  if (!["localhost", "127.0.0.1", "::1"].includes(parsedUrl.hostname) || !/\/wp-admin\/network\.php$/i.test(parsedUrl.pathname)) {
-    return;
-  }
+  const wpConfigSnippet = [
+    "define('MULTISITE', true);",
+    "define('SUBDOMAIN_INSTALL', false);",
+    "define('DOMAIN_CURRENT_SITE', 'localhost');",
+    `define('PATH_CURRENT_SITE', '${pathCurrentSite}');`,
+    "define('SITE_ID_CURRENT_SITE', 1);",
+    "define('BLOG_ID_CURRENT_SITE', 1);"
+  ].join("\n");
 
-  const settings = getSettings();
-  const siteRootPath = findBestWordPressFolderForUrl(tab.url, settings);
-  if (!siteRootPath || !fs.existsSync(siteRootPath)) {
-    return;
+  const htaccessSnippet = [
+    "RewriteEngine On",
+    "RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]",
+    `RewriteBase ${pathCurrentSite}`,
+    "RewriteRule ^index\\.php$ - [L]",
+    "",
+    "# add a trailing slash to /wp-admin",
+    "RewriteRule ^([_0-9a-zA-Z-]+/)?wp-admin$ $1wp-admin/ [R=301,L]",
+    "",
+    "RewriteCond %{REQUEST_FILENAME} -f [OR]",
+    "RewriteCond %{REQUEST_FILENAME} -d",
+    "RewriteRule ^ - [L]",
+    "RewriteRule ^([_0-9a-zA-Z-]+/)?(wp-(content|admin|includes).*) $2 [L]",
+    "RewriteRule ^([_0-9a-zA-Z-]+/)?(.*\\.php)$ $2 [L]",
+    "RewriteRule . index.php [L]"
+  ].join("\n");
+
+  return {
+    wpConfigSnippet,
+    htaccessSnippet,
+    pathCurrentSite
+  };
+}
+
+async function applyMultisiteConfigForSiteFromWindow(win, siteId) {
+  if (!win || !siteId) {
+    throw new Error("Select a multisite-enabled site first.");
   }
 
   const sites = getSites();
-  const site = sites.find((entry) => path.resolve(entry.path || "") === path.resolve(siteRootPath));
-  if (!site?.multisite?.enabled || site.multisite?.networkConfigured) {
-    return;
+  const site = sites.find((entry) => entry.id === siteId);
+  if (!site) {
+    throw new Error("The selected site was not found.");
+  }
+  if (!site.multisite?.enabled) {
+    throw new Error("This site is not marked for WordPress multisite.");
+  }
+  const settings = getSettings();
+  const result = buildGeneratedMultisiteConfig(site, settings);
+
+  if (!site.multisite?.prepared) {
+    enableWordPressMultisite(site.path);
   }
 
-  const result = await tab.view.webContents.executeJavaScript(`
-    (() => {
-      const heading = document.querySelector("h1")?.textContent || "";
-      if (!/Enabling the Network/i.test(heading)) {
-        return null;
-      }
-
-      const textareas = Array.from(document.querySelectorAll("textarea"));
-      return {
-        wpConfigSnippet: textareas[0]?.value || "",
-        htaccessSnippet: textareas[1]?.value || ""
-      };
-    })();
-  `, true).catch(() => null);
-
-  if (!result?.wpConfigSnippet || !result?.htaccessSnippet) {
-    return;
-  }
-
-  applyWordPressMultisiteNetworkConfig(siteRootPath, result.wpConfigSnippet, result.htaccessSnippet);
+  applyWordPressMultisiteNetworkConfig(site.path, result.wpConfigSnippet, result.htaccessSnippet);
   site.multisite.prepared = true;
   site.multisite.networkConfigured = true;
   saveSites(sites);
@@ -1534,6 +1566,10 @@ async function maybeApplyMultisiteNetworkConfigFromPage(win, tab) {
     message: "Multisite network rules were applied to wp-config.php and .htaccess.",
     type: "success"
   });
+  return {
+    ok: true,
+    message: `Applied multisite rules to wp-config.php and .htaccess using ${result.pathCurrentSite}.`
+  };
 }
 
 function maybePrepareMultisiteSiteForUrl(win, url) {
@@ -2997,7 +3033,6 @@ function wireTabEvents(win, tab) {
     emitBrowserState(win);
     void maybeAutoFillWordPressBootstrap(tab);
     maybePrepareMultisiteSiteForUrl(win, tab.url);
-    void maybeApplyMultisiteNetworkConfigFromPage(win, tab);
   });
 
   wc.on("page-title-updated", (event, title) => {
@@ -3014,7 +3049,6 @@ function wireTabEvents(win, tab) {
     emitBrowserState(win);
     void maybeAutoFillWordPressBootstrap(tab);
     maybePrepareMultisiteSiteForUrl(win, tab.url);
-    void maybeApplyMultisiteNetworkConfigFromPage(win, tab);
   });
 
   wc.on("did-navigate-in-page", (_event, url) => {
@@ -3023,7 +3057,6 @@ function wireTabEvents(win, tab) {
     emitBrowserState(win);
     void maybeAutoFillWordPressBootstrap(tab);
     maybePrepareMultisiteSiteForUrl(win, tab.url);
-    void maybeApplyMultisiteNetworkConfigFromPage(win, tab);
   });
 
   wc.on("did-fail-load", (event, errorCode, errorDescription, validatedURL) => {
@@ -5331,6 +5364,11 @@ ipcMain.handle("sites:backup", async (_event, payload) => {
   return backupSiteResources(payload);
 });
 
+ipcMain.handle("sites:apply-multisite-config", async (event, payload) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  return applyMultisiteConfigForSiteFromWindow(win, payload?.siteId);
+});
+
 ipcMain.handle("sites:delete", async (_event, site) => {
   return deleteSiteResources(site);
 });
@@ -5415,7 +5453,8 @@ ipcMain.handle("installer:run", async (_event, payload) => {
     isWordPress: true,
     multisite: {
       enabled: multisiteEnabled,
-      prepared: false
+      prepared: false,
+      networkConfigured: false
     }
   };
 

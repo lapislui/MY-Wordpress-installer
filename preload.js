@@ -39,6 +39,7 @@ contextBridge.exposeInMainWorld("desktopAPI", {
   openPath: (targetPath) => ipcRenderer.invoke("shell:open-path", targetPath),
   listSites: () => ipcRenderer.invoke("sites:list"),
   backupSite: (payload) => ipcRenderer.invoke("sites:backup", payload),
+  applyMultisiteConfig: (payload) => ipcRenderer.invoke("sites:apply-multisite-config", payload),
   deleteSite: (payload) => ipcRenderer.invoke("sites:delete", payload),
   showSiteContextMenu: (site) => ipcRenderer.invoke("sites:show-context-menu", site),
   getSettings: () => ipcRenderer.invoke("settings:get"),

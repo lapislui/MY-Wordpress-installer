@@ -122,6 +122,7 @@ const elements = {
   openShellButton: document.getElementById("open-shell-button"),
   openVSCodeButton: document.getElementById("open-vscode-button"),
   backupSiteButton: document.getElementById("backup-site-button"),
+  applyMultisiteButton: document.getElementById("apply-multisite-button"),
   openSiteButton: document.getElementById("open-site-button"),
   openLiveSiteButton: document.getElementById("open-live-site-button"),
   deleteSiteButton: document.getElementById("delete-site-button"),
@@ -1551,6 +1552,9 @@ function renderSiteDetails() {
     elements.detailDbVersion.textContent = "-";
     elements.detailWordpressVersion.textContent = "-";
     elements.backupSiteButton.disabled = true;
+    elements.applyMultisiteButton.disabled = true;
+    elements.applyMultisiteButton.classList.add("hidden");
+    elements.applyMultisiteButton.textContent = "Apply multisite";
     elements.deleteSiteButton.disabled = true;
     elements.overviewEmptyCard.classList.remove("hidden");
     return;
@@ -1574,6 +1578,10 @@ function renderSiteDetails() {
   elements.dbUser.value = effectiveDbProfile.user || "root";
   elements.dbPassword.value = effectiveDbProfile.password || "";
   elements.backupSiteButton.disabled = progressState.backingUp || progressState.deleting;
+  const multisiteEnabled = Boolean(site.multisite?.enabled);
+  elements.applyMultisiteButton.classList.toggle("hidden", !multisiteEnabled);
+  elements.applyMultisiteButton.disabled = progressState.deleting;
+  elements.applyMultisiteButton.textContent = site.multisite?.networkConfigured ? "Reapply multisite" : "Apply multisite";
   elements.deleteSiteButton.disabled = progressState.deleting;
   elements.overviewEmptyCard.classList.add("hidden");
 }
@@ -1868,6 +1876,33 @@ async function backupSelectedSite() {
   }
 }
 
+async function applySelectedSiteMultisiteConfig() {
+  const site = getSelectedSite();
+  if (!site) {
+    setStatus("Select a site first.");
+    return;
+  }
+
+  if (!site.multisite?.enabled) {
+    setStatus("This site was not marked for WordPress multisite.");
+    return;
+  }
+
+  showSiteTab("tools");
+  elements.applyMultisiteButton.disabled = true;
+  setStatus(`Applying multisite rules for ${site.name}...`);
+
+  try {
+    const result = await window.desktopAPI.applyMultisiteConfig({ siteId: site.id });
+    await refreshSites();
+    setStatus(result?.message || `Applied multisite rules for ${site.name}.`);
+  } catch (error) {
+    setStatus(`Apply multisite failed: ${error.message}`);
+  } finally {
+    renderSiteDetails();
+  }
+}
+
 elements.newTabButton.addEventListener("click", () => {
   window.desktopAPI.browserCreateTab({ url: "https://www.google.com", mode: "auto" });
 });
@@ -2018,6 +2053,7 @@ elements.openFolderButton.addEventListener("click", () => void openSelectedSiteT
 elements.openShellButton.addEventListener("click", () => void openSelectedSiteTarget("shell"));
 elements.openVSCodeButton.addEventListener("click", () => void openSelectedSiteTarget("vscode"));
 elements.backupSiteButton.addEventListener("click", () => void backupSelectedSite());
+elements.applyMultisiteButton.addEventListener("click", () => void applySelectedSiteMultisiteConfig());
 elements.openSiteButton.addEventListener("click", () => void openSelectedSiteTarget("admin"));
 elements.openLiveSiteButton.addEventListener("click", () => void openSelectedSiteTarget("site"));
 elements.deleteSiteButton.addEventListener("click", () => void deleteSelectedSite());
