@@ -47,6 +47,7 @@ contextBridge.exposeInMainWorld("desktopAPI", {
   setLocalSessionSharing: (enabled) => ipcRenderer.invoke("settings:set-local-session-sharing", enabled),
   setOnlineSessionSharing: (enabled) => ipcRenderer.invoke("settings:set-online-session-sharing", enabled),
   saveMysqlConfig: (payload) => ipcRenderer.invoke("settings:save-mysql-config", payload),
+  saveWpInstallDefaults: (payload) => ipcRenderer.invoke("settings:save-wp-install-defaults", payload),
   getVaultInfo: () => ipcRenderer.invoke("vault:get-info"),
   getInstallerDbProfile: () => ipcRenderer.invoke("vault:get-installer-db"),
   saveInstallerDbProfile: (profile) => ipcRenderer.invoke("vault:save-installer-db", profile),

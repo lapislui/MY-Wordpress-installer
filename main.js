@@ -1320,6 +1320,42 @@ function sanitizeDbName(name) {
   return name.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "wordpress";
 }
 
+function findBestWordPressFolderForUrl(url, settings = getSettings()) {
+  const htdocsPath = getResolvedHtdocsPath(settings);
+  if (!htdocsPath || !fs.existsSync(htdocsPath)) {
+    return "";
+  }
+
+  let pathname = "";
+  try {
+    const parsed = new URL(url);
+    pathname = decodeURIComponent(parsed.pathname || "");
+  } catch (_) {
+    return "";
+  }
+
+  const normalizedPathname = pathname.replace(/^\/+/, "").replace(/\\/g, "/");
+  if (!normalizedPathname) {
+    return "";
+  }
+
+  const wordpressFolders = findWordPressFolders(htdocsPath, 12)
+    .map((folderPath) => ({
+      folderPath,
+      relativePath: path.relative(htdocsPath, folderPath).replace(/\\/g, "/").replace(/^\/+/, "")
+    }))
+    .filter((entry) => entry.relativePath);
+
+  const matching = wordpressFolders
+    .filter((entry) =>
+      normalizedPathname === entry.relativePath ||
+      normalizedPathname.startsWith(`${entry.relativePath}/`)
+    )
+    .sort((left, right) => right.relativePath.length - left.relativePath.length);
+
+  return matching[0]?.folderPath || "";
+}
+
 function getSiteRootFolderNameFromUrl(url, settings = getSettings()) {
   try {
     const parsed = new URL(url);
@@ -1327,14 +1363,27 @@ function getSiteRootFolderNameFromUrl(url, settings = getSettings()) {
     if (parsed.protocol === "file:") {
       const filePath = decodeURIComponent(parsed.pathname || "").replace(/^\/+/, "");
       const normalizedPath = filePath.replace(/\//g, path.sep);
-      const sitePath = hasWordPressFiles(normalizedPath)
+      let currentPath = hasWordPressFiles(normalizedPath)
         ? normalizedPath
         : path.dirname(normalizedPath);
-      return path.basename(sitePath);
+
+      while (currentPath && currentPath !== path.dirname(currentPath)) {
+        if (hasWordPressFiles(currentPath)) {
+          return path.basename(currentPath);
+        }
+        currentPath = path.dirname(currentPath);
+      }
+
+      return path.basename(path.dirname(normalizedPath));
     }
 
     if (!["localhost", "127.0.0.1", "::1"].includes(parsed.hostname)) {
       return "";
+    }
+
+    const bestFolderPath = findBestWordPressFolderForUrl(url, settings);
+    if (bestFolderPath) {
+      return path.basename(bestFolderPath);
     }
 
     const pathname = decodeURIComponent(parsed.pathname || "");
@@ -1343,17 +1392,7 @@ function getSiteRootFolderNameFromUrl(url, settings = getSettings()) {
       return "";
     }
 
-    const htdocsPath = getResolvedHtdocsPath(settings);
-    if (!htdocsPath) {
-      return segments[0];
-    }
-
-    const sitePath = path.join(htdocsPath, ...segments);
-    if (hasWordPressFiles(sitePath)) {
-      return path.basename(sitePath);
-    }
-
-    return segments[0];
+    return segments.at(-1) || segments[0];
   } catch (_) {
     return "";
   }
@@ -1388,8 +1427,145 @@ function parseWpConfig(sitePath) {
     dbUser: readConstant("DB_USER") || null,
     dbPassword: readConstant("DB_PASSWORD") || "",
     dbHost: host,
-    dbPort: port
+    dbPort: port,
+    allowMultisite: Boolean(source.match(/define\(\s*['"]WP_ALLOW_MULTISITE['"]\s*,\s*true\s*\)/i))
   };
+}
+
+function enableWordPressMultisite(sitePath) {
+  const configPath = path.join(sitePath, "wp-config.php");
+  if (!fs.existsSync(configPath)) {
+    return false;
+  }
+
+  const source = fs.readFileSync(configPath, "utf8");
+  if (/define\(\s*['"]WP_ALLOW_MULTISITE['"]\s*,\s*true\s*\)/i.test(source)) {
+    return false;
+  }
+
+  const marker = /\/\* That's all, stop editing! Happy publishing\. \*\//;
+  const insertion = "define('WP_ALLOW_MULTISITE', true);\n\n";
+  const nextSource = marker.test(source)
+    ? source.replace(marker, `${insertion}$&`)
+    : `${source.trimEnd()}\n\n${insertion}`;
+
+  fs.writeFileSync(configPath, nextSource, "utf8");
+  return true;
+}
+
+function applyWordPressMultisiteNetworkConfig(sitePath, wpConfigSnippet, htaccessSnippet) {
+  const configPath = path.join(sitePath, "wp-config.php");
+  const htaccessPath = path.join(sitePath, ".htaccess");
+  if (!fs.existsSync(configPath)) {
+    throw new Error("wp-config.php was not found.");
+  }
+
+  const normalizedWpConfigSnippet = String(wpConfigSnippet || "").trim();
+  const normalizedHtaccessSnippet = String(htaccessSnippet || "").trim();
+  if (!normalizedWpConfigSnippet || !normalizedHtaccessSnippet) {
+    throw new Error("Network setup rules were empty.");
+  }
+
+  const source = fs.readFileSync(configPath, "utf8");
+  const marker = /\/\* That's all, stop editing! Happy publishing\. \*\//;
+  const cleanupPattern = /^\s*define\(\s*'(?:MULTISITE|SUBDOMAIN_INSTALL|DOMAIN_CURRENT_SITE|PATH_CURRENT_SITE|SITE_ID_CURRENT_SITE|BLOG_ID_CURRENT_SITE)'.*?;\s*$/gim;
+  const cleanedSource = source.replace(cleanupPattern, "").replace(/\n{3,}/g, "\n\n");
+  const insertion = `${normalizedWpConfigSnippet}\n\n`;
+  const nextSource = marker.test(cleanedSource)
+    ? cleanedSource.replace(marker, `${insertion}$&`)
+    : `${cleanedSource.trimEnd()}\n\n${insertion}`;
+
+  fs.writeFileSync(configPath, nextSource, "utf8");
+  fs.writeFileSync(htaccessPath, `${normalizedHtaccessSnippet}\n`, "utf8");
+}
+
+async function maybeApplyMultisiteNetworkConfigFromPage(win, tab) {
+  if (!tab?.view?.webContents || !tab.url) {
+    return;
+  }
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(tab.url);
+  } catch (_) {
+    return;
+  }
+
+  if (!["localhost", "127.0.0.1", "::1"].includes(parsedUrl.hostname) || !/\/wp-admin\/network\.php$/i.test(parsedUrl.pathname)) {
+    return;
+  }
+
+  const settings = getSettings();
+  const siteRootPath = findBestWordPressFolderForUrl(tab.url, settings);
+  if (!siteRootPath || !fs.existsSync(siteRootPath)) {
+    return;
+  }
+
+  const sites = getSites();
+  const site = sites.find((entry) => path.resolve(entry.path || "") === path.resolve(siteRootPath));
+  if (!site?.multisite?.enabled || site.multisite?.networkConfigured) {
+    return;
+  }
+
+  const result = await tab.view.webContents.executeJavaScript(`
+    (() => {
+      const heading = document.querySelector("h1")?.textContent || "";
+      if (!/Enabling the Network/i.test(heading)) {
+        return null;
+      }
+
+      const textareas = Array.from(document.querySelectorAll("textarea"));
+      return {
+        wpConfigSnippet: textareas[0]?.value || "",
+        htaccessSnippet: textareas[1]?.value || ""
+      };
+    })();
+  `, true).catch(() => null);
+
+  if (!result?.wpConfigSnippet || !result?.htaccessSnippet) {
+    return;
+  }
+
+  applyWordPressMultisiteNetworkConfig(siteRootPath, result.wpConfigSnippet, result.htaccessSnippet);
+  site.multisite.prepared = true;
+  site.multisite.networkConfigured = true;
+  saveSites(sites);
+  emitBrowserNotice(win, {
+    message: "Multisite network rules were applied to wp-config.php and .htaccess.",
+    type: "success"
+  });
+}
+
+function maybePrepareMultisiteSiteForUrl(win, url) {
+  const settings = getSettings();
+  const siteRootPath = findBestWordPressFolderForUrl(url, settings);
+  if (!siteRootPath || !fs.existsSync(siteRootPath)) {
+    return;
+  }
+
+  const sites = getSites();
+  const site = sites.find((entry) => path.resolve(entry.path || "") === path.resolve(siteRootPath));
+  if (!site?.multisite?.enabled || site.multisite?.prepared) {
+    return;
+  }
+
+  if (!fs.existsSync(path.join(siteRootPath, "wp-config.php"))) {
+    return;
+  }
+
+  const changed = enableWordPressMultisite(siteRootPath);
+  if (!changed) {
+    site.multisite.prepared = true;
+    saveSites(sites);
+    return;
+  }
+
+  site.multisite.prepared = true;
+  saveSites(sites);
+  emitBrowserNotice(win, {
+    message: "Multisite support is enabled in wp-config.php. Open wp-admin and use Tools > Network Setup to finish the WordPress network install.",
+    type: "success"
+  });
 }
 
 function isPathInside(parentPath, childPath) {
@@ -2820,6 +2996,8 @@ function wireTabEvents(win, tab) {
     tab.isLoading = false;
     emitBrowserState(win);
     void maybeAutoFillWordPressBootstrap(tab);
+    maybePrepareMultisiteSiteForUrl(win, tab.url);
+    void maybeApplyMultisiteNetworkConfigFromPage(win, tab);
   });
 
   wc.on("page-title-updated", (event, title) => {
@@ -2835,6 +3013,8 @@ function wireTabEvents(win, tab) {
     recordBrowserHistoryVisit(tab.url, tab.title);
     emitBrowserState(win);
     void maybeAutoFillWordPressBootstrap(tab);
+    maybePrepareMultisiteSiteForUrl(win, tab.url);
+    void maybeApplyMultisiteNetworkConfigFromPage(win, tab);
   });
 
   wc.on("did-navigate-in-page", (_event, url) => {
@@ -2842,6 +3022,8 @@ function wireTabEvents(win, tab) {
     recordBrowserHistoryVisit(tab.url, tab.title);
     emitBrowserState(win);
     void maybeAutoFillWordPressBootstrap(tab);
+    maybePrepareMultisiteSiteForUrl(win, tab.url);
+    void maybeApplyMultisiteNetworkConfigFromPage(win, tab);
   });
 
   wc.on("did-fail-load", (event, errorCode, errorDescription, validatedURL) => {
@@ -2864,13 +3046,14 @@ function wireTabEvents(win, tab) {
     buildContextMenu(win, tab, params);
   });
 
-  wc.on("console-message", (_event, _level, message) => {
-    if (!String(message || "").startsWith(VAULT_CAPTURE_LOG_PREFIX)) {
+  wc.on("console-message", (_event, details) => {
+    const message = String(details?.message || "");
+    if (!message.startsWith(VAULT_CAPTURE_LOG_PREFIX)) {
       return;
     }
 
     try {
-      const payload = JSON.parse(String(message).slice(VAULT_CAPTURE_LOG_PREFIX.length));
+      const payload = JSON.parse(message.slice(VAULT_CAPTURE_LOG_PREFIX.length));
       if (!payload?.token || payload.token !== tab.pendingCredentialCaptureToken) {
         return;
       }
@@ -5123,6 +5306,25 @@ ipcMain.handle("settings:save-mysql-config", async (_event, payload) => {
   };
 });
 
+ipcMain.handle("settings:save-wp-install-defaults", async (_event, payload) => {
+  const settings = getSettings();
+  settings.wpInstallUsername = String(payload?.wpInstallUsername || "admin").trim() || "admin";
+  settings.wpInstallPassword = payload?.wpInstallPassword ?? "root";
+  settings.wpInstallEmail = String(payload?.wpInstallEmail || "").trim();
+  saveSettings(settings);
+
+  const apacheRunning = await isApacheRunning();
+  return {
+    ...settings,
+    htdocsPath: getResolvedHtdocsPath(settings),
+    apacheRunning,
+    detectedDbProfile: detectXamppDbProfile(getResolvedHtdocsPath(settings)),
+    effectiveDbProfile: getEffectiveDbProfile(settings),
+    mysqlConfigContent: readMysqlConfigContent(settings),
+    xamppPaths: getXamppPathsSummary(settings)
+  };
+});
+
 ipcMain.handle("sites:list", async () => buildSitesFromHtdocs());
 
 ipcMain.handle("sites:backup", async (_event, payload) => {
@@ -5147,6 +5349,7 @@ ipcMain.handle("installer:run", async (_event, payload) => {
   const basePath = (payload.basePath || resolvedHtdocsPath || "").trim();
   const folderName = (payload.folderName || "").trim();
   const zipPath = (payload.zipPath || "").trim();
+  const multisiteEnabled = payload?.multisite?.enabled === true;
 
   if (!basePath) {
     throw new Error("Select a base folder.");
@@ -5209,8 +5412,16 @@ ipcMain.handle("installer:run", async (_event, payload) => {
     lastStartedAt: new Date().toISOString(),
     status: "running",
     sslPath: `${siteName}.crt`,
-    isWordPress: true
+    isWordPress: true,
+    multisite: {
+      enabled: multisiteEnabled,
+      prepared: false
+    }
   };
+
+  if (multisiteEnabled) {
+    logs.push("Multisite preparation enabled. WP_ALLOW_MULTISITE will be added after wp-config.php is created.");
+  }
 
   const existingSites = getSites().filter((site) => site.id !== siteRecord.id);
   existingSites.unshift(siteRecord);

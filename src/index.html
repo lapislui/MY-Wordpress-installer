@@ -571,6 +571,10 @@
                 </label>
               </div>
 
+              <div class="button-row compact">
+                <button id="save-wp-install-defaults-button" type="button" class="primary-button">Save auto-fill values</button>
+              </div>
+
               <div class="settings-note">
                 These values are used to auto-fill <code>wp-admin/install.php</code>. Site title still comes from the detected WordPress root folder name.
               </div>
@@ -656,6 +660,15 @@
         <input id="save-db-profile" type="checkbox">
         <span>MySQL credentials are managed from Settings &gt; MySQL settings</span>
       </label>
+
+      <label class="checkbox-row">
+        <input id="enable-multisite" type="checkbox">
+        <span>Prepare this site for WordPress multisite</span>
+      </label>
+
+      <div class="settings-note">
+        This enables <code>WP_ALLOW_MULTISITE</code> in <code>wp-config.php</code> as soon as WordPress creates it, so you can finish Network Setup from wp-admin.
+      </div>
 
       <div class="button-row compact">
         <button id="install-button" type="button" class="primary-button">Create site</button>

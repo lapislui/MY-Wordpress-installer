@@ -138,6 +138,7 @@ const elements = {
   dbPassword: document.getElementById("db-password"),
   createDb: document.getElementById("create-db"),
   saveDbProfile: document.getElementById("save-db-profile"),
+  enableMultisite: document.getElementById("enable-multisite"),
   installButton: document.getElementById("install-button"),
   statusText: document.getElementById("status-text"),
   resultCard: document.getElementById("result-card"),
@@ -171,6 +172,7 @@ const elements = {
   settingsWpInstallUsername: document.getElementById("settings-wp-install-username"),
   settingsWpInstallPassword: document.getElementById("settings-wp-install-password"),
   settingsWpInstallEmail: document.getElementById("settings-wp-install-email"),
+  saveWpInstallDefaultsButton: document.getElementById("save-wp-install-defaults-button"),
   settingsShareLocalSessions: document.getElementById("settings-share-local-sessions"),
   settingsShareOnlineSessions: document.getElementById("settings-share-online-sessions"),
   settingsMysqlEditor: document.getElementById("settings-mysql-editor"),
@@ -1692,6 +1694,23 @@ async function saveMysqlConfigFromSettings() {
   }
 }
 
+async function saveWpInstallDefaultsFromSettings() {
+  setStatus("Saving WordPress install auto-fill values...");
+
+  try {
+    const result = await window.desktopAPI.saveWpInstallDefaults({
+      wpInstallUsername: elements.settingsWpInstallUsername.value,
+      wpInstallPassword: elements.settingsWpInstallPassword.value,
+      wpInstallEmail: elements.settingsWpInstallEmail.value
+    });
+
+    applySettingsPayload(result);
+    setStatus("Saved WordPress install auto-fill values.");
+  } catch (error) {
+    setStatus(`Saving auto-fill values failed: ${error.message}`);
+  }
+}
+
 async function saveCurrentSiteCredentials() {
   const active = getActiveBrowserTab();
   const key = active ? getCredentialKeyFromUrl(active.url) : null;
@@ -1982,6 +2001,7 @@ elements.openMysqlConfigButton.addEventListener("click", () =>
 elements.settingsShareLocalSessions.addEventListener("change", () => void updateLocalSessionSharing());
 elements.settingsShareOnlineSessions.addEventListener("change", () => void updateOnlineSessionSharing());
 elements.saveMysqlConfigButton.addEventListener("click", () => void saveMysqlConfigFromSettings());
+elements.saveWpInstallDefaultsButton.addEventListener("click", () => void saveWpInstallDefaultsFromSettings());
 elements.openControlPanelButton.addEventListener("click", () =>
   void openExistingPath(state.xamppPaths?.controlPanelPath, "XAMPP control panel was not found.")
 );
@@ -2045,6 +2065,9 @@ elements.installButton.addEventListener("click", async () => {
       zipPath: elements.zipPath.value,
       basePath: elements.basePath.value,
       folderName: elements.folderName.value,
+      multisite: {
+        enabled: elements.enableMultisite.checked
+      },
       database: {
         create: elements.createDb.checked,
         host: effectiveDbProfile.host,
