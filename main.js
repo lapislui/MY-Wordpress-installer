@@ -1117,6 +1117,42 @@ function sanitizeDbName(name) {
   return name.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "wordpress";
 }
 
+function findBestWordPressFolderForUrl(url, settings = getSettings()) {
+  const htdocsPath = getResolvedHtdocsPath(settings);
+  if (!htdocsPath || !fs.existsSync(htdocsPath)) {
+    return "";
+  }
+
+  let pathname = "";
+  try {
+    const parsed = new URL(url);
+    pathname = decodeURIComponent(parsed.pathname || "");
+  } catch (_) {
+    return "";
+  }
+
+  const normalizedPathname = pathname.replace(/^\/+/, "").replace(/\\/g, "/");
+  if (!normalizedPathname) {
+    return "";
+  }
+
+  const wordpressFolders = findWordPressFolders(htdocsPath, 12)
+    .map((folderPath) => ({
+      folderPath,
+      relativePath: path.relative(htdocsPath, folderPath).replace(/\\/g, "/").replace(/^\/+/, "")
+    }))
+    .filter((entry) => entry.relativePath);
+
+  const matching = wordpressFolders
+    .filter((entry) =>
+      normalizedPathname === entry.relativePath ||
+      normalizedPathname.startsWith(`${entry.relativePath}/`)
+    )
+    .sort((left, right) => right.relativePath.length - left.relativePath.length);
+
+  return matching[0]?.folderPath || "";
+}
+
 function getSiteRootFolderNameFromUrl(url, settings = getSettings()) {
   try {
     const parsed = new URL(url);
@@ -1124,14 +1160,27 @@ function getSiteRootFolderNameFromUrl(url, settings = getSettings()) {
     if (parsed.protocol === "file:") {
       const filePath = decodeURIComponent(parsed.pathname || "").replace(/^\/+/, "");
       const normalizedPath = filePath.replace(/\//g, path.sep);
-      const sitePath = hasWordPressFiles(normalizedPath)
+      let currentPath = hasWordPressFiles(normalizedPath)
         ? normalizedPath
         : path.dirname(normalizedPath);
-      return path.basename(sitePath);
+
+      while (currentPath && currentPath !== path.dirname(currentPath)) {
+        if (hasWordPressFiles(currentPath)) {
+          return path.basename(currentPath);
+        }
+        currentPath = path.dirname(currentPath);
+      }
+
+      return path.basename(path.dirname(normalizedPath));
     }
 
     if (!["localhost", "127.0.0.1", "::1"].includes(parsed.hostname)) {
       return "";
+    }
+
+    const bestFolderPath = findBestWordPressFolderForUrl(url, settings);
+    if (bestFolderPath) {
+      return path.basename(bestFolderPath);
     }
 
     const pathname = decodeURIComponent(parsed.pathname || "");
@@ -1140,17 +1189,7 @@ function getSiteRootFolderNameFromUrl(url, settings = getSettings()) {
       return "";
     }
 
-    const htdocsPath = getResolvedHtdocsPath(settings);
-    if (!htdocsPath) {
-      return segments[0];
-    }
-
-    const sitePath = path.join(htdocsPath, ...segments);
-    if (hasWordPressFiles(sitePath)) {
-      return path.basename(sitePath);
-    }
-
-    return segments[0];
+    return segments.at(-1) || segments[0];
   } catch (_) {
     return "";
   }
