@@ -11,3 +11,4 @@ coverage/
 *.bak
 *.tmp
 *.swp
+early-dist/
