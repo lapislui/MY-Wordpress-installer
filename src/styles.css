@@ -307,6 +307,11 @@ input {
   min-width: 34px;
 }
 
+.bookmark-folder-chip {
+  background: #eef3f8;
+  border-color: #c5d5e6;
+}
+
 .bookmark-bar-empty {
   color: var(--muted);
 }
@@ -420,6 +425,64 @@ input {
 .bookmark-modal-actions-right {
   display: flex;
   gap: 10px;
+}
+
+.bookmark-drop-zone {
+  min-height: 10px;
+  border-radius: 999px;
+  margin: 4px 0;
+  border: 1px dashed transparent;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.bookmark-drop-zone.root {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 0.86rem;
+  border-color: rgba(88, 191, 123, 0.2);
+  background: rgba(88, 191, 123, 0.05);
+}
+
+.bookmark-drop-zone.active {
+  border-color: var(--accent-strong);
+  background: rgba(88, 191, 123, 0.16);
+}
+
+.browser-tool-item.bookmark-node {
+  position: relative;
+}
+
+.browser-tool-item.bookmark-node.dragging {
+  opacity: 0.55;
+}
+
+.browser-tool-item.bookmark-node.folder-target-active {
+  outline: 2px solid rgba(88, 191, 123, 0.6);
+  outline-offset: 2px;
+}
+
+.bookmark-row-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.bookmark-row-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.bookmark-drag-handle {
+  cursor: grab;
+}
+
+.bookmark-drag-handle:active {
+  cursor: grabbing;
 }
 
 .toolbar-actions,
@@ -770,6 +833,25 @@ input {
 
 .browser-overlay > * {
   pointer-events: auto;
+}
+
+.browser-loading-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: rgba(27, 127, 204, 0.14);
+  overflow: hidden;
+  z-index: 30;
+}
+
+.browser-loading-bar-fill {
+  width: 38%;
+  height: 100%;
+  background: linear-gradient(90deg, #2aa0f2 0%, #4bc48b 100%);
+  border-radius: 0 999px 999px 0;
+  animation: browser-loading-slide 1.2s ease-in-out infinite;
 }
 
 .browser-loading-card {
@@ -1496,6 +1578,20 @@ button:hover {
 
   100% {
     left: 100%;
+  }
+}
+
+@keyframes browser-loading-slide {
+  0% {
+    transform: translateX(-120%);
+  }
+
+  55% {
+    transform: translateX(145%);
+  }
+
+  100% {
+    transform: translateX(145%);
   }
 }
 

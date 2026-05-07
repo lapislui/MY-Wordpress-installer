@@ -452,6 +452,9 @@ function getDefaultSettings() {
     htdocsPath: getDefaultHtdocsPath(),
     dbUser: "root",
     dbPassword: "",
+    wpInstallUsername: "admin",
+    wpInstallPassword: "root",
+    wpInstallEmail: "",
     shareLocalSiteSessions: true,
     shareOnlineSiteSessions: false,
     downloadDirectory: app.getPath("downloads"),
@@ -474,15 +477,60 @@ function normalizeSettings(input = {}) {
         ])).filter(([, rules]) => Object.keys(rules).length > 0)
       )
     : {};
+  const normalizeBookmarkNode = (node) => {
+    if (!node || typeof node !== "object") {
+      return null;
+    }
+
+    const type = node.type === "folder" ? "folder" : "bookmark";
+    const id = String(node.id || "").trim();
+    const title = String(node.title || "").trim();
+    if (!id || !title) {
+      return null;
+    }
+
+    if (type === "folder") {
+      const children = Array.isArray(node.children)
+        ? node.children.map(normalizeBookmarkNode).filter(Boolean)
+        : [];
+      return { id, type, title, children };
+    }
+
+    const url = String(node.url || "").trim();
+    if (!/^https?:\/\//i.test(url)) {
+      return null;
+    }
+    return {
+      id,
+      type: "bookmark",
+      title,
+      url,
+      iconOnly: Boolean(node.iconOnly)
+    };
+  };
+
   const bookmarks = Array.isArray(input.browserBookmarks)
     ? input.browserBookmarks
-        .map((bookmark) => ({
-          id: String(bookmark?.id || "").trim(),
-          title: String(bookmark?.title || "").trim(),
-          url: String(bookmark?.url || "").trim(),
-          iconOnly: Boolean(bookmark?.iconOnly)
-        }))
-        .filter((bookmark) => bookmark.id && /^https?:\/\//i.test(bookmark.url))
+        .map((bookmark) => {
+          if (bookmark?.type === "folder" || Array.isArray(bookmark?.children)) {
+            return normalizeBookmarkNode(bookmark);
+          }
+
+          const id = String(bookmark?.id || "").trim();
+          const title = String(bookmark?.title || "").trim();
+          const url = String(bookmark?.url || "").trim();
+          if (!id || !title || !/^https?:\/\//i.test(url)) {
+            return null;
+          }
+          return {
+            id,
+            type: "bookmark",
+            title,
+            url,
+            iconOnly: Boolean(bookmark?.iconOnly)
+          };
+        })
+        .filter(Boolean)
     : [];
 
   return {
@@ -490,6 +538,9 @@ function normalizeSettings(input = {}) {
     htdocsPath: input.htdocsPath || (input.xamppRootPath ? path.join(input.xamppRootPath, "htdocs") : getDefaultHtdocsPath()),
     dbUser: String(input.dbUser || "root").trim() || "root",
     dbPassword: input.dbPassword ?? "",
+    wpInstallUsername: String(input.wpInstallUsername || "admin").trim() || "admin",
+    wpInstallPassword: input.wpInstallPassword ?? "root",
+    wpInstallEmail: String(input.wpInstallEmail || "").trim(),
     shareLocalSiteSessions: input.shareLocalSiteSessions !== false,
     shareOnlineSiteSessions: input.shareOnlineSiteSessions === true,
     downloadDirectory: input.downloadDirectory || app.getPath("downloads"),
@@ -820,10 +871,59 @@ function getBrowserBookmarks() {
   return getSettings().browserBookmarks || [];
 }
 
-function saveBrowserBookmark({ title, url }) {
+function flattenBrowserBookmarks(nodes, output = []) {
+  (nodes || []).forEach((node) => {
+    if (!node) {
+      return;
+    }
+
+    if (node.type === "folder") {
+      flattenBrowserBookmarks(node.children || [], output);
+      return;
+    }
+
+    output.push(node);
+  });
+  return output;
+}
+
+function findBookmarkNodeAndParent(nodes, nodeId, parent = null) {
+  for (let index = 0; index < (nodes || []).length; index += 1) {
+    const node = nodes[index];
+    if (node?.id === nodeId) {
+      return { node, parent, index };
+    }
+
+    if (node?.type === "folder") {
+      const found = findBookmarkNodeAndParent(node.children || [], nodeId, node);
+      if (found) {
+        return found;
+      }
+    }
+  }
+
+  return null;
+}
+
+function insertBookmarkNode(bookmarks, node, parentId = null) {
+  if (!parentId) {
+    bookmarks.unshift(node);
+    return true;
+  }
+
+  const found = findBookmarkNodeAndParent(bookmarks, parentId);
+  if (!found?.node || found.node.type !== "folder") {
+    return false;
+  }
+
+  found.node.children = [node, ...(found.node.children || [])];
+  return true;
+}
+
+function saveBrowserBookmark({ title, url, parentId = null }) {
   const normalizedUrl = ensureUrl(url);
   const settings = getSettings();
-  const existing = (settings.browserBookmarks || []).find((bookmark) => bookmark.url === normalizedUrl);
+  const existing = flattenBrowserBookmarks(settings.browserBookmarks || []).find((bookmark) => bookmark.url === normalizedUrl);
   if (existing) {
     existing.title = title || existing.title || normalizedUrl;
     saveSettings(settings);
@@ -832,11 +932,13 @@ function saveBrowserBookmark({ title, url }) {
 
   const bookmark = {
     id: `bookmark-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    type: "bookmark",
     title: title || normalizedUrl,
     url: normalizedUrl,
     iconOnly: false
   };
-  settings.browserBookmarks = [bookmark, ...(settings.browserBookmarks || [])];
+  settings.browserBookmarks = settings.browserBookmarks || [];
+  insertBookmarkNode(settings.browserBookmarks, bookmark, parentId);
   saveSettings(settings);
   return bookmark;
 }
@@ -847,11 +949,13 @@ function removeBrowserBookmark(bookmarkId) {
   }
 
   const settings = getSettings();
-  const beforeCount = (settings.browserBookmarks || []).length;
-  settings.browserBookmarks = (settings.browserBookmarks || []).filter((bookmark) => bookmark.id !== bookmarkId);
-  if (settings.browserBookmarks.length === beforeCount) {
+  const found = findBookmarkNodeAndParent(settings.browserBookmarks || [], bookmarkId);
+  if (!found) {
     return false;
   }
+
+  const bucket = found.parent ? found.parent.children : settings.browserBookmarks;
+  bucket.splice(found.index, 1);
 
   saveSettings(settings);
   return true;
@@ -863,18 +967,19 @@ function updateBrowserBookmark(bookmarkId, changes = {}) {
   }
 
   const settings = getSettings();
-  const bookmark = (settings.browserBookmarks || []).find((item) => item.id === bookmarkId);
-  if (!bookmark) {
+  const found = findBookmarkNodeAndParent(settings.browserBookmarks || [], bookmarkId);
+  if (!found?.node) {
     throw new Error("Bookmark not found.");
   }
+  const bookmark = found.node;
 
   if (typeof changes.title === "string") {
     bookmark.title = changes.title.trim() || bookmark.title || bookmark.url;
   }
-  if (typeof changes.url === "string") {
+  if (bookmark.type !== "folder" && typeof changes.url === "string") {
     bookmark.url = ensureUrl(changes.url);
   }
-  if (typeof changes.iconOnly === "boolean") {
+  if (bookmark.type !== "folder" && typeof changes.iconOnly === "boolean") {
     bookmark.iconOnly = changes.iconOnly;
   }
 
@@ -882,20 +987,116 @@ function updateBrowserBookmark(bookmarkId, changes = {}) {
   return bookmark;
 }
 
+function createBrowserBookmarkFolder({ title, parentId = null }) {
+  const settings = getSettings();
+  const folder = {
+    id: `bookmark-folder-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    type: "folder",
+    title: String(title || "New folder").trim() || "New folder",
+    children: []
+  };
+
+  settings.browserBookmarks = settings.browserBookmarks || [];
+  if (!insertBookmarkNode(settings.browserBookmarks, folder, parentId)) {
+    throw new Error("Folder target was not found.");
+  }
+
+  saveSettings(settings);
+  return folder;
+}
+
+function cloneBookmarkNodeWithFreshIds(node) {
+  if (!node) {
+    return null;
+  }
+
+  if (node.type === "folder") {
+    return {
+      id: `bookmark-folder-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+      type: "folder",
+      title: String(node.title || "New folder").trim() || "New folder",
+      children: (node.children || []).map((child) => cloneBookmarkNodeWithFreshIds(child)).filter(Boolean)
+    };
+  }
+
+  return {
+    id: `bookmark-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    type: "bookmark",
+    title: node.title || node.url || "Bookmark",
+    url: ensureUrl(node.url),
+    iconOnly: Boolean(node.iconOnly)
+  };
+}
+
+function isBookmarkNodeDescendant(node, candidateId) {
+  if (!node || node.type !== "folder") {
+    return false;
+  }
+
+  return (node.children || []).some((child) => child?.id === candidateId || isBookmarkNodeDescendant(child, candidateId));
+}
+
+function moveBrowserBookmark(bookmarkId, { parentId = null, index = null } = {}) {
+  if (!bookmarkId) {
+    throw new Error("Missing bookmark id.");
+  }
+
+  const settings = getSettings();
+  settings.browserBookmarks = settings.browserBookmarks || [];
+
+  const found = findBookmarkNodeAndParent(settings.browserBookmarks, bookmarkId);
+  if (!found?.node) {
+    throw new Error("Bookmark not found.");
+  }
+
+  const node = found.node;
+  if (parentId && node.id === parentId) {
+    throw new Error("A folder cannot contain itself.");
+  }
+
+  if (parentId && isBookmarkNodeDescendant(node, parentId)) {
+    throw new Error("A folder cannot be moved into one of its children.");
+  }
+
+  let targetBucket = settings.browserBookmarks;
+  if (parentId) {
+    const target = findBookmarkNodeAndParent(settings.browserBookmarks, parentId);
+    if (!target?.node || target.node.type !== "folder") {
+      throw new Error("Folder target was not found.");
+    }
+    targetBucket = target.node.children = target.node.children || [];
+  }
+
+  const sourceBucket = found.parent ? found.parent.children : settings.browserBookmarks;
+  sourceBucket.splice(found.index, 1);
+
+  let normalizedIndex = Number.isInteger(index) ? index : targetBucket.length;
+  if (sourceBucket === targetBucket && found.index < normalizedIndex) {
+    normalizedIndex -= 1;
+  }
+  normalizedIndex = Math.max(0, Math.min(normalizedIndex, targetBucket.length));
+  targetBucket.splice(normalizedIndex, 0, node);
+
+  saveSettings(settings);
+  return node;
+}
+
 function copyBrowserBookmark(bookmarkId, removeAfterCopy = false) {
   const settings = getSettings();
-  const bookmark = (settings.browserBookmarks || []).find((item) => item.id === bookmarkId);
+  const found = findBookmarkNodeAndParent(settings.browserBookmarks || [], bookmarkId);
+  const bookmark = found?.node;
   if (!bookmark) {
     throw new Error("Bookmark not found.");
   }
 
   clipboard.writeText(JSON.stringify({
-    type: "wpdesktop-bookmark",
+    type: "wpdesktop-bookmark-node",
     bookmark
   }));
 
   if (removeAfterCopy) {
-    settings.browserBookmarks = (settings.browserBookmarks || []).filter((item) => item.id !== bookmarkId);
+    const bucket = found.parent ? found.parent.children : settings.browserBookmarks;
+    bucket.splice(found.index, 1);
     saveSettings(settings);
   }
 
@@ -915,14 +1116,90 @@ function pasteBrowserBookmark() {
     throw new Error("Clipboard does not contain a bookmark.");
   }
 
-  if (parsed?.type !== "wpdesktop-bookmark" || !parsed.bookmark?.url) {
+  if ((parsed?.type !== "wpdesktop-bookmark" && parsed?.type !== "wpdesktop-bookmark-node") || !parsed.bookmark) {
     throw new Error("Clipboard does not contain a bookmark.");
   }
 
-  return saveBrowserBookmark({
-    title: parsed.bookmark.title,
-    url: parsed.bookmark.url
+  const settings = getSettings();
+  const clone = cloneBookmarkNodeWithFreshIds(parsed.bookmark);
+  settings.browserBookmarks = settings.browserBookmarks || [];
+  insertBookmarkNode(settings.browserBookmarks, clone, null);
+  saveSettings(settings);
+  return clone;
+}
+
+function pasteBrowserBookmarkIntoParent(parentId = null) {
+  const raw = clipboard.readText().trim();
+  if (!raw) {
+    throw new Error("Clipboard is empty.");
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (_) {
+    throw new Error("Clipboard does not contain a bookmark.");
+  }
+
+  if ((parsed?.type !== "wpdesktop-bookmark" && parsed?.type !== "wpdesktop-bookmark-node") || !parsed.bookmark) {
+    throw new Error("Clipboard does not contain a bookmark.");
+  }
+
+  const settings = getSettings();
+  const clone = cloneBookmarkNodeWithFreshIds(parsed.bookmark);
+  settings.browserBookmarks = settings.browserBookmarks || [];
+  if (!insertBookmarkNode(settings.browserBookmarks, clone, parentId)) {
+    throw new Error("Folder target was not found.");
+  }
+  saveSettings(settings);
+  return clone;
+}
+
+function flattenFolderBookmarks(node, output = []) {
+  if (!node) {
+    return output;
+  }
+
+  if (node.type === "folder") {
+    (node.children || []).forEach((child) => flattenFolderBookmarks(child, output));
+    return output;
+  }
+
+  output.push(node);
+  return output;
+}
+
+function openBookmarkFolderItems(win, folder, { inNewWindow = false, isolated = false } = {}) {
+  const items = flattenFolderBookmarks(folder, []);
+  if (!items.length) {
+    return;
+  }
+
+  if (!inNewWindow) {
+    items.forEach((item) => createBrowserTab(win, item.url, isolated ? "isolated" : "auto", true));
+    return;
+  }
+
+  const [first, ...rest] = items;
+  const child = createWindow({ startupUrl: first.url, startupMode: isolated ? "isolated" : "auto" });
+  child.webContents.once("did-finish-load", () => {
+    rest.forEach((item) => createBrowserTab(child, item.url, isolated ? "isolated" : "auto", true));
   });
+}
+
+function openBookmarkFolderInNewTabGroup(win, folder) {
+  const items = flattenFolderBookmarks(folder, []);
+  if (!items.length) {
+    return false;
+  }
+
+  const state = getBrowserState(win);
+  const group = createTabGroupRecord(state, folder.title || "Bookmark folder");
+  items.forEach((item, index) => {
+    createBrowserTab(win, item.url, "auto", index === items.length - 1, null, { groupId: group.id });
+  });
+  emitBrowserState(win);
+  return true;
 }
 
 function getBrowserShowBookmarksBar() {
@@ -968,6 +1245,84 @@ function configureBrowserSession(win, partition) {
 
   const browserSession = session.fromPartition(partition);
   attachDownloadTracking(win, browserSession);
+  browserSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
+    try {
+      const hostname = requestingOrigin ? new URL(requestingOrigin).hostname : "";
+      const googleOrigin = hostname === "accounts.google.com" || hostname.endsWith(".google.com");
+      if (googleOrigin && ["hid", "usb", "serial"].includes(permission)) {
+        return true;
+      }
+    } catch (_) {
+      // Ignore malformed origins.
+    }
+
+    return false;
+  });
+
+  browserSession.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+    try {
+      const requestingUrl = details?.requestingUrl || "";
+      const hostname = requestingUrl ? new URL(requestingUrl).hostname : "";
+      const googleOrigin = hostname === "accounts.google.com" || hostname.endsWith(".google.com");
+      if (googleOrigin && ["hid", "usb", "serial"].includes(permission)) {
+        callback(true);
+        return;
+      }
+    } catch (_) {
+      // Ignore malformed request origins and fall through to deny.
+    }
+
+    callback(false);
+  });
+
+  browserSession.setDevicePermissionHandler((details) => {
+    try {
+      const hostname = details?.origin ? new URL(details.origin).hostname : "";
+      const googleOrigin = hostname === "accounts.google.com" || hostname.endsWith(".google.com");
+      return googleOrigin && ["hid", "usb", "serial"].includes(details.deviceType);
+    } catch (_) {
+      return false;
+    }
+  });
+
+  browserSession.setBluetoothPairingHandler(async (details, callback) => {
+    if (process.platform === "darwin") {
+      callback({ confirmed: true });
+      return;
+    }
+
+    try {
+      if (details?.pairingKind === "providePin") {
+        callback({ confirmed: false, pin: null });
+        return;
+      }
+
+      const buttons = details?.pairingKind === "confirmPin"
+        ? ["Pair", "Cancel"]
+        : ["Allow", "Cancel"];
+      const message = details?.pairingKind === "confirmPin"
+        ? `Confirm the Bluetooth PIN ${details.pin || ""} matches on your passkey device.`
+        : "Allow this Bluetooth passkey device pairing request?";
+
+      const focused = BrowserWindow.getFocusedWindow() || lastFocusedWindow || null;
+      const result = await dialog.showMessageBox(focused || undefined, {
+        type: "question",
+        buttons,
+        defaultId: 0,
+        cancelId: 1,
+        title: "Bluetooth Passkey Pairing",
+        message
+      });
+
+      callback({
+        confirmed: result.response === 0,
+        pin: null
+      });
+    } catch (_) {
+      callback({ confirmed: false, pin: null });
+    }
+  });
+
   configuredBrowserPartitions.add(partition);
 }
 
@@ -1082,6 +1437,10 @@ async function buildSitesFromHtdocs() {
       const saved = savedMap.get(id) || savedMap.get(fallbackId) || {};
       const wpConfig = parseWpConfig(folderPath) || {};
       const siteUrl = `http://localhost/${relativePath}`;
+      const savedMultisite = saved.multisite || {};
+      const multisiteEnabled = savedMultisite.enabled === true || wpConfig.allowMultisite === true || wpConfig.networkConfigured === true;
+      const multisitePrepared = savedMultisite.prepared === true || wpConfig.allowMultisite === true || wpConfig.networkConfigured === true;
+      const multisiteNetworkConfigured = savedMultisite.networkConfigured === true || wpConfig.networkConfigured === true;
 
       return {
         id,
@@ -1105,7 +1464,12 @@ async function buildSitesFromHtdocs() {
         lastStartedAt: saved.lastStartedAt || null,
         status: apacheRunning ? "running" : "stopped",
         sslPath: saved.sslPath || `${siteName}.crt`,
-        isWordPress: true
+        isWordPress: true,
+        multisite: {
+          enabled: multisiteEnabled,
+          prepared: multisitePrepared,
+          networkConfigured: multisiteNetworkConfigured
+        }
       };
     })
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -1117,6 +1481,42 @@ function sanitizeDbName(name) {
   return name.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "wordpress";
 }
 
+function findBestWordPressFolderForUrl(url, settings = getSettings()) {
+  const htdocsPath = getResolvedHtdocsPath(settings);
+  if (!htdocsPath || !fs.existsSync(htdocsPath)) {
+    return "";
+  }
+
+  let pathname = "";
+  try {
+    const parsed = new URL(url);
+    pathname = decodeURIComponent(parsed.pathname || "");
+  } catch (_) {
+    return "";
+  }
+
+  const normalizedPathname = pathname.replace(/^\/+/, "").replace(/\\/g, "/");
+  if (!normalizedPathname) {
+    return "";
+  }
+
+  const wordpressFolders = findWordPressFolders(htdocsPath, 12)
+    .map((folderPath) => ({
+      folderPath,
+      relativePath: path.relative(htdocsPath, folderPath).replace(/\\/g, "/").replace(/^\/+/, "")
+    }))
+    .filter((entry) => entry.relativePath);
+
+  const matching = wordpressFolders
+    .filter((entry) =>
+      normalizedPathname === entry.relativePath ||
+      normalizedPathname.startsWith(`${entry.relativePath}/`)
+    )
+    .sort((left, right) => right.relativePath.length - left.relativePath.length);
+
+  return matching[0]?.folderPath || "";
+}
+
 function getSiteRootFolderNameFromUrl(url, settings = getSettings()) {
   try {
     const parsed = new URL(url);
@@ -1124,14 +1524,27 @@ function getSiteRootFolderNameFromUrl(url, settings = getSettings()) {
     if (parsed.protocol === "file:") {
       const filePath = decodeURIComponent(parsed.pathname || "").replace(/^\/+/, "");
       const normalizedPath = filePath.replace(/\//g, path.sep);
-      const sitePath = hasWordPressFiles(normalizedPath)
+      let currentPath = hasWordPressFiles(normalizedPath)
         ? normalizedPath
         : path.dirname(normalizedPath);
-      return path.basename(sitePath);
+
+      while (currentPath && currentPath !== path.dirname(currentPath)) {
+        if (hasWordPressFiles(currentPath)) {
+          return path.basename(currentPath);
+        }
+        currentPath = path.dirname(currentPath);
+      }
+
+      return path.basename(path.dirname(normalizedPath));
     }
 
     if (!["localhost", "127.0.0.1", "::1"].includes(parsed.hostname)) {
       return "";
+    }
+
+    const bestFolderPath = findBestWordPressFolderForUrl(url, settings);
+    if (bestFolderPath) {
+      return path.basename(bestFolderPath);
     }
 
     const pathname = decodeURIComponent(parsed.pathname || "");
@@ -1140,17 +1553,7 @@ function getSiteRootFolderNameFromUrl(url, settings = getSettings()) {
       return "";
     }
 
-    const htdocsPath = getResolvedHtdocsPath(settings);
-    if (!htdocsPath) {
-      return segments[0];
-    }
-
-    const sitePath = path.join(htdocsPath, ...segments);
-    if (hasWordPressFiles(sitePath)) {
-      return path.basename(sitePath);
-    }
-
-    return segments[0];
+    return segments.at(-1) || segments[0];
   } catch (_) {
     return "";
   }
@@ -1185,8 +1588,172 @@ function parseWpConfig(sitePath) {
     dbUser: readConstant("DB_USER") || null,
     dbPassword: readConstant("DB_PASSWORD") || "",
     dbHost: host,
-    dbPort: port
+    dbPort: port,
+    allowMultisite: Boolean(source.match(/define\(\s*['"]WP_ALLOW_MULTISITE['"]\s*,\s*true\s*\)/i)),
+    networkConfigured: Boolean(
+      source.match(/define\(\s*['"]MULTISITE['"]\s*,\s*true\s*\)/i) &&
+      source.match(/define\(\s*['"]DOMAIN_CURRENT_SITE['"]\s*,/i) &&
+      source.match(/define\(\s*['"]PATH_CURRENT_SITE['"]\s*,/i)
+    )
   };
+}
+
+function enableWordPressMultisite(sitePath) {
+  const configPath = path.join(sitePath, "wp-config.php");
+  if (!fs.existsSync(configPath)) {
+    return false;
+  }
+
+  const source = fs.readFileSync(configPath, "utf8");
+  if (/define\(\s*['"]WP_ALLOW_MULTISITE['"]\s*,\s*true\s*\)/i.test(source)) {
+    return false;
+  }
+
+  const marker = /\/\* That's all, stop editing! Happy publishing\. \*\//;
+  const insertion = "define('WP_ALLOW_MULTISITE', true);\n\n";
+  const nextSource = marker.test(source)
+    ? source.replace(marker, `${insertion}$&`)
+    : `${source.trimEnd()}\n\n${insertion}`;
+
+  fs.writeFileSync(configPath, nextSource, "utf8");
+  return true;
+}
+
+function applyWordPressMultisiteNetworkConfig(sitePath, wpConfigSnippet, htaccessSnippet) {
+  const configPath = path.join(sitePath, "wp-config.php");
+  const htaccessPath = path.join(sitePath, ".htaccess");
+  if (!fs.existsSync(configPath)) {
+    throw new Error("wp-config.php was not found.");
+  }
+
+  const normalizedWpConfigSnippet = String(wpConfigSnippet || "").trim();
+  const normalizedHtaccessSnippet = String(htaccessSnippet || "").trim();
+  if (!normalizedWpConfigSnippet || !normalizedHtaccessSnippet) {
+    throw new Error("Network setup rules were empty.");
+  }
+
+  const source = fs.readFileSync(configPath, "utf8");
+  const marker = /\/\* That's all, stop editing! Happy publishing\. \*\//;
+  const cleanupPattern = /^\s*define\(\s*'(?:MULTISITE|SUBDOMAIN_INSTALL|DOMAIN_CURRENT_SITE|PATH_CURRENT_SITE|SITE_ID_CURRENT_SITE|BLOG_ID_CURRENT_SITE)'.*?;\s*$/gim;
+  const cleanedSource = source.replace(cleanupPattern, "").replace(/\n{3,}/g, "\n\n");
+  const insertion = `${normalizedWpConfigSnippet}\n\n`;
+  const nextSource = marker.test(cleanedSource)
+    ? cleanedSource.replace(marker, `${insertion}$&`)
+    : `${cleanedSource.trimEnd()}\n\n${insertion}`;
+
+  fs.writeFileSync(configPath, nextSource, "utf8");
+  fs.writeFileSync(htaccessPath, `${normalizedHtaccessSnippet}\n`, "utf8");
+}
+
+function buildGeneratedMultisiteConfig(site, settings = getSettings()) {
+  const htdocsPath = getResolvedHtdocsPath(settings);
+  if (!htdocsPath || !site?.path) {
+    throw new Error("XAMPP htdocs or site path is missing.");
+  }
+
+  const relativePath = (site.relativePath || path.relative(htdocsPath, site.path))
+    .replace(/\\/g, "/")
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "");
+  const pathCurrentSite = relativePath ? `/${relativePath}/` : "/";
+
+  const wpConfigSnippet = [
+    "define('MULTISITE', true);",
+    "define('SUBDOMAIN_INSTALL', false);",
+    "define('DOMAIN_CURRENT_SITE', 'localhost');",
+    `define('PATH_CURRENT_SITE', '${pathCurrentSite}');`,
+    "define('SITE_ID_CURRENT_SITE', 1);",
+    "define('BLOG_ID_CURRENT_SITE', 1);"
+  ].join("\n");
+
+  const htaccessSnippet = [
+    "RewriteEngine On",
+    "RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]",
+    `RewriteBase ${pathCurrentSite}`,
+    "RewriteRule ^index\\.php$ - [L]",
+    "",
+    "# add a trailing slash to /wp-admin",
+    "RewriteRule ^([_0-9a-zA-Z-]+/)?wp-admin$ $1wp-admin/ [R=301,L]",
+    "",
+    "RewriteCond %{REQUEST_FILENAME} -f [OR]",
+    "RewriteCond %{REQUEST_FILENAME} -d",
+    "RewriteRule ^ - [L]",
+    "RewriteRule ^([_0-9a-zA-Z-]+/)?(wp-(content|admin|includes).*) $2 [L]",
+    "RewriteRule ^([_0-9a-zA-Z-]+/)?(.*\\.php)$ $2 [L]",
+    "RewriteRule . index.php [L]"
+  ].join("\n");
+
+  return {
+    wpConfigSnippet,
+    htaccessSnippet,
+    pathCurrentSite
+  };
+}
+
+async function applyMultisiteConfigForSiteFromWindow(win, siteId) {
+  if (!win || !siteId) {
+    throw new Error("Select a multisite-enabled site first.");
+  }
+
+  const sites = getSites();
+  const site = sites.find((entry) => entry.id === siteId);
+  if (!site) {
+    throw new Error("The selected site was not found.");
+  }
+  if (!site.multisite?.enabled) {
+    throw new Error("This site is not marked for WordPress multisite.");
+  }
+  const settings = getSettings();
+  const result = buildGeneratedMultisiteConfig(site, settings);
+
+  if (!site.multisite?.prepared) {
+    enableWordPressMultisite(site.path);
+  }
+
+  applyWordPressMultisiteNetworkConfig(site.path, result.wpConfigSnippet, result.htaccessSnippet);
+  site.multisite.prepared = true;
+  site.multisite.networkConfigured = true;
+  saveSites(sites);
+  emitBrowserNotice(win, {
+    message: "Multisite network rules were applied to wp-config.php and .htaccess.",
+    type: "success"
+  });
+  return {
+    ok: true,
+    message: `Applied multisite rules to wp-config.php and .htaccess using ${result.pathCurrentSite}.`
+  };
+}
+
+function maybePrepareMultisiteSiteForUrl(win, url) {
+  const settings = getSettings();
+  const siteRootPath = findBestWordPressFolderForUrl(url, settings);
+  if (!siteRootPath || !fs.existsSync(siteRootPath)) {
+    return;
+  }
+
+  const sites = getSites();
+  const site = sites.find((entry) => path.resolve(entry.path || "") === path.resolve(siteRootPath));
+  if (!site?.multisite?.enabled || site.multisite?.prepared) {
+    return;
+  }
+
+  if (!fs.existsSync(path.join(siteRootPath, "wp-config.php"))) {
+    return;
+  }
+
+  const changed = enableWordPressMultisite(siteRootPath);
+  if (!changed) {
+    site.multisite.prepared = true;
+    saveSites(sites);
+    return;
+  }
+
+  site.multisite.prepared = true;
+  saveSites(sites);
+  emitBrowserNotice(win, {
+    message: "Multisite support is enabled in wp-config.php. Open wp-admin and use Tools > Network Setup to finish the WordPress network install.",
+    type: "success"
+  });
 }
 
 function isPathInside(parentPath, childPath) {
@@ -1614,7 +2181,7 @@ async function getBrowserSuggestions(win, query) {
   };
 
   const historyEntries = getBrowserHistory();
-  const bookmarkEntries = getBrowserBookmarks();
+  const bookmarkEntries = flattenBrowserBookmarks(getBrowserBookmarks());
   const tabEntries = state.tabs.map((tab) => ({
     title: tab.title,
     url: tab.url
@@ -2002,6 +2569,52 @@ function buildContextMenu(win, tab, params) {
 }
 
 function showBookmarkContextMenu(win, bookmark, showBookmarksBar) {
+  const buildFolderSubmenu = (nodes = []) =>
+    (nodes || [])
+      .filter((node) => node?.type === "folder")
+      .map((folder) => {
+        const nestedItems = buildFolderSubmenu(folder.children || []);
+        return {
+          label: folder.title,
+          submenu: [
+            {
+              label: "Move here",
+              click: () => {
+                moveBrowserBookmark(bookmark.id, { parentId: folder.id });
+                emitBrowserState(win);
+              }
+            },
+            ...(nestedItems.length ? [{ type: "separator" }, ...nestedItems] : [])
+          ]
+        };
+      });
+
+  const moveToFolderSubmenu = [
+    {
+      label: "Favorites bar",
+      click: () => {
+        moveBrowserBookmark(bookmark.id, { parentId: null });
+        emitBrowserState(win);
+      }
+    }
+  ];
+
+  const nestedFolderItems = buildFolderSubmenu(getBrowserBookmarks());
+  if (nestedFolderItems.length) {
+    moveToFolderSubmenu.push(
+      { type: "separator" },
+      ...nestedFolderItems
+    );
+  }
+
+  moveToFolderSubmenu.push(
+    { type: "separator" },
+    {
+      label: "Create new folder and move here",
+      click: () => win.webContents.send("browser:bookmark-create-folder-and-move", bookmark)
+    }
+  );
+
   const menu = Menu.buildFromTemplate([
     {
       label: "Open in new tab",
@@ -2026,6 +2639,10 @@ function showBookmarkContextMenu(win, bookmark, showBookmarksBar) {
         updateBrowserBookmark(bookmark.id, { iconOnly: !bookmark.iconOnly });
         emitBrowserState(win);
       }
+    },
+    {
+      label: "Move to folder",
+      submenu: moveToFolderSubmenu
     },
     { type: "separator" },
     {
@@ -2052,6 +2669,106 @@ function showBookmarkContextMenu(win, bookmark, showBookmarksBar) {
         removeBrowserBookmark(bookmark.id);
         emitBrowserState(win);
       }
+    },
+    { type: "separator" },
+    {
+      label: showBookmarksBar ? "Hide bookmarks bar" : "Show bookmarks bar",
+      click: () => {
+        setBrowserShowBookmarksBar(!showBookmarksBar);
+        emitBrowserState(win);
+      }
+    },
+    {
+      label: "Manage bookmarks",
+      click: () => win.webContents.send("browser:bookmark-manage")
+    }
+  ]);
+
+  menu.popup({ window: win });
+}
+
+function showBookmarkFolderContextMenu(win, folder, showBookmarksBar) {
+  const active = getActiveBrowserTab(win);
+  const raw = clipboard.readText().trim();
+  let canPaste = false;
+  try {
+    const parsed = raw ? JSON.parse(raw) : null;
+    canPaste = Boolean(parsed?.bookmark && (parsed?.type === "wpdesktop-bookmark" || parsed?.type === "wpdesktop-bookmark-node"));
+  } catch (_) {
+    canPaste = false;
+  }
+
+  const menu = Menu.buildFromTemplate([
+    {
+      label: "Open folder",
+      click: () => win.webContents.send("browser:bookmark-folder-open", folder)
+    },
+    {
+      label: "Open in new window",
+      click: () => openBookmarkFolderItems(win, folder, { inNewWindow: true })
+    },
+    {
+      label: "Open in InPrivate window",
+      click: () => openBookmarkFolderItems(win, folder, { inNewWindow: true, isolated: true })
+    },
+    {
+      label: "Open in new tab group",
+      click: () => {
+        openBookmarkFolderInNewTabGroup(win, folder);
+      }
+    },
+    { type: "separator" },
+    {
+      label: "Rename",
+      click: () => win.webContents.send("browser:bookmark-folder-edit", folder)
+    },
+    { type: "separator" },
+    {
+      label: "Cut",
+      click: () => {
+        copyBrowserBookmark(folder.id, true);
+        emitBrowserState(win);
+      }
+    },
+    {
+      label: "Copy",
+      click: () => copyBrowserBookmark(folder.id, false)
+    },
+    {
+      label: "Paste",
+      enabled: canPaste,
+      click: () => {
+        pasteBrowserBookmarkIntoParent(folder.id);
+        emitBrowserState(win);
+      }
+    },
+    { type: "separator" },
+    {
+      label: "Delete",
+      click: () => {
+        removeBrowserBookmark(folder.id);
+        emitBrowserState(win);
+      }
+    },
+    { type: "separator" },
+    {
+      label: "Add this page to favorites",
+      enabled: Boolean(active?.url),
+      click: () => {
+        if (!active?.url) {
+          return;
+        }
+        saveBrowserBookmark({
+          title: active.title || active.url,
+          url: active.url,
+          parentId: folder.id
+        });
+        emitBrowserState(win);
+      }
+    },
+    {
+      label: "Add folder",
+      click: () => win.webContents.send("browser:bookmark-folder-add-child", folder)
     },
     { type: "separator" },
     {
@@ -2595,6 +3312,11 @@ function showBookmarkSaveDialog(win, payload = {}) {
 function wireTabEvents(win, tab) {
   const wc = tab.view.webContents;
 
+  wc.on("select-bluetooth-device", (_event, deviceList, callback) => {
+    const preferred = (deviceList || []).find((device) => Boolean(device?.deviceId));
+    callback(preferred?.deviceId || "");
+  });
+
   wc.setWindowOpenHandler((details) => {
     createBrowserTab(win, details.url, tab.mode || "auto", true, null, {
       groupId: tab.groupId || null
@@ -2612,6 +3334,7 @@ function wireTabEvents(win, tab) {
     tab.isLoading = false;
     emitBrowserState(win);
     void maybeAutoFillWordPressBootstrap(tab);
+    maybePrepareMultisiteSiteForUrl(win, tab.url);
   });
 
   wc.on("page-title-updated", (event, title) => {
@@ -2627,6 +3350,7 @@ function wireTabEvents(win, tab) {
     recordBrowserHistoryVisit(tab.url, tab.title);
     emitBrowserState(win);
     void maybeAutoFillWordPressBootstrap(tab);
+    maybePrepareMultisiteSiteForUrl(win, tab.url);
   });
 
   wc.on("did-navigate-in-page", (_event, url) => {
@@ -2634,6 +3358,7 @@ function wireTabEvents(win, tab) {
     recordBrowserHistoryVisit(tab.url, tab.title);
     emitBrowserState(win);
     void maybeAutoFillWordPressBootstrap(tab);
+    maybePrepareMultisiteSiteForUrl(win, tab.url);
   });
 
   wc.on("did-fail-load", (event, errorCode, errorDescription, validatedURL) => {
@@ -2656,13 +3381,14 @@ function wireTabEvents(win, tab) {
     buildContextMenu(win, tab, params);
   });
 
-  wc.on("console-message", (_event, _level, message) => {
-    if (!String(message || "").startsWith(VAULT_CAPTURE_LOG_PREFIX)) {
+  wc.on("console-message", (_event, details) => {
+    const message = String(details?.message || "");
+    if (!message.startsWith(VAULT_CAPTURE_LOG_PREFIX)) {
       return;
     }
 
     try {
-      const payload = JSON.parse(String(message).slice(VAULT_CAPTURE_LOG_PREFIX.length));
+      const payload = JSON.parse(message.slice(VAULT_CAPTURE_LOG_PREFIX.length));
       if (!payload?.token || payload.token !== tab.pendingCredentialCaptureToken) {
         return;
       }
@@ -2870,9 +3596,9 @@ function getWordPressBootstrapAutofillPayload(url, settings = getSettings()) {
     },
     installConfig: {
       siteTitle: siteRootFolderName || "WordPress",
-      username: "admin",
-      password: "root",
-      email: "aparichitawora@gmail.com",
+      username: settings.wpInstallUsername || "admin",
+      password: settings.wpInstallPassword ?? "root",
+      email: settings.wpInstallEmail || "",
       discourageSearchEngines: true
     }
   };
@@ -4622,6 +5348,15 @@ ipcMain.handle("browser:add-bookmark", (event, payload) => {
   return bookmark;
 });
 
+ipcMain.handle("browser:add-bookmark-folder", (event, payload) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const folder = createBrowserBookmarkFolder(payload || {});
+  if (win) {
+    emitBrowserState(win);
+  }
+  return folder;
+});
+
 ipcMain.handle("browser:remove-bookmark", (event, bookmarkId) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   const changed = removeBrowserBookmark(bookmarkId);
@@ -4634,6 +5369,15 @@ ipcMain.handle("browser:remove-bookmark", (event, bookmarkId) => {
 ipcMain.handle("browser:update-bookmark", (event, payload) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   const bookmark = updateBrowserBookmark(payload?.id, payload);
+  if (win) {
+    emitBrowserState(win);
+  }
+  return bookmark;
+});
+
+ipcMain.handle("browser:move-bookmark", (event, payload) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const bookmark = moveBrowserBookmark(payload?.id, payload || {});
   if (win) {
     emitBrowserState(win);
   }
@@ -4686,11 +5430,18 @@ ipcMain.handle("browser:create-window", (_event, payload) => {
 
 ipcMain.handle("browser:show-bookmark-context-menu", (event, payload) => {
   const win = BrowserWindow.fromWebContents(event.sender);
-  if (!win || !payload?.bookmark?.id || !payload?.bookmark?.url) {
+  if (!win || !payload?.bookmark?.id) {
     return false;
   }
 
-  showBookmarkContextMenu(win, payload.bookmark, payload.showBookmarksBar !== false);
+  if (payload.bookmark.type === "folder") {
+    showBookmarkFolderContextMenu(win, payload.bookmark, payload.showBookmarksBar !== false);
+  } else {
+    if (!payload.bookmark.url) {
+      return false;
+    }
+    showBookmarkContextMenu(win, payload.bookmark, payload.showBookmarksBar !== false);
+  }
   return true;
 });
 
@@ -4889,6 +5640,28 @@ ipcMain.handle("settings:save-mysql-config", async (_event, payload) => {
   fs.writeFileSync(xamppPaths.mysqlConfigPath, String(payload.content || ""), "utf8");
   settings.dbUser = String(payload.dbUser || "root").trim() || "root";
   settings.dbPassword = payload.dbPassword ?? "";
+  settings.wpInstallUsername = String(payload.wpInstallUsername || "admin").trim() || "admin";
+  settings.wpInstallPassword = payload.wpInstallPassword ?? "root";
+  settings.wpInstallEmail = String(payload.wpInstallEmail || "").trim();
+  saveSettings(settings);
+
+  const apacheRunning = await isApacheRunning();
+  return {
+    ...settings,
+    htdocsPath: getResolvedHtdocsPath(settings),
+    apacheRunning,
+    detectedDbProfile: detectXamppDbProfile(getResolvedHtdocsPath(settings)),
+    effectiveDbProfile: getEffectiveDbProfile(settings),
+    mysqlConfigContent: readMysqlConfigContent(settings),
+    xamppPaths: getXamppPathsSummary(settings)
+  };
+});
+
+ipcMain.handle("settings:save-wp-install-defaults", async (_event, payload) => {
+  const settings = getSettings();
+  settings.wpInstallUsername = String(payload?.wpInstallUsername || "admin").trim() || "admin";
+  settings.wpInstallPassword = payload?.wpInstallPassword ?? "root";
+  settings.wpInstallEmail = String(payload?.wpInstallEmail || "").trim();
   saveSettings(settings);
 
   const apacheRunning = await isApacheRunning();
@@ -4909,6 +5682,11 @@ ipcMain.handle("sites:backup", async (_event, payload) => {
   return backupSiteResources(payload);
 });
 
+ipcMain.handle("sites:apply-multisite-config", async (event, payload) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  return applyMultisiteConfigForSiteFromWindow(win, payload?.siteId);
+});
+
 ipcMain.handle("sites:delete", async (_event, site) => {
   return deleteSiteResources(site);
 });
@@ -4927,6 +5705,7 @@ ipcMain.handle("installer:run", async (_event, payload) => {
   const basePath = (payload.basePath || resolvedHtdocsPath || "").trim();
   const folderName = (payload.folderName || "").trim();
   const zipPath = (payload.zipPath || "").trim();
+  const multisiteEnabled = payload?.multisite?.enabled === true;
 
   if (!basePath) {
     throw new Error("Select a base folder.");
@@ -4989,8 +5768,17 @@ ipcMain.handle("installer:run", async (_event, payload) => {
     lastStartedAt: new Date().toISOString(),
     status: "running",
     sslPath: `${siteName}.crt`,
-    isWordPress: true
+    isWordPress: true,
+    multisite: {
+      enabled: multisiteEnabled,
+      prepared: false,
+      networkConfigured: false
+    }
   };
+
+  if (multisiteEnabled) {
+    logs.push("Multisite preparation enabled. WP_ALLOW_MULTISITE will be added after wp-config.php is created.");
+  }
 
   const existingSites = getSites().filter((site) => site.id !== siteRecord.id);
   existingSites.unshift(siteRecord);

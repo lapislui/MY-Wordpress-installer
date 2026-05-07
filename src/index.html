@@ -88,6 +88,29 @@
             </div>
           </div>
         </div>
+        <div id="bookmark-folder-modal" class="bookmark-modal hidden">
+          <div class="bookmark-modal-card">
+            <div class="bookmark-modal-head">
+              <strong>New folder</strong>
+              <button id="close-bookmark-folder-modal-button" type="button" class="bookmark-modal-close">x</button>
+            </div>
+            <label class="field">
+              <span>Name</span>
+              <input id="bookmark-folder-name-input" type="text" placeholder="Folder name">
+            </label>
+            <label class="field">
+              <span>Location</span>
+              <div id="bookmark-folder-parent-display" class="bookmark-folder-display">Favorites bar</div>
+            </label>
+            <div class="bookmark-modal-actions">
+              <div></div>
+              <div class="bookmark-modal-actions-right">
+                <button id="bookmark-folder-cancel-button" type="button">Cancel</button>
+                <button id="bookmark-folder-create-button" type="button" class="primary-button">Create</button>
+              </div>
+            </div>
+          </div>
+        </div>
         <div id="browser-layout" class="browser-layout">
           <div class="browser-main">
             <div class="tab-strip-shell">
@@ -283,6 +306,7 @@
                 <div class="button-row compact">
                   <button id="test-db-button" type="button">Test DB</button>
                   <button id="backup-site-button" type="button">Backup site</button>
+                  <button id="apply-multisite-button" type="button" class="hidden">Apply multisite</button>
                   <button id="open-site-button" type="button">WP Admin</button>
                   <button id="open-live-site-button" type="button" class="primary-button">Open site</button>
                   <button id="delete-site-button" type="button" class="danger-button">Delete site</button>
@@ -548,6 +572,38 @@
               </div>
             </div>
 
+            <div class="settings-card settings-card-wide">
+              <div class="card-header">
+                <div>
+                  <span class="eyebrow">WordPress install defaults</span>
+                  <h3>Auto-fill values</h3>
+                </div>
+              </div>
+
+              <div class="form-grid four-up">
+                <label class="field">
+                  <span>Install username</span>
+                  <input id="settings-wp-install-username" type="text" value="admin">
+                </label>
+                <label class="field">
+                  <span>Install password</span>
+                  <input id="settings-wp-install-password" type="password" value="root">
+                </label>
+                <label class="field">
+                  <span>Install email</span>
+                  <input id="settings-wp-install-email" type="email" placeholder="name@example.com">
+                </label>
+              </div>
+
+              <div class="button-row compact">
+                <button id="save-wp-install-defaults-button" type="button" class="primary-button">Save auto-fill values</button>
+              </div>
+
+              <div class="settings-note">
+                These values are used to auto-fill <code>wp-admin/install.php</code>. Site title still comes from the detected WordPress root folder name.
+              </div>
+            </div>
+
             <div class="settings-card">
               <div class="card-header">
                 <div>
@@ -628,6 +684,15 @@
         <input id="save-db-profile" type="checkbox">
         <span>MySQL credentials are managed from Settings &gt; MySQL settings</span>
       </label>
+
+      <label class="checkbox-row">
+        <input id="enable-multisite" type="checkbox">
+        <span>Prepare this site for WordPress multisite</span>
+      </label>
+
+      <div class="settings-note">
+        This enables <code>WP_ALLOW_MULTISITE</code> in <code>wp-config.php</code> as soon as WordPress creates it, so you can finish Network Setup from wp-admin.
+      </div>
 
       <div class="button-row compact">
         <button id="install-button" type="button" class="primary-button">Create site</button>
