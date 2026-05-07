@@ -452,6 +452,9 @@ function getDefaultSettings() {
     htdocsPath: getDefaultHtdocsPath(),
     dbUser: "root",
     dbPassword: "",
+    wpInstallUsername: "admin",
+    wpInstallPassword: "root",
+    wpInstallEmail: "",
     shareLocalSiteSessions: true,
     shareOnlineSiteSessions: false,
     downloadDirectory: app.getPath("downloads"),
@@ -535,6 +538,9 @@ function normalizeSettings(input = {}) {
     htdocsPath: input.htdocsPath || (input.xamppRootPath ? path.join(input.xamppRootPath, "htdocs") : getDefaultHtdocsPath()),
     dbUser: String(input.dbUser || "root").trim() || "root",
     dbPassword: input.dbPassword ?? "",
+    wpInstallUsername: String(input.wpInstallUsername || "admin").trim() || "admin",
+    wpInstallPassword: input.wpInstallPassword ?? "root",
+    wpInstallEmail: String(input.wpInstallEmail || "").trim(),
     shareLocalSiteSessions: input.shareLocalSiteSessions !== false,
     shareOnlineSiteSessions: input.shareOnlineSiteSessions === true,
     downloadDirectory: input.downloadDirectory || app.getPath("downloads"),
@@ -1087,6 +1093,84 @@ function configureBrowserSession(win, partition) {
 
   const browserSession = session.fromPartition(partition);
   attachDownloadTracking(win, browserSession);
+  browserSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
+    try {
+      const hostname = requestingOrigin ? new URL(requestingOrigin).hostname : "";
+      const googleOrigin = hostname === "accounts.google.com" || hostname.endsWith(".google.com");
+      if (googleOrigin && ["hid", "usb", "serial"].includes(permission)) {
+        return true;
+      }
+    } catch (_) {
+      // Ignore malformed origins.
+    }
+
+    return false;
+  });
+
+  browserSession.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+    try {
+      const requestingUrl = details?.requestingUrl || "";
+      const hostname = requestingUrl ? new URL(requestingUrl).hostname : "";
+      const googleOrigin = hostname === "accounts.google.com" || hostname.endsWith(".google.com");
+      if (googleOrigin && ["hid", "usb", "serial"].includes(permission)) {
+        callback(true);
+        return;
+      }
+    } catch (_) {
+      // Ignore malformed request origins and fall through to deny.
+    }
+
+    callback(false);
+  });
+
+  browserSession.setDevicePermissionHandler((details) => {
+    try {
+      const hostname = details?.origin ? new URL(details.origin).hostname : "";
+      const googleOrigin = hostname === "accounts.google.com" || hostname.endsWith(".google.com");
+      return googleOrigin && ["hid", "usb", "serial"].includes(details.deviceType);
+    } catch (_) {
+      return false;
+    }
+  });
+
+  browserSession.setBluetoothPairingHandler(async (details, callback) => {
+    if (process.platform === "darwin") {
+      callback({ confirmed: true });
+      return;
+    }
+
+    try {
+      if (details?.pairingKind === "providePin") {
+        callback({ confirmed: false, pin: null });
+        return;
+      }
+
+      const buttons = details?.pairingKind === "confirmPin"
+        ? ["Pair", "Cancel"]
+        : ["Allow", "Cancel"];
+      const message = details?.pairingKind === "confirmPin"
+        ? `Confirm the Bluetooth PIN ${details.pin || ""} matches on your passkey device.`
+        : "Allow this Bluetooth passkey device pairing request?";
+
+      const focused = BrowserWindow.getFocusedWindow() || lastFocusedWindow || null;
+      const result = await dialog.showMessageBox(focused || undefined, {
+        type: "question",
+        buttons,
+        defaultId: 0,
+        cancelId: 1,
+        title: "Bluetooth Passkey Pairing",
+        message
+      });
+
+      callback({
+        confirmed: result.response === 0,
+        pin: null
+      });
+    } catch (_) {
+      callback({ confirmed: false, pin: null });
+    }
+  });
+
   configuredBrowserPartitions.add(partition);
 }
 
@@ -2714,6 +2798,11 @@ function showBookmarkSaveDialog(win, payload = {}) {
 function wireTabEvents(win, tab) {
   const wc = tab.view.webContents;
 
+  wc.on("select-bluetooth-device", (_event, deviceList, callback) => {
+    const preferred = (deviceList || []).find((device) => Boolean(device?.deviceId));
+    callback(preferred?.deviceId || "");
+  });
+
   wc.setWindowOpenHandler((details) => {
     createBrowserTab(win, details.url, tab.mode || "auto", true, null, {
       groupId: tab.groupId || null
@@ -2989,9 +3078,9 @@ function getWordPressBootstrapAutofillPayload(url, settings = getSettings()) {
     },
     installConfig: {
       siteTitle: siteRootFolderName || "WordPress",
-      username: "admin",
-      password: "root",
-      email: "aparichitawora@gmail.com",
+      username: settings.wpInstallUsername || "admin",
+      password: settings.wpInstallPassword ?? "root",
+      email: settings.wpInstallEmail || "",
       discourageSearchEngines: true
     }
   };
@@ -5017,6 +5106,9 @@ ipcMain.handle("settings:save-mysql-config", async (_event, payload) => {
   fs.writeFileSync(xamppPaths.mysqlConfigPath, String(payload.content || ""), "utf8");
   settings.dbUser = String(payload.dbUser || "root").trim() || "root";
   settings.dbPassword = payload.dbPassword ?? "";
+  settings.wpInstallUsername = String(payload.wpInstallUsername || "admin").trim() || "admin";
+  settings.wpInstallPassword = payload.wpInstallPassword ?? "root";
+  settings.wpInstallEmail = String(payload.wpInstallEmail || "").trim();
   saveSettings(settings);
 
   const apacheRunning = await isApacheRunning();

@@ -168,6 +168,9 @@ const elements = {
   settingsControlPanel: document.getElementById("settings-control-panel"),
   settingsDbUser: document.getElementById("settings-db-user"),
   settingsDbPassword: document.getElementById("settings-db-password"),
+  settingsWpInstallUsername: document.getElementById("settings-wp-install-username"),
+  settingsWpInstallPassword: document.getElementById("settings-wp-install-password"),
+  settingsWpInstallEmail: document.getElementById("settings-wp-install-email"),
   settingsShareLocalSessions: document.getElementById("settings-share-local-sessions"),
   settingsShareOnlineSessions: document.getElementById("settings-share-online-sessions"),
   settingsMysqlEditor: document.getElementById("settings-mysql-editor"),
@@ -679,6 +682,9 @@ function renderXamppSettings() {
   bindSettingsPath(elements.settingsControlPanel, elements.openControlPanelButton, paths.controlPanelPath);
   elements.settingsDbUser.value = getEffectiveDbProfile().user || "root";
   elements.settingsDbPassword.value = getEffectiveDbProfile().password || "";
+  elements.settingsWpInstallUsername.value = state.wpInstallUsername || "admin";
+  elements.settingsWpInstallPassword.value = state.wpInstallPassword ?? "root";
+  elements.settingsWpInstallEmail.value = state.wpInstallEmail || "";
   elements.settingsMysqlEditor.value = state.mysqlConfigContent || "";
   elements.settingsMysqlEditor.readOnly = !paths.mysqlConfigPath;
   elements.saveMysqlConfigButton.disabled = !paths.mysqlConfigPath;
@@ -1386,6 +1392,13 @@ function renderBrowserOverlay() {
     return;
   }
 
+  if (active.isLoading) {
+    const progressBar = document.createElement("div");
+    progressBar.className = "browser-loading-bar";
+    progressBar.innerHTML = `<div class="browser-loading-bar-fill"></div>`;
+    elements.browserOverlay.appendChild(progressBar);
+  }
+
   if (!active.error && active.isLoading) {
     const overlay = document.createElement("div");
     overlay.className = "browser-loading-card";
@@ -1586,6 +1599,9 @@ function applySettingsPayload(settings) {
   state.xamppPaths = settings.xamppPaths || null;
   state.effectiveDbProfile = settings.effectiveDbProfile || getEffectiveDbProfile();
   state.mysqlConfigContent = settings.mysqlConfigContent || "";
+  state.wpInstallUsername = settings.wpInstallUsername || "admin";
+  state.wpInstallPassword = settings.wpInstallPassword ?? "root";
+  state.wpInstallEmail = settings.wpInstallEmail || "";
   state.shareLocalSiteSessions = settings.shareLocalSiteSessions !== false;
   state.shareOnlineSiteSessions = settings.shareOnlineSiteSessions === true;
 
@@ -1663,11 +1679,14 @@ async function saveMysqlConfigFromSettings() {
     const result = await window.desktopAPI.saveMysqlConfig({
       dbUser: elements.settingsDbUser.value,
       dbPassword: elements.settingsDbPassword.value,
+      wpInstallUsername: elements.settingsWpInstallUsername.value,
+      wpInstallPassword: elements.settingsWpInstallPassword.value,
+      wpInstallEmail: elements.settingsWpInstallEmail.value,
       content: elements.settingsMysqlEditor.value
     });
 
     applySettingsPayload(result);
-    setStatus("Saved MySQL config and DB credentials.");
+    setStatus("Saved MySQL config, DB credentials, and WordPress install defaults.");
   } catch (error) {
     setStatus(`Saving MySQL config failed: ${error.message}`);
   }

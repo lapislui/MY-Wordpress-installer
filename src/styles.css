@@ -777,6 +777,25 @@ input {
   pointer-events: auto;
 }
 
+.browser-loading-bar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: rgba(27, 127, 204, 0.14);
+  overflow: hidden;
+  z-index: 30;
+}
+
+.browser-loading-bar-fill {
+  width: 38%;
+  height: 100%;
+  background: linear-gradient(90deg, #2aa0f2 0%, #4bc48b 100%);
+  border-radius: 0 999px 999px 0;
+  animation: browser-loading-slide 1.2s ease-in-out infinite;
+}
+
 .browser-loading-card {
   position: absolute;
   top: 20px;
@@ -1501,6 +1520,20 @@ button:hover {
 
   100% {
     left: 100%;
+  }
+}
+
+@keyframes browser-loading-slide {
+  0% {
+    transform: translateX(-120%);
+  }
+
+  55% {
+    transform: translateX(145%);
+  }
+
+  100% {
+    transform: translateX(145%);
   }
 }
 
