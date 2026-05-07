@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld("desktopAPI", {
   browserAddBookmarkFolder: (payload) => ipcRenderer.invoke("browser:add-bookmark-folder", payload),
   browserRemoveBookmark: (bookmarkId) => ipcRenderer.invoke("browser:remove-bookmark", bookmarkId),
   browserUpdateBookmark: (payload) => ipcRenderer.invoke("browser:update-bookmark", payload),
+  browserMoveBookmark: (payload) => ipcRenderer.invoke("browser:move-bookmark", payload),
   browserCopyBookmark: (bookmarkId) => ipcRenderer.invoke("browser:copy-bookmark", bookmarkId),
   browserCutBookmark: (bookmarkId) => ipcRenderer.invoke("browser:cut-bookmark", bookmarkId),
   browserPasteBookmark: () => ipcRenderer.invoke("browser:paste-bookmark"),

@@ -427,6 +427,64 @@ input {
   gap: 10px;
 }
 
+.bookmark-drop-zone {
+  min-height: 10px;
+  border-radius: 999px;
+  margin: 4px 0;
+  border: 1px dashed transparent;
+  transition: border-color 120ms ease, background 120ms ease;
+}
+
+.bookmark-drop-zone.root {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 0.86rem;
+  border-color: rgba(88, 191, 123, 0.2);
+  background: rgba(88, 191, 123, 0.05);
+}
+
+.bookmark-drop-zone.active {
+  border-color: var(--accent-strong);
+  background: rgba(88, 191, 123, 0.16);
+}
+
+.browser-tool-item.bookmark-node {
+  position: relative;
+}
+
+.browser-tool-item.bookmark-node.dragging {
+  opacity: 0.55;
+}
+
+.browser-tool-item.bookmark-node.folder-target-active {
+  outline: 2px solid rgba(88, 191, 123, 0.6);
+  outline-offset: 2px;
+}
+
+.bookmark-row-main {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.bookmark-row-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.bookmark-drag-handle {
+  cursor: grab;
+}
+
+.bookmark-drag-handle:active {
+  cursor: grabbing;
+}
+
 .toolbar-actions,
 .button-row,
 .picker-row,

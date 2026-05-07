@@ -88,6 +88,29 @@
             </div>
           </div>
         </div>
+        <div id="bookmark-folder-modal" class="bookmark-modal hidden">
+          <div class="bookmark-modal-card">
+            <div class="bookmark-modal-head">
+              <strong>New folder</strong>
+              <button id="close-bookmark-folder-modal-button" type="button" class="bookmark-modal-close">x</button>
+            </div>
+            <label class="field">
+              <span>Name</span>
+              <input id="bookmark-folder-name-input" type="text" placeholder="Folder name">
+            </label>
+            <label class="field">
+              <span>Location</span>
+              <div id="bookmark-folder-parent-display" class="bookmark-folder-display">Favorites bar</div>
+            </label>
+            <div class="bookmark-modal-actions">
+              <div></div>
+              <div class="bookmark-modal-actions-right">
+                <button id="bookmark-folder-cancel-button" type="button">Cancel</button>
+                <button id="bookmark-folder-create-button" type="button" class="primary-button">Create</button>
+              </div>
+            </div>
+          </div>
+        </div>
         <div id="browser-layout" class="browser-layout">
           <div class="browser-main">
             <div class="tab-strip-shell">

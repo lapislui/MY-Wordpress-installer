@@ -37,6 +37,8 @@ const uiState = {
 let browserFeedbackTimer = null;
 let addressSuggestionsToken = 0;
 let draggedBrowserToolSection = null;
+let bookmarkFolderDialogContext = null;
+let draggedBookmarkId = null;
 const BROWSER_TOOL_ORDER_KEY = "wp-desktop.browser-tool-order";
 const BROWSER_TOOL_COLLAPSE_KEY = "wp-desktop.browser-tool-collapse";
 const DEFAULT_BROWSER_TOOL_ORDER = ["sessions", "credentials", "bookmarks", "downloads", "permissions"];
@@ -89,6 +91,12 @@ const elements = {
   bookmarkMoreButton: document.getElementById("bookmark-more-button"),
   bookmarkDoneButton: document.getElementById("bookmark-done-button"),
   bookmarkRemoveButton: document.getElementById("bookmark-remove-button"),
+  bookmarkFolderModal: document.getElementById("bookmark-folder-modal"),
+  closeBookmarkFolderModalButton: document.getElementById("close-bookmark-folder-modal-button"),
+  bookmarkFolderNameInput: document.getElementById("bookmark-folder-name-input"),
+  bookmarkFolderParentDisplay: document.getElementById("bookmark-folder-parent-display"),
+  bookmarkFolderCancelButton: document.getElementById("bookmark-folder-cancel-button"),
+  bookmarkFolderCreateButton: document.getElementById("bookmark-folder-create-button"),
   vaultToggleButton: document.getElementById("vault-toggle-button"),
   vaultPanel: document.getElementById("vault-panel"),
   bookmarksList: document.getElementById("bookmarks-list"),
@@ -922,6 +930,15 @@ function renderBookmarks() {
   elements.bookmarkBar.innerHTML = "";
   elements.bookmarksList.innerHTML = "";
 
+  const newRootFolderChip = document.createElement("button");
+  newRootFolderChip.type = "button";
+  newRootFolderChip.className = "bookmark-chip bookmark-folder-chip";
+  newRootFolderChip.textContent = "+ Folder";
+  newRootFolderChip.addEventListener("click", () => {
+    openBookmarkFolderDialog({ parentId: null, parentTitle: "Favorites bar" });
+  });
+  elements.bookmarkBar.appendChild(newRootFolderChip);
+
   if (!state.browser.bookmarks.length) {
     if (state.browser.showBookmarksBar) {
       const emptyChip = document.createElement("div");
@@ -937,12 +954,90 @@ function renderBookmarks() {
     return;
   }
 
+  const setDropZoneActive = (zone, active) => {
+    zone.classList.toggle("active", active);
+  };
+
+  const createMoveDropZone = ({ parentId = null, index = 0, depth = 0 }) => {
+    const zone = document.createElement("div");
+    zone.className = "bookmark-drop-zone";
+    zone.style.marginLeft = `${depth * 16}px`;
+    zone.addEventListener("dragover", (event) => {
+      if (!draggedBookmarkId) {
+        return;
+      }
+      event.preventDefault();
+      setDropZoneActive(zone, true);
+    });
+    zone.addEventListener("dragleave", () => setDropZoneActive(zone, false));
+    zone.addEventListener("drop", async (event) => {
+      event.preventDefault();
+      setDropZoneActive(zone, false);
+      if (!draggedBookmarkId) {
+        return;
+      }
+      try {
+        await window.desktopAPI.browserMoveBookmark({ id: draggedBookmarkId, parentId, index });
+      } catch (error) {
+        setBrowserFeedback(`Move failed: ${error.message}`, "error");
+      }
+    });
+    return zone;
+  };
+
+  const createRootDropZone = () => {
+    const zone = document.createElement("div");
+    zone.className = "bookmark-drop-zone root";
+    zone.textContent = "Drop here to move to Favorites bar";
+    zone.addEventListener("dragover", (event) => {
+      if (!draggedBookmarkId) {
+        return;
+      }
+      event.preventDefault();
+      setDropZoneActive(zone, true);
+    });
+    zone.addEventListener("dragleave", () => setDropZoneActive(zone, false));
+    zone.addEventListener("drop", async (event) => {
+      event.preventDefault();
+      setDropZoneActive(zone, false);
+      if (!draggedBookmarkId) {
+        return;
+      }
+      try {
+        await window.desktopAPI.browserMoveBookmark({
+          id: draggedBookmarkId,
+          parentId: null,
+          index: state.browser.bookmarks.length
+        });
+      } catch (error) {
+        setBrowserFeedback(`Move failed: ${error.message}`, "error");
+      }
+    });
+    return zone;
+  };
+
+  const attachDragHandlers = (element, node) => {
+    element.draggable = true;
+    element.addEventListener("dragstart", (event) => {
+      draggedBookmarkId = node.id;
+      element.classList.add("dragging");
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", node.id);
+    });
+    element.addEventListener("dragend", () => {
+      draggedBookmarkId = null;
+      element.classList.remove("dragging");
+      document.querySelectorAll(".bookmark-drop-zone.active").forEach((zone) => zone.classList.remove("active"));
+      document.querySelectorAll(".browser-tool-item.bookmark-node.folder-target-active").forEach((item) => item.classList.remove("folder-target-active"));
+    });
+  };
+
   const renderBookmarkBarNode = (node) => {
     const chip = document.createElement("button");
     chip.type = "button";
     chip.className = `bookmark-chip${node.type === "folder" ? " bookmark-folder-chip" : ""}`;
     chip.textContent = node.type === "folder"
-      ? `📁 ${node.title}`
+      ? `[Folder] ${node.title}`
       : node.iconOnly
         ? (node.title || node.url).trim().charAt(0).toUpperCase() || "*"
         : (node.title || node.url);
@@ -952,6 +1047,23 @@ function renderBookmarks() {
       chip.addEventListener("click", (event) => {
         const rect = event.currentTarget.getBoundingClientRect();
         openBookmarkFolderMenu(rect, [node.id]);
+      });
+      chip.addEventListener("dragover", (event) => {
+        if (!draggedBookmarkId) {
+          return;
+        }
+        event.preventDefault();
+      });
+      chip.addEventListener("drop", async (event) => {
+        event.preventDefault();
+        if (!draggedBookmarkId) {
+          return;
+        }
+        try {
+          await window.desktopAPI.browserMoveBookmark({ id: draggedBookmarkId, parentId: node.id });
+        } catch (error) {
+          setBrowserFeedback(`Move failed: ${error.message}`, "error");
+        }
       });
       elements.bookmarkBar.appendChild(chip);
       return;
@@ -974,29 +1086,52 @@ function renderBookmarks() {
     elements.bookmarkBar.appendChild(chip);
   };
 
-  const renderBookmarkTreeNode = (node, depth = 0) => {
+  const renderBookmarkTreeNode = (node, parentId = null, depth = 0, index = 0) => {
+    elements.bookmarksList.appendChild(createMoveDropZone({ parentId, index, depth }));
+
     const item = document.createElement("div");
-    item.className = "browser-tool-item";
+    item.className = "browser-tool-item bookmark-node";
     item.style.marginLeft = `${depth * 16}px`;
+    attachDragHandlers(item, node);
 
     if (node.type === "folder") {
       item.innerHTML = `
-        <div class="browser-tool-item-copy">
-          <strong>📁 ${node.title}</strong>
-          <span>${(node.children || []).length} item${(node.children || []).length === 1 ? "" : "s"}</span>
-        </div>
-        <div class="button-row compact">
-          <button type="button" data-add-folder="${node.id}">New folder</button>
-          <button type="button" data-remove-bookmark="${node.id}">Remove</button>
+        <div class="bookmark-row-main">
+          <div class="browser-tool-item-copy">
+            <strong>[Folder] ${node.title}</strong>
+            <span>${(node.children || []).length} item${(node.children || []).length === 1 ? "" : "s"}</span>
+          </div>
+          <div class="bookmark-row-actions">
+            <button type="button" class="bookmark-drag-handle" title="Drag to move">Move</button>
+            <button type="button" data-add-folder="${node.id}">New folder</button>
+            <button type="button" data-remove-bookmark="${node.id}">Remove</button>
+          </div>
         </div>
       `;
 
-      item.querySelector("[data-add-folder]")?.addEventListener("click", async () => {
-        const title = window.prompt("Folder name", "New folder")?.trim();
-        if (!title) {
+      item.addEventListener("dragover", (event) => {
+        if (!draggedBookmarkId) {
           return;
         }
-        await window.desktopAPI.browserAddBookmarkFolder({ title, parentId: node.id });
+        event.preventDefault();
+        item.classList.add("folder-target-active");
+      });
+      item.addEventListener("dragleave", () => item.classList.remove("folder-target-active"));
+      item.addEventListener("drop", async (event) => {
+        event.preventDefault();
+        item.classList.remove("folder-target-active");
+        if (!draggedBookmarkId) {
+          return;
+        }
+        try {
+          await window.desktopAPI.browserMoveBookmark({ id: draggedBookmarkId, parentId: node.id });
+        } catch (error) {
+          setBrowserFeedback(`Move failed: ${error.message}`, "error");
+        }
+      });
+
+      item.querySelector("[data-add-folder]")?.addEventListener("click", () => {
+        openBookmarkFolderDialog({ parentId: node.id, parentTitle: node.title });
       });
 
       item.querySelector("[data-remove-bookmark]")?.addEventListener("click", async () => {
@@ -1004,18 +1139,26 @@ function renderBookmarks() {
       });
 
       elements.bookmarksList.appendChild(item);
-      (node.children || []).forEach((child) => renderBookmarkTreeNode(child, depth + 1));
+      (node.children || []).forEach((child, childIndex) => renderBookmarkTreeNode(child, node.id, depth + 1, childIndex));
+      elements.bookmarksList.appendChild(createMoveDropZone({
+        parentId: node.id,
+        index: (node.children || []).length,
+        depth: depth + 1
+      }));
       return;
     }
 
     item.innerHTML = `
-      <div class="browser-tool-item-copy">
-        <strong>${node.title || node.url}</strong>
-        <span>${node.url}</span>
-      </div>
-      <div class="button-row compact">
-        <button type="button" data-open-bookmark="${node.id}">Open</button>
-        <button type="button" data-remove-bookmark="${node.id}">Remove</button>
+      <div class="bookmark-row-main">
+        <div class="browser-tool-item-copy">
+          <strong>${node.title || node.url}</strong>
+          <span>${node.url}</span>
+        </div>
+        <div class="bookmark-row-actions">
+          <button type="button" class="bookmark-drag-handle" title="Drag to move">Move</button>
+          <button type="button" data-open-bookmark="${node.id}">Open</button>
+          <button type="button" data-remove-bookmark="${node.id}">Remove</button>
+        </div>
       </div>
     `;
 
@@ -1031,23 +1174,18 @@ function renderBookmarks() {
     elements.bookmarksList.appendChild(item);
   };
 
-  const newRootFolderChip = document.createElement("button");
-  newRootFolderChip.type = "button";
-  newRootFolderChip.className = "bookmark-chip bookmark-folder-chip";
-  newRootFolderChip.textContent = "+ Folder";
-  newRootFolderChip.addEventListener("click", async () => {
-    const title = window.prompt("Folder name", "New folder")?.trim();
-    if (!title) {
-      return;
-    }
-    await window.desktopAPI.browserAddBookmarkFolder({ title });
-  });
-  elements.bookmarkBar.appendChild(newRootFolderChip);
-
+  elements.bookmarksList.appendChild(createRootDropZone());
   state.browser.bookmarks.forEach((node) => {
     renderBookmarkBarNode(node);
-    renderBookmarkTreeNode(node, 0);
   });
+  state.browser.bookmarks.forEach((node, index) => {
+    renderBookmarkTreeNode(node, null, 0, index);
+  });
+  elements.bookmarksList.appendChild(createMoveDropZone({
+    parentId: null,
+    index: state.browser.bookmarks.length,
+    depth: 0
+  }));
 }
 
 function formatDownloadProgress(download) {
@@ -1188,6 +1326,46 @@ function findBookmarkNode(nodes, nodeId) {
   return null;
 }
 
+function closeBookmarkFolderDialog() {
+  bookmarkFolderDialogContext = null;
+  elements.bookmarkFolderNameInput.value = "";
+  elements.bookmarkFolderParentDisplay.textContent = "Favorites bar";
+  elements.bookmarkFolderModal.classList.add("hidden");
+}
+
+function openBookmarkFolderDialog({ parentId = null, parentTitle = "Favorites bar", onCreated = null } = {}) {
+  bookmarkFolderDialogContext = { parentId, parentTitle, onCreated };
+  elements.bookmarkFolderParentDisplay.textContent = parentTitle || "Favorites bar";
+  elements.bookmarkFolderNameInput.value = "";
+  elements.bookmarkFolderModal.classList.remove("hidden");
+  window.setTimeout(() => {
+    elements.bookmarkFolderNameInput.focus();
+    elements.bookmarkFolderNameInput.select();
+  }, 0);
+}
+
+async function submitBookmarkFolderDialog() {
+  const title = elements.bookmarkFolderNameInput.value.trim();
+  if (!title) {
+    elements.bookmarkFolderNameInput.focus();
+    return;
+  }
+
+  const context = bookmarkFolderDialogContext || { parentId: null, onCreated: null };
+  try {
+    await window.desktopAPI.browserAddBookmarkFolder({
+      title,
+      parentId: context.parentId || null
+    });
+    closeBookmarkFolderDialog();
+    if (typeof context.onCreated === "function") {
+      context.onCreated();
+    }
+  } catch (error) {
+    setBrowserFeedback(`Folder creation failed: ${error.message}`, "error");
+  }
+}
+
 function hideBookmarkFolderMenu() {
   state.bookmarkFolderTrail = [];
   elements.bookmarkContextMenu.classList.add("hidden");
@@ -1238,16 +1416,12 @@ function openBookmarkFolderMenu(anchorRect, trail = []) {
   const newFolderButton = document.createElement("button");
   newFolderButton.type = "button";
   newFolderButton.textContent = "New folder";
-  newFolderButton.addEventListener("click", async () => {
-    const title = window.prompt("Folder name", "New folder")?.trim();
-    if (!title) {
-      return;
-    }
-    await window.desktopAPI.browserAddBookmarkFolder({
-      title,
-      parentId: folder.id
+  newFolderButton.addEventListener("click", () => {
+    openBookmarkFolderDialog({
+      parentId: folder.id,
+      parentTitle: folder.title,
+      onCreated: () => openBookmarkFolderMenu(anchorRect, trail)
     });
-    openBookmarkFolderMenu(anchorRect, trail);
   });
   menu.appendChild(newFolderButton);
 
@@ -1969,6 +2143,24 @@ elements.backButton.addEventListener("click", () => window.desktopAPI.browserGoB
 elements.forwardButton.addEventListener("click", () => window.desktopAPI.browserGoForward());
 elements.reloadButton.addEventListener("click", () => window.desktopAPI.browserReload());
 elements.bookmarkPageButton.addEventListener("click", () => void openBookmarkSaveDialogForCurrentPage());
+elements.closeBookmarkFolderModalButton.addEventListener("click", closeBookmarkFolderDialog);
+elements.bookmarkFolderCancelButton.addEventListener("click", closeBookmarkFolderDialog);
+elements.bookmarkFolderCreateButton.addEventListener("click", () => void submitBookmarkFolderDialog());
+elements.bookmarkFolderModal.addEventListener("click", (event) => {
+  if (event.target === elements.bookmarkFolderModal) {
+    closeBookmarkFolderDialog();
+  }
+});
+elements.bookmarkFolderNameInput.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    void submitBookmarkFolderDialog();
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeBookmarkFolderDialog();
+  }
+});
 elements.vaultSaveButton.addEventListener("click", () => void saveCurrentSiteCredentials());
 elements.vaultClearButton.addEventListener("click", () => void clearCurrentSiteCredentials());
 elements.vaultFillButton.addEventListener("click", autofillCurrentPage);

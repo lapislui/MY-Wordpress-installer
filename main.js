@@ -1005,6 +1005,59 @@ function createBrowserBookmarkFolder({ title, parentId = null }) {
   return folder;
 }
 
+function isBookmarkNodeDescendant(node, candidateId) {
+  if (!node || node.type !== "folder") {
+    return false;
+  }
+
+  return (node.children || []).some((child) => child?.id === candidateId || isBookmarkNodeDescendant(child, candidateId));
+}
+
+function moveBrowserBookmark(bookmarkId, { parentId = null, index = null } = {}) {
+  if (!bookmarkId) {
+    throw new Error("Missing bookmark id.");
+  }
+
+  const settings = getSettings();
+  settings.browserBookmarks = settings.browserBookmarks || [];
+
+  const found = findBookmarkNodeAndParent(settings.browserBookmarks, bookmarkId);
+  if (!found?.node) {
+    throw new Error("Bookmark not found.");
+  }
+
+  const node = found.node;
+  if (parentId && node.id === parentId) {
+    throw new Error("A folder cannot contain itself.");
+  }
+
+  if (parentId && isBookmarkNodeDescendant(node, parentId)) {
+    throw new Error("A folder cannot be moved into one of its children.");
+  }
+
+  let targetBucket = settings.browserBookmarks;
+  if (parentId) {
+    const target = findBookmarkNodeAndParent(settings.browserBookmarks, parentId);
+    if (!target?.node || target.node.type !== "folder") {
+      throw new Error("Folder target was not found.");
+    }
+    targetBucket = target.node.children = target.node.children || [];
+  }
+
+  const sourceBucket = found.parent ? found.parent.children : settings.browserBookmarks;
+  sourceBucket.splice(found.index, 1);
+
+  let normalizedIndex = Number.isInteger(index) ? index : targetBucket.length;
+  if (sourceBucket === targetBucket && found.index < normalizedIndex) {
+    normalizedIndex -= 1;
+  }
+  normalizedIndex = Math.max(0, Math.min(normalizedIndex, targetBucket.length));
+  targetBucket.splice(normalizedIndex, 0, node);
+
+  saveSettings(settings);
+  return node;
+}
+
 function copyBrowserBookmark(bookmarkId, removeAfterCopy = false) {
   const settings = getSettings();
   const found = findBookmarkNodeAndParent(settings.browserBookmarks || [], bookmarkId);
@@ -5067,6 +5120,15 @@ ipcMain.handle("browser:remove-bookmark", (event, bookmarkId) => {
 ipcMain.handle("browser:update-bookmark", (event, payload) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   const bookmark = updateBrowserBookmark(payload?.id, payload);
+  if (win) {
+    emitBrowserState(win);
+  }
+  return bookmark;
+});
+
+ipcMain.handle("browser:move-bookmark", (event, payload) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const bookmark = moveBrowserBookmark(payload?.id, payload || {});
   if (win) {
     emitBrowserState(win);
   }
