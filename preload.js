@@ -62,7 +62,11 @@ contextBridge.exposeInMainWorld("desktopAPI", {
   onBrowserMenuCommand: (handler) => ipcRenderer.on("browser:menu-command", (_event, payload) => handler(payload)),
   onBrowserDownloadComplete: (handler) => ipcRenderer.on("browser:download-complete", (_event, payload) => handler(payload)),
   onBrowserBookmarkEdit: (handler) => ipcRenderer.on("browser:bookmark-edit", (_event, payload) => handler(payload)),
+  onBrowserBookmarkFolderEdit: (handler) => ipcRenderer.on("browser:bookmark-folder-edit", (_event, payload) => handler(payload)),
+  onBrowserBookmarkFolderOpen: (handler) => ipcRenderer.on("browser:bookmark-folder-open", (_event, payload) => handler(payload)),
+  onBrowserBookmarkFolderAddChild: (handler) => ipcRenderer.on("browser:bookmark-folder-add-child", (_event, payload) => handler(payload)),
   onBrowserBookmarkManage: (handler) => ipcRenderer.on("browser:bookmark-manage", () => handler()),
+  onBrowserBookmarkCreateFolderAndMove: (handler) => ipcRenderer.on("browser:bookmark-create-folder-and-move", (_event, payload) => handler(payload)),
   onBrowserOpenUrl: (handler) => ipcRenderer.on("browser:open-url", (_event, payload) => handler(payload)),
   onBrowserFocus: (handler) => ipcRenderer.on("browser:focus", () => handler()),
   onSitesChanged: (handler) => ipcRenderer.on("sites:changed", () => handler())

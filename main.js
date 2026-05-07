@@ -1005,6 +1005,29 @@ function createBrowserBookmarkFolder({ title, parentId = null }) {
   return folder;
 }
 
+function cloneBookmarkNodeWithFreshIds(node) {
+  if (!node) {
+    return null;
+  }
+
+  if (node.type === "folder") {
+    return {
+      id: `bookmark-folder-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+      type: "folder",
+      title: String(node.title || "New folder").trim() || "New folder",
+      children: (node.children || []).map((child) => cloneBookmarkNodeWithFreshIds(child)).filter(Boolean)
+    };
+  }
+
+  return {
+    id: `bookmark-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    type: "bookmark",
+    title: node.title || node.url || "Bookmark",
+    url: ensureUrl(node.url),
+    iconOnly: Boolean(node.iconOnly)
+  };
+}
+
 function isBookmarkNodeDescendant(node, candidateId) {
   if (!node || node.type !== "folder") {
     return false;
@@ -1062,12 +1085,12 @@ function copyBrowserBookmark(bookmarkId, removeAfterCopy = false) {
   const settings = getSettings();
   const found = findBookmarkNodeAndParent(settings.browserBookmarks || [], bookmarkId);
   const bookmark = found?.node;
-  if (!bookmark || bookmark.type === "folder") {
+  if (!bookmark) {
     throw new Error("Bookmark not found.");
   }
 
   clipboard.writeText(JSON.stringify({
-    type: "wpdesktop-bookmark",
+    type: "wpdesktop-bookmark-node",
     bookmark
   }));
 
@@ -1093,14 +1116,90 @@ function pasteBrowserBookmark() {
     throw new Error("Clipboard does not contain a bookmark.");
   }
 
-  if (parsed?.type !== "wpdesktop-bookmark" || !parsed.bookmark?.url) {
+  if ((parsed?.type !== "wpdesktop-bookmark" && parsed?.type !== "wpdesktop-bookmark-node") || !parsed.bookmark) {
     throw new Error("Clipboard does not contain a bookmark.");
   }
 
-  return saveBrowserBookmark({
-    title: parsed.bookmark.title,
-    url: parsed.bookmark.url
+  const settings = getSettings();
+  const clone = cloneBookmarkNodeWithFreshIds(parsed.bookmark);
+  settings.browserBookmarks = settings.browserBookmarks || [];
+  insertBookmarkNode(settings.browserBookmarks, clone, null);
+  saveSettings(settings);
+  return clone;
+}
+
+function pasteBrowserBookmarkIntoParent(parentId = null) {
+  const raw = clipboard.readText().trim();
+  if (!raw) {
+    throw new Error("Clipboard is empty.");
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (_) {
+    throw new Error("Clipboard does not contain a bookmark.");
+  }
+
+  if ((parsed?.type !== "wpdesktop-bookmark" && parsed?.type !== "wpdesktop-bookmark-node") || !parsed.bookmark) {
+    throw new Error("Clipboard does not contain a bookmark.");
+  }
+
+  const settings = getSettings();
+  const clone = cloneBookmarkNodeWithFreshIds(parsed.bookmark);
+  settings.browserBookmarks = settings.browserBookmarks || [];
+  if (!insertBookmarkNode(settings.browserBookmarks, clone, parentId)) {
+    throw new Error("Folder target was not found.");
+  }
+  saveSettings(settings);
+  return clone;
+}
+
+function flattenFolderBookmarks(node, output = []) {
+  if (!node) {
+    return output;
+  }
+
+  if (node.type === "folder") {
+    (node.children || []).forEach((child) => flattenFolderBookmarks(child, output));
+    return output;
+  }
+
+  output.push(node);
+  return output;
+}
+
+function openBookmarkFolderItems(win, folder, { inNewWindow = false, isolated = false } = {}) {
+  const items = flattenFolderBookmarks(folder, []);
+  if (!items.length) {
+    return;
+  }
+
+  if (!inNewWindow) {
+    items.forEach((item) => createBrowserTab(win, item.url, isolated ? "isolated" : "auto", true));
+    return;
+  }
+
+  const [first, ...rest] = items;
+  const child = createWindow({ startupUrl: first.url, startupMode: isolated ? "isolated" : "auto" });
+  child.webContents.once("did-finish-load", () => {
+    rest.forEach((item) => createBrowserTab(child, item.url, isolated ? "isolated" : "auto", true));
   });
+}
+
+function openBookmarkFolderInNewTabGroup(win, folder) {
+  const items = flattenFolderBookmarks(folder, []);
+  if (!items.length) {
+    return false;
+  }
+
+  const state = getBrowserState(win);
+  const group = createTabGroupRecord(state, folder.title || "Bookmark folder");
+  items.forEach((item, index) => {
+    createBrowserTab(win, item.url, "auto", index === items.length - 1, null, { groupId: group.id });
+  });
+  emitBrowserState(win);
+  return true;
 }
 
 function getBrowserShowBookmarksBar() {
@@ -2470,6 +2569,52 @@ function buildContextMenu(win, tab, params) {
 }
 
 function showBookmarkContextMenu(win, bookmark, showBookmarksBar) {
+  const buildFolderSubmenu = (nodes = []) =>
+    (nodes || [])
+      .filter((node) => node?.type === "folder")
+      .map((folder) => {
+        const nestedItems = buildFolderSubmenu(folder.children || []);
+        return {
+          label: folder.title,
+          submenu: [
+            {
+              label: "Move here",
+              click: () => {
+                moveBrowserBookmark(bookmark.id, { parentId: folder.id });
+                emitBrowserState(win);
+              }
+            },
+            ...(nestedItems.length ? [{ type: "separator" }, ...nestedItems] : [])
+          ]
+        };
+      });
+
+  const moveToFolderSubmenu = [
+    {
+      label: "Favorites bar",
+      click: () => {
+        moveBrowserBookmark(bookmark.id, { parentId: null });
+        emitBrowserState(win);
+      }
+    }
+  ];
+
+  const nestedFolderItems = buildFolderSubmenu(getBrowserBookmarks());
+  if (nestedFolderItems.length) {
+    moveToFolderSubmenu.push(
+      { type: "separator" },
+      ...nestedFolderItems
+    );
+  }
+
+  moveToFolderSubmenu.push(
+    { type: "separator" },
+    {
+      label: "Create new folder and move here",
+      click: () => win.webContents.send("browser:bookmark-create-folder-and-move", bookmark)
+    }
+  );
+
   const menu = Menu.buildFromTemplate([
     {
       label: "Open in new tab",
@@ -2494,6 +2639,10 @@ function showBookmarkContextMenu(win, bookmark, showBookmarksBar) {
         updateBrowserBookmark(bookmark.id, { iconOnly: !bookmark.iconOnly });
         emitBrowserState(win);
       }
+    },
+    {
+      label: "Move to folder",
+      submenu: moveToFolderSubmenu
     },
     { type: "separator" },
     {
@@ -2520,6 +2669,106 @@ function showBookmarkContextMenu(win, bookmark, showBookmarksBar) {
         removeBrowserBookmark(bookmark.id);
         emitBrowserState(win);
       }
+    },
+    { type: "separator" },
+    {
+      label: showBookmarksBar ? "Hide bookmarks bar" : "Show bookmarks bar",
+      click: () => {
+        setBrowserShowBookmarksBar(!showBookmarksBar);
+        emitBrowserState(win);
+      }
+    },
+    {
+      label: "Manage bookmarks",
+      click: () => win.webContents.send("browser:bookmark-manage")
+    }
+  ]);
+
+  menu.popup({ window: win });
+}
+
+function showBookmarkFolderContextMenu(win, folder, showBookmarksBar) {
+  const active = getActiveBrowserTab(win);
+  const raw = clipboard.readText().trim();
+  let canPaste = false;
+  try {
+    const parsed = raw ? JSON.parse(raw) : null;
+    canPaste = Boolean(parsed?.bookmark && (parsed?.type === "wpdesktop-bookmark" || parsed?.type === "wpdesktop-bookmark-node"));
+  } catch (_) {
+    canPaste = false;
+  }
+
+  const menu = Menu.buildFromTemplate([
+    {
+      label: "Open folder",
+      click: () => win.webContents.send("browser:bookmark-folder-open", folder)
+    },
+    {
+      label: "Open in new window",
+      click: () => openBookmarkFolderItems(win, folder, { inNewWindow: true })
+    },
+    {
+      label: "Open in InPrivate window",
+      click: () => openBookmarkFolderItems(win, folder, { inNewWindow: true, isolated: true })
+    },
+    {
+      label: "Open in new tab group",
+      click: () => {
+        openBookmarkFolderInNewTabGroup(win, folder);
+      }
+    },
+    { type: "separator" },
+    {
+      label: "Rename",
+      click: () => win.webContents.send("browser:bookmark-folder-edit", folder)
+    },
+    { type: "separator" },
+    {
+      label: "Cut",
+      click: () => {
+        copyBrowserBookmark(folder.id, true);
+        emitBrowserState(win);
+      }
+    },
+    {
+      label: "Copy",
+      click: () => copyBrowserBookmark(folder.id, false)
+    },
+    {
+      label: "Paste",
+      enabled: canPaste,
+      click: () => {
+        pasteBrowserBookmarkIntoParent(folder.id);
+        emitBrowserState(win);
+      }
+    },
+    { type: "separator" },
+    {
+      label: "Delete",
+      click: () => {
+        removeBrowserBookmark(folder.id);
+        emitBrowserState(win);
+      }
+    },
+    { type: "separator" },
+    {
+      label: "Add this page to favorites",
+      enabled: Boolean(active?.url),
+      click: () => {
+        if (!active?.url) {
+          return;
+        }
+        saveBrowserBookmark({
+          title: active.title || active.url,
+          url: active.url,
+          parentId: folder.id
+        });
+        emitBrowserState(win);
+      }
+    },
+    {
+      label: "Add folder",
+      click: () => win.webContents.send("browser:bookmark-folder-add-child", folder)
     },
     { type: "separator" },
     {
@@ -5181,11 +5430,18 @@ ipcMain.handle("browser:create-window", (_event, payload) => {
 
 ipcMain.handle("browser:show-bookmark-context-menu", (event, payload) => {
   const win = BrowserWindow.fromWebContents(event.sender);
-  if (!win || !payload?.bookmark?.id || !payload?.bookmark?.url) {
+  if (!win || !payload?.bookmark?.id) {
     return false;
   }
 
-  showBookmarkContextMenu(win, payload.bookmark, payload.showBookmarksBar !== false);
+  if (payload.bookmark.type === "folder") {
+    showBookmarkFolderContextMenu(win, payload.bookmark, payload.showBookmarksBar !== false);
+  } else {
+    if (!payload.bookmark.url) {
+      return false;
+    }
+    showBookmarkContextMenu(win, payload.bookmark, payload.showBookmarksBar !== false);
+  }
   return true;
 });
 
