@@ -668,6 +668,43 @@
 
               <div id="extensions-list" class="settings-list"></div>
             </div>
+
+            <div class="settings-card">
+              <div class="card-header">
+                <div>
+                  <span class="eyebrow">Appearance</span>
+                  <h3>Theme accent colors</h3>
+                </div>
+              </div>
+
+              <div class="form-grid four-up">
+                <label class="field">
+                  <span>Dark accent</span>
+                  <input id="settings-dark-accent" type="color" value="#e8003d">
+                </label>
+                <label class="field">
+                  <span>Dark hex</span>
+                  <input id="settings-dark-accent-hex" type="text" value="#e8003d" placeholder="#e8003d">
+                </label>
+                <label class="field">
+                  <span>Light accent</span>
+                  <input id="settings-light-accent" type="color" value="#6c3ee8">
+                </label>
+                <label class="field">
+                  <span>Light hex</span>
+                  <input id="settings-light-accent-hex" type="text" value="#6c3ee8" placeholder="#6c3ee8">
+                </label>
+              </div>
+
+              <div class="button-row compact">
+                <button id="save-theme-accents-button" type="button" class="primary-button">Save accent colors</button>
+                <button id="reset-theme-accents-button" type="button">Reset defaults</button>
+              </div>
+
+              <div class="settings-note">
+                Dark theme uses the red accent family and light theme uses the purple accent family by default. Change the base hex colors here and the rest of the accent shades are derived automatically.
+              </div>
+            </div>
           </div>
         </div>
       </section>
@@ -747,19 +784,102 @@
   <script>
     (function () {
       const STORAGE_KEY = "wpdesktop.theme";
+      const ACCENT_KEY = "wpdesktop.theme-accents";
+      const DEFAULT_ACCENTS = {
+        dark: "#e8003d",
+        light: "#6c3ee8"
+      };
       const html = document.documentElement;
       const btn = document.getElementById("theme-toggle-button");
       const icon = document.getElementById("theme-toggle-icon");
       const label = document.getElementById("theme-toggle-label");
 
+      function clamp(value, min, max) {
+        return Math.min(max, Math.max(min, value));
+      }
+
+      function normalizeHex(value, fallback) {
+        const raw = String(value || "").trim();
+        const full = /^#([0-9a-fA-F]{6})$/;
+        const short = /^#([0-9a-fA-F]{3})$/;
+        if (full.test(raw)) {
+          return raw.toLowerCase();
+        }
+        const shortMatch = raw.match(short);
+        if (shortMatch) {
+          const part = shortMatch[1].toLowerCase();
+          return `#${part[0]}${part[0]}${part[1]}${part[1]}${part[2]}${part[2]}`;
+        }
+        return fallback;
+      }
+
+      function hexToRgb(hex) {
+        const normalized = normalizeHex(hex, "#000000").slice(1);
+        return {
+          r: parseInt(normalized.slice(0, 2), 16),
+          g: parseInt(normalized.slice(2, 4), 16),
+          b: parseInt(normalized.slice(4, 6), 16)
+        };
+      }
+
+      function rgbToHex(rgb) {
+        const toHex = (value) => clamp(Math.round(value), 0, 255).toString(16).padStart(2, "0");
+        return `#${toHex(rgb.r)}${toHex(rgb.g)}${toHex(rgb.b)}`;
+      }
+
+      function mix(rgb, target, amount) {
+        return {
+          r: rgb.r + (target.r - rgb.r) * amount,
+          g: rgb.g + (target.g - rgb.g) * amount,
+          b: rgb.b + (target.b - rgb.b) * amount
+        };
+      }
+
+      function rgba(rgb, alpha) {
+        return `rgba(${Math.round(rgb.r)},${Math.round(rgb.g)},${Math.round(rgb.b)},${alpha})`;
+      }
+
+      function getSavedAccents() {
+        try {
+          const parsed = JSON.parse(localStorage.getItem(ACCENT_KEY) || "{}");
+          return {
+            dark: normalizeHex(parsed.dark, DEFAULT_ACCENTS.dark),
+            light: normalizeHex(parsed.light, DEFAULT_ACCENTS.light)
+          };
+        } catch (_) {
+          return { ...DEFAULT_ACCENTS };
+        }
+      }
+
+      function persistAccents(accents) {
+        localStorage.setItem(ACCENT_KEY, JSON.stringify(accents));
+      }
+
+      function applyAccentVars(theme, accentHex) {
+        const rgb = hexToRgb(accentHex);
+        const hover = rgbToHex(mix(rgb, { r: 255, g: 255, b: 255 }, theme === "dark" ? 0.12 : 0.08));
+        const strong = rgbToHex(mix(rgb, { r: 0, g: 0, b: 0 }, theme === "dark" ? 0.18 : 0.22));
+        html.style.setProperty("--accent", accentHex);
+        html.style.setProperty("--accent-hover", hover);
+        html.style.setProperty("--accent-strong", strong);
+        html.style.setProperty("--accent-dim", rgba(rgb, theme === "dark" ? 0.15 : 0.10));
+        html.style.setProperty("--accent-soft", rgba(rgb, theme === "dark" ? 0.08 : 0.07));
+        html.style.setProperty("--accent-glow", theme === "dark"
+          ? `0 0 18px ${rgba(rgb, 0.35)}`
+          : `0 0 14px ${rgba(rgb, 0.20)}`
+        );
+      }
+
       function applyTheme(theme) {
         html.setAttribute("data-theme", theme);
         localStorage.setItem(STORAGE_KEY, theme);
+        const accents = getSavedAccents();
+        applyAccentVars(theme, accents[theme] || DEFAULT_ACCENTS[theme]);
         if (theme === "dark") {
-          icon.textContent = "☀️";
+          icon.textContent = "??";
           label.textContent = "Light theme";
         } else {
-          icon.textContent = "🌙";
+          icon.textContent = "??";
           label.textContent = "Dark theme";
         }
       }
@@ -771,6 +891,25 @@
         const current = html.getAttribute("data-theme");
         applyTheme(current === "dark" ? "light" : "dark");
       });
+
+      window.wpDesktopThemeAccentApi = {
+        getAccents: getSavedAccents,
+        setAccents(nextAccents) {
+          const normalized = {
+            dark: normalizeHex(nextAccents?.dark, DEFAULT_ACCENTS.dark),
+            light: normalizeHex(nextAccents?.light, DEFAULT_ACCENTS.light)
+          };
+          persistAccents(normalized);
+          applyTheme(html.getAttribute("data-theme") || "dark");
+          return normalized;
+        },
+        resetAccents() {
+          persistAccents({ ...DEFAULT_ACCENTS });
+          applyTheme(html.getAttribute("data-theme") || "dark");
+          return { ...DEFAULT_ACCENTS };
+        },
+        defaults: { ...DEFAULT_ACCENTS }
+      };
     })();
   </script>
 </body>

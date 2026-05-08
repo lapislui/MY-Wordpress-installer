@@ -195,6 +195,12 @@ const elements = {
   openEdgeAddonsButton: document.getElementById("open-edge-addons-button"),
   openFirefoxAddonsButton: document.getElementById("open-firefox-addons-button"),
   extensionsList: document.getElementById("extensions-list"),
+  settingsDarkAccent: document.getElementById("settings-dark-accent"),
+  settingsDarkAccentHex: document.getElementById("settings-dark-accent-hex"),
+  settingsLightAccent: document.getElementById("settings-light-accent"),
+  settingsLightAccentHex: document.getElementById("settings-light-accent-hex"),
+  saveThemeAccentsButton: document.getElementById("save-theme-accents-button"),
+  resetThemeAccentsButton: document.getElementById("reset-theme-accents-button"),
   settingsPhpExe: document.getElementById("settings-php-exe"),
   settingsPhpConfig: document.getElementById("settings-php-config"),
   settingsPhpMyAdmin: document.getElementById("settings-phpmyadmin"),
@@ -817,6 +823,64 @@ function renderExtensionsSettings() {
 
     elements.extensionsList.appendChild(item);
   });
+}
+
+function normalizeThemeHex(value, fallback) {
+  const raw = String(value || "").trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(raw)) {
+    return raw.toLowerCase();
+  }
+  const shortMatch = raw.match(/^#([0-9a-fA-F]{3})$/);
+  if (shortMatch) {
+    const part = shortMatch[1].toLowerCase();
+    return `#${part[0]}${part[0]}${part[1]}${part[1]}${part[2]}${part[2]}`;
+  }
+  return fallback;
+}
+
+function getThemeAccentApi() {
+  return window.wpDesktopThemeAccentApi || null;
+}
+
+function renderThemeAccentInputs() {
+  const api = getThemeAccentApi();
+  if (!api || !elements.settingsDarkAccent) {
+    return;
+  }
+
+  const accents = api.getAccents();
+  elements.settingsDarkAccent.value = accents.dark;
+  elements.settingsDarkAccentHex.value = accents.dark;
+  elements.settingsLightAccent.value = accents.light;
+  elements.settingsLightAccentHex.value = accents.light;
+}
+
+function saveThemeAccentSettings() {
+  const api = getThemeAccentApi();
+  if (!api) {
+    setStatus("Theme accent editor is unavailable.");
+    return;
+  }
+
+  const defaults = api.defaults || { dark: "#e8003d", light: "#6c3ee8" };
+  const next = api.setAccents({
+    dark: normalizeThemeHex(elements.settingsDarkAccentHex.value || elements.settingsDarkAccent.value, defaults.dark),
+    light: normalizeThemeHex(elements.settingsLightAccentHex.value || elements.settingsLightAccent.value, defaults.light)
+  });
+  renderThemeAccentInputs();
+  setStatus(`Saved theme accent colors. Dark: ${next.dark}, Light: ${next.light}.`);
+}
+
+function resetThemeAccentSettings() {
+  const api = getThemeAccentApi();
+  if (!api) {
+    setStatus("Theme accent editor is unavailable.");
+    return;
+  }
+
+  api.resetAccents();
+  renderThemeAccentInputs();
+  setStatus("Reset theme accent colors to defaults.");
 }
 
 function hideExtensionsMenuPopup() {
@@ -1986,6 +2050,7 @@ function applySettingsPayload(settings) {
   renderSessionRules();
   renderExtensionsSettings();
   renderExtensionsMenuPopup();
+  renderThemeAccentInputs();
   renderSiteDetails();
 }
 
@@ -2353,6 +2418,12 @@ elements.extensionsMenuButton?.addEventListener("click", (event) => {
   event.stopPropagation();
   toggleExtensionsMenuPopup();
 });
+elements.settingsDarkAccent?.addEventListener("input", () => {
+  elements.settingsDarkAccentHex.value = elements.settingsDarkAccent.value;
+});
+elements.settingsLightAccent?.addEventListener("input", () => {
+  elements.settingsLightAccentHex.value = elements.settingsLightAccent.value;
+});
 document.addEventListener("pointerdown", (event) => {
   if (!isBookmarkFolderMenuOpen()) {
     const target = event.target;
@@ -2480,6 +2551,8 @@ elements.installExtensionArchiveButton?.addEventListener("click", async () => {
 elements.openChromeWebStoreButton?.addEventListener("click", () => void openUrlInAppBrowser("https://chromewebstore.google.com/category/extensions"));
 elements.openEdgeAddonsButton?.addEventListener("click", () => void openUrlInAppBrowser("https://microsoftedge.microsoft.com/addons/Microsoft-Edge-Extensions-Home"));
 elements.openFirefoxAddonsButton?.addEventListener("click", () => void openUrlInAppBrowser("https://addons.mozilla.org/en-US/firefox/extensions/"));
+elements.saveThemeAccentsButton?.addEventListener("click", saveThemeAccentSettings);
+elements.resetThemeAccentsButton?.addEventListener("click", resetThemeAccentSettings);
 elements.saveWpInstallDefaultsButton.addEventListener("click", () => void saveWpInstallDefaultsFromSettings());
 elements.openControlPanelButton.addEventListener("click", () =>
   void openExistingPath(state.xamppPaths?.controlPanelPath, "XAMPP control panel was not found.")
