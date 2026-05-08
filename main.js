@@ -8,6 +8,7 @@ const {
   BrowserView,
   Menu,
   clipboard,
+  desktopCapturer,
   dialog,
   ipcMain,
   session,
@@ -22,6 +23,49 @@ let lastFocusedWindow = null;
 const browserWindows = new Map();
 const configuredBrowserPartitions = new Set();
 const VAULT_CAPTURE_LOG_PREFIX = "__WP_DESKTOP_SAVE_CREDENTIAL__:";
+const AUTO_ALLOWED_BROWSER_PERMISSIONS = new Set([
+  "media",
+  "display-capture",
+  "speaker-selection",
+  "fullscreen",
+  "pointerLock",
+  "notifications",
+  "clipboard-sanitized-write"
+]);
+
+function getOriginFromUrl(value) {
+  try {
+    return value ? new URL(value).origin : "";
+  } catch (_) {
+    return "";
+  }
+}
+
+function shouldAutoAllowBrowserPermission(origin, permission) {
+  if (!origin || !permission) {
+    return false;
+  }
+
+  if (AUTO_ALLOWED_BROWSER_PERMISSIONS.has(permission)) {
+    return true;
+  }
+
+  const stored = getStoredPermissionDecision(origin, permission);
+  if (stored === "allow") {
+    return true;
+  }
+  if (stored === "block") {
+    return false;
+  }
+
+  try {
+    const hostname = new URL(origin).hostname;
+    const googleOrigin = hostname === "accounts.google.com" || hostname.endsWith(".google.com");
+    return googleOrigin && ["hid", "usb", "serial"].includes(permission);
+  } catch (_) {
+    return false;
+  }
+}
 
 function ignoreBrokenPipe(error) {
   if (error?.code === "EPIPE") {
@@ -1246,40 +1290,56 @@ function configureBrowserSession(win, partition) {
   const browserSession = session.fromPartition(partition);
   attachDownloadTracking(win, browserSession);
   browserSession.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
-    try {
-      const hostname = requestingOrigin ? new URL(requestingOrigin).hostname : "";
-      const googleOrigin = hostname === "accounts.google.com" || hostname.endsWith(".google.com");
-      if (googleOrigin && ["hid", "usb", "serial"].includes(permission)) {
-        return true;
-      }
-    } catch (_) {
-      // Ignore malformed origins.
-    }
-
-    return false;
+    const origin = getOriginFromUrl(requestingOrigin) || requestingOrigin || "";
+    return shouldAutoAllowBrowserPermission(origin, permission);
   });
 
   browserSession.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+    const origin = getOriginFromUrl(details?.requestingUrl) || getOriginFromUrl(details?.embeddingOrigin) || "";
+    const allowed = shouldAutoAllowBrowserPermission(origin, permission);
+    if (origin) {
+      savePermissionDecision(origin, permission, allowed ? "allow" : "block");
+    }
+    callback(allowed);
+  });
+
+  browserSession.setDisplayMediaRequestHandler(async (request, callback) => {
+    const origin = getOriginFromUrl(request?.securityOrigin);
+    if (origin) {
+      savePermissionDecision(origin, "display-capture", "allow");
+    }
     try {
-      const requestingUrl = details?.requestingUrl || "";
-      const hostname = requestingUrl ? new URL(requestingUrl).hostname : "";
-      const googleOrigin = hostname === "accounts.google.com" || hostname.endsWith(".google.com");
-      if (googleOrigin && ["hid", "usb", "serial"].includes(permission)) {
-        callback(true);
+      const sources = await desktopCapturer.getSources({
+        types: ["screen", "window"]
+      });
+      const source = sources.find((item) => item.display_id) || sources[0];
+      if (!source) {
+        callback({});
         return;
       }
-    } catch (_) {
-      // Ignore malformed request origins and fall through to deny.
-    }
 
-    callback(false);
+      callback({
+        video: source,
+        audio: "loopback"
+      });
+    } catch (_) {
+      callback({});
+    }
   });
 
   browserSession.setDevicePermissionHandler((details) => {
     try {
-      const hostname = details?.origin ? new URL(details.origin).hostname : "";
-      const googleOrigin = hostname === "accounts.google.com" || hostname.endsWith(".google.com");
-      return googleOrigin && ["hid", "usb", "serial"].includes(details.deviceType);
+      const origin = getOriginFromUrl(details?.origin) || details?.origin || "";
+      if (shouldAutoAllowBrowserPermission(origin, details.deviceType)) {
+        if (origin) {
+          savePermissionDecision(origin, details.deviceType, "allow");
+        }
+        return true;
+      }
+      if (origin) {
+        savePermissionDecision(origin, details.deviceType, "block");
+      }
+      return false;
     } catch (_) {
       return false;
     }
