@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -35,6 +35,11 @@
         <button class="nav-button" data-screen="settings">
           <span class="nav-button-short">S</span>
           <span class="nav-button-label">Settings</span>
+        </button>
+        <div class="sidebar-divider"></div>
+        <button id="theme-toggle-button" class="theme-toggle-button" type="button" title="Toggle theme">
+          <span class="theme-toggle-icon" id="theme-toggle-icon">☀️</span>
+          <span class="theme-toggle-label" id="theme-toggle-label">Light theme</span>
         </button>
       </nav>
 
@@ -739,5 +744,34 @@
   </div>
 
   <script src="./renderer.js"></script>
+  <script>
+    (function () {
+      const STORAGE_KEY = "wpdesktop.theme";
+      const html = document.documentElement;
+      const btn = document.getElementById("theme-toggle-button");
+      const icon = document.getElementById("theme-toggle-icon");
+      const label = document.getElementById("theme-toggle-label");
+
+      function applyTheme(theme) {
+        html.setAttribute("data-theme", theme);
+        localStorage.setItem(STORAGE_KEY, theme);
+        if (theme === "dark") {
+          icon.textContent = "☀️";
+          label.textContent = "Light theme";
+        } else {
+          icon.textContent = "🌙";
+          label.textContent = "Dark theme";
+        }
+      }
+
+      const saved = localStorage.getItem(STORAGE_KEY) || "dark";
+      applyTheme(saved);
+
+      btn.addEventListener("click", function () {
+        const current = html.getAttribute("data-theme");
+        applyTheme(current === "dark" ? "light" : "dark");
+      });
+    })();
+  </script>
 </body>
 </html>
