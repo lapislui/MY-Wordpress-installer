@@ -58,6 +58,7 @@ state.effectiveDbProfile = {
 state.mysqlConfigContent = "";
 state.shareLocalSiteSessions = true;
 state.shareOnlineSiteSessions = true;
+state.browserExtensions = [];
 
 const elements = {
   appShell: document.getElementById("app-shell"),
@@ -80,6 +81,8 @@ const elements = {
   tabSessionInfoButton: document.getElementById("tab-session-info-button"),
   newTabButton: document.getElementById("new-tab-button"),
   browserMenuButton: document.getElementById("browser-menu-button"),
+  extensionsMenuButton: document.getElementById("extensions-menu-button"),
+  extensionsMenuPopup: document.getElementById("extensions-menu-popup"),
   bookmarkPageButton: document.getElementById("bookmark-page-button"),
   browserFullscreenButton: document.getElementById("browser-fullscreen-button"),
   browserFeedback: document.getElementById("browser-feedback"),
@@ -186,6 +189,12 @@ const elements = {
   settingsShareOnlineSessions: document.getElementById("settings-share-online-sessions"),
   settingsMysqlEditor: document.getElementById("settings-mysql-editor"),
   saveMysqlConfigButton: document.getElementById("save-mysql-config-button"),
+  installExtensionFolderButton: document.getElementById("install-extension-folder-button"),
+  installExtensionArchiveButton: document.getElementById("install-extension-archive-button"),
+  openChromeWebStoreButton: document.getElementById("open-chrome-web-store-button"),
+  openEdgeAddonsButton: document.getElementById("open-edge-addons-button"),
+  openFirefoxAddonsButton: document.getElementById("open-firefox-addons-button"),
+  extensionsList: document.getElementById("extensions-list"),
   settingsPhpExe: document.getElementById("settings-php-exe"),
   settingsPhpConfig: document.getElementById("settings-php-config"),
   settingsPhpMyAdmin: document.getElementById("settings-phpmyadmin"),
@@ -637,6 +646,24 @@ async function handleBrowserMenuCommand(payload) {
     return;
   }
 
+  if (action === "extensions") {
+    showScreen("settings");
+    setStatus("Open Settings to manage browser extensions.");
+    return;
+  }
+
+  if (action === "extensions-install-folder") {
+    showScreen("settings");
+    elements.installExtensionFolderButton?.click();
+    return;
+  }
+
+  if (action === "extensions-install-zip") {
+    showScreen("settings");
+    elements.installExtensionArchiveButton?.click();
+    return;
+  }
+
   if (action === "settings") {
     showScreen("settings");
     return;
@@ -729,6 +756,118 @@ function renderSessionRules() {
 
   const ruleText = `${localRule} ${onlineRule} Tabs in the same group always reuse that group's profile.`;
   elements.sessionRulesCopy.textContent = ruleText;
+}
+
+function renderExtensionsSettings() {
+  if (!elements.extensionsList) {
+    return;
+  }
+
+  elements.extensionsList.innerHTML = "";
+  if (!state.browserExtensions.length) {
+    const empty = document.createElement("div");
+    empty.className = "settings-note";
+    empty.textContent = "No browser extensions installed yet.";
+    elements.extensionsList.appendChild(empty);
+    return;
+  }
+
+  state.browserExtensions.forEach((extension) => {
+    const item = document.createElement("div");
+    item.className = "settings-item";
+    item.innerHTML = `
+      <div class="settings-item-copy">
+        <strong>${escapeHtml(extension.name || "Extension")}</strong>
+        <span>${escapeHtml(extension.version || "Version unknown")} · ${escapeHtml(extension.sourceType === "zip" ? "zip import" : "folder import")} · ${extension.enabled ? "enabled" : "disabled"}</span>
+        <span>${escapeHtml(extension.unpackedPath || "")}</span>
+      </div>
+      <div class="button-row compact">
+        <button type="button" data-toggle-extension="${extension.id}">${extension.enabled ? "Disable" : "Enable"}</button>
+        <button type="button" data-open-extension="${extension.id}">Open</button>
+        <button type="button" data-remove-extension="${extension.id}">Remove</button>
+      </div>
+    `;
+
+    item.querySelector("[data-toggle-extension]")?.addEventListener("click", async () => {
+      try {
+        const result = await window.desktopAPI.setBrowserExtensionEnabled({
+          id: extension.id,
+          enabled: !extension.enabled
+        });
+        applySettingsPayload(result.settings);
+        setStatus(`${extension.name} ${extension.enabled ? "disabled" : "enabled"}.`);
+      } catch (error) {
+        setStatus(`Extension update failed: ${error.message}`);
+      }
+    });
+
+    item.querySelector("[data-open-extension]")?.addEventListener("click", () =>
+      void openExistingPath(extension.unpackedPath, "Extension folder was not found.")
+    );
+
+    item.querySelector("[data-remove-extension]")?.addEventListener("click", async () => {
+      try {
+        const result = await window.desktopAPI.removeBrowserExtension(extension.id);
+        applySettingsPayload(result.settings);
+        setStatus(`Removed ${extension.name}.`);
+      } catch (error) {
+        setStatus(`Extension removal failed: ${error.message}`);
+      }
+    });
+
+    elements.extensionsList.appendChild(item);
+  });
+}
+
+function hideExtensionsMenuPopup() {
+  elements.extensionsMenuPopup?.classList.add("hidden");
+}
+
+function toggleExtensionsMenuPopup() {
+  if (!elements.extensionsMenuPopup) {
+    return;
+  }
+  renderExtensionsMenuPopup();
+  elements.extensionsMenuPopup.classList.toggle("hidden");
+}
+
+function renderExtensionsMenuPopup() {
+  if (!elements.extensionsMenuPopup) {
+    return;
+  }
+
+  elements.extensionsMenuPopup.innerHTML = "";
+  const installed = state.browserExtensions.filter((extension) => extension.enabled);
+
+  if (!installed.length) {
+    const empty = document.createElement("div");
+    empty.className = "extensions-menu-empty";
+    empty.textContent = "No enabled extensions.";
+    elements.extensionsMenuPopup.appendChild(empty);
+    return;
+  }
+
+  installed.forEach((extension) => {
+    const item = document.createElement("div");
+    item.className = "extensions-menu-item";
+    item.innerHTML = `
+      ${extension.iconPath ? `<img src="${escapeHtml(extension.iconPath)}" alt="${escapeHtml(extension.name || "Extension")}" />` : `<span class="toolbar-icon-glyph">E</span>`}
+      <div class="extensions-menu-item-copy">
+        <strong>${escapeHtml(extension.name || "Extension")}</strong>
+        <span>${escapeHtml(extension.version || "Version unknown")}${extension.popupPath ? "" : " · no popup"}</span>
+      </div>
+      <button type="button" data-open-extension-popup="${extension.id}" ${extension.popupPath ? "" : "disabled"}>Open</button>
+    `;
+    item.querySelector("[data-open-extension-popup]")?.addEventListener("click", async () => {
+      try {
+        await window.desktopAPI.openBrowserExtensionPopup(extension.id);
+        hideExtensionsMenuPopup();
+      } catch (error) {
+        setBrowserFeedback(`Extension popup failed: ${error.message}`, "error");
+      }
+    });
+    elements.extensionsMenuPopup.appendChild(item);
+  });
 }
 
 function getTabSessionLabel(tab) {
@@ -1834,6 +1973,7 @@ function applySettingsPayload(settings) {
   state.wpInstallEmail = settings.wpInstallEmail || "";
   state.shareLocalSiteSessions = settings.shareLocalSiteSessions !== false;
   state.shareOnlineSiteSessions = settings.shareOnlineSiteSessions === true;
+  state.browserExtensions = Array.isArray(settings.browserExtensions) ? settings.browserExtensions : [];
 
   elements.htdocsPath.value = state.htdocsPath;
   elements.settingsHtdocsPath.value = state.htdocsPath;
@@ -1844,6 +1984,8 @@ function applySettingsPayload(settings) {
 
   renderXamppSettings();
   renderSessionRules();
+  renderExtensionsSettings();
+  renderExtensionsMenuPopup();
   renderSiteDetails();
 }
 
@@ -2207,8 +2349,16 @@ elements.bookmarkFolderNameInput.addEventListener("keydown", (event) => {
     closeBookmarkFolderDialog();
   }
 });
+elements.extensionsMenuButton?.addEventListener("click", (event) => {
+  event.stopPropagation();
+  toggleExtensionsMenuPopup();
+});
 document.addEventListener("pointerdown", (event) => {
   if (!isBookmarkFolderMenuOpen()) {
+    const target = event.target;
+    if (!(target instanceof Element) || !target.closest(".extension-menu-shell")) {
+      hideExtensionsMenuPopup();
+    }
     return;
   }
 
@@ -2217,14 +2367,21 @@ document.addEventListener("pointerdown", (event) => {
     target.closest("#bookmark-context-menu")
     || target.closest(".bookmark-folder-chip")
   )) {
+    if (!target.closest(".extension-menu-shell")) {
+      hideExtensionsMenuPopup();
+    }
     return;
   }
 
   hideBookmarkFolderMenu();
+  hideExtensionsMenuPopup();
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && isBookmarkFolderMenuOpen()) {
     hideBookmarkFolderMenu();
+  }
+  if (event.key === "Escape") {
+    hideExtensionsMenuPopup();
   }
 });
 elements.vaultSaveButton.addEventListener("click", () => void saveCurrentSiteCredentials());
@@ -2294,6 +2451,35 @@ elements.openMysqlConfigButton.addEventListener("click", () =>
 elements.settingsShareLocalSessions.addEventListener("change", () => void updateLocalSessionSharing());
 elements.settingsShareOnlineSessions.addEventListener("change", () => void updateOnlineSessionSharing());
 elements.saveMysqlConfigButton.addEventListener("click", () => void saveMysqlConfigFromSettings());
+elements.installExtensionFolderButton?.addEventListener("click", async () => {
+  const selected = await window.desktopAPI.pickFolder();
+  if (!selected) {
+    return;
+  }
+  try {
+    const result = await window.desktopAPI.installBrowserExtensionFromFolder(selected);
+    applySettingsPayload(result.settings);
+    setStatus(`Installed extension from ${selected}.`);
+  } catch (error) {
+    setStatus(`Extension install failed: ${error.message}`);
+  }
+});
+elements.installExtensionArchiveButton?.addEventListener("click", async () => {
+  const selected = await window.desktopAPI.pickExtensionArchive();
+  if (!selected) {
+    return;
+  }
+  try {
+    const result = await window.desktopAPI.installBrowserExtensionFromArchive(selected);
+    applySettingsPayload(result.settings);
+    setStatus(`Installed extension from ${selected}.`);
+  } catch (error) {
+    setStatus(`Extension install failed: ${error.message}`);
+  }
+});
+elements.openChromeWebStoreButton?.addEventListener("click", () => void openUrlInAppBrowser("https://chromewebstore.google.com/category/extensions"));
+elements.openEdgeAddonsButton?.addEventListener("click", () => void openUrlInAppBrowser("https://microsoftedge.microsoft.com/addons/Microsoft-Edge-Extensions-Home"));
+elements.openFirefoxAddonsButton?.addEventListener("click", () => void openUrlInAppBrowser("https://addons.mozilla.org/en-US/firefox/extensions/"));
 elements.saveWpInstallDefaultsButton.addEventListener("click", () => void saveWpInstallDefaultsFromSettings());
 elements.openControlPanelButton.addEventListener("click", () =>
   void openExistingPath(state.xamppPaths?.controlPanelPath, "XAMPP control panel was not found.")

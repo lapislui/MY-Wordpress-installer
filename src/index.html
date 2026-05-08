@@ -57,6 +57,10 @@
             <div id="address-suggestions" class="address-suggestions hidden" aria-live="polite"></div>
           </form>
           <div class="toolbar-actions">
+            <div class="extension-menu-shell">
+              <button id="extensions-menu-button" class="icon-button toolbar-icon-button" type="button" title="Extensions" aria-label="Extensions"><span class="toolbar-icon-glyph">&#x29C9;</span></button>
+              <div id="extensions-menu-popup" class="extensions-menu-popup hidden"></div>
+            </div>
             <button id="bookmark-page-button" class="icon-button toolbar-icon-button" type="button" title="Bookmark" aria-label="Bookmark"><span class="toolbar-icon-glyph">&#x2606;</span></button>
             <button id="vault-toggle-button" class="icon-button toolbar-icon-button" type="button" title="Developer Tools" aria-label="Developer Tools"><span class="toolbar-icon-glyph">&lt;/&gt;</span></button>
             <button id="browser-menu-button" class="icon-button toolbar-icon-button" type="button" title="Browser Menu" aria-label="Browser Menu"><span class="toolbar-icon-glyph">&#x22EE;</span></button>
@@ -635,6 +639,29 @@
                   <button id="open-phpmyadmin-folder-button" type="button">Open</button>
                 </div>
               </div>
+            </div>
+
+            <div class="settings-card settings-card-wide">
+              <div class="card-header">
+                <div>
+                  <span class="eyebrow">Browser extensions</span>
+                  <h3>Chromium extension manager</h3>
+                </div>
+              </div>
+
+              <div class="button-row compact">
+                <button id="install-extension-folder-button" type="button" class="primary-button">Install folder</button>
+                <button id="install-extension-archive-button" type="button">Install zip</button>
+                <button id="open-chrome-web-store-button" type="button">Chrome Web Store</button>
+                <button id="open-edge-addons-button" type="button">Edge Add-ons</button>
+                <button id="open-firefox-addons-button" type="button">Firefox Add-ons</button>
+              </div>
+
+              <div class="settings-note">
+                Electron can only run unpacked Chromium-compatible extensions. Direct Chrome Web Store, Edge Add-ons, packed <code>.crx</code>, and Firefox <code>.xpi</code> installs are not supported by the runtime, so use an unpacked folder or a <code>.zip</code> that contains an unpacked extension.
+              </div>
+
+              <div id="extensions-list" class="settings-list"></div>
             </div>
           </div>
         </div>

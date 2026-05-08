@@ -22,6 +22,7 @@ const AdmZip = require("adm-zip");
 let lastFocusedWindow = null;
 const browserWindows = new Map();
 const configuredBrowserPartitions = new Set();
+const extensionLoadFailures = new Map();
 const VAULT_CAPTURE_LOG_PREFIX = "__WP_DESKTOP_SAVE_CREDENTIAL__:";
 const AUTO_ALLOWED_BROWSER_PERMISSIONS = new Set([
   "media",
@@ -504,7 +505,8 @@ function getDefaultSettings() {
     downloadDirectory: app.getPath("downloads"),
     browserPermissions: {},
     browserBookmarks: [],
-    browserShowBookmarksBar: true
+    browserShowBookmarksBar: true,
+    browserExtensions: []
   };
 }
 
@@ -577,6 +579,37 @@ function normalizeSettings(input = {}) {
         .filter(Boolean)
     : [];
 
+  const extensions = Array.isArray(input.browserExtensions)
+    ? input.browserExtensions
+        .map((entry) => {
+          if (!entry || typeof entry !== "object") {
+            return null;
+          }
+          const id = String(entry.id || "").trim();
+          const name = String(entry.name || "").trim();
+          const sourcePath = String(entry.sourcePath || "").trim();
+          const unpackedPath = String(entry.unpackedPath || "").trim();
+          const sourceType = entry.sourceType === "zip" ? "zip" : "folder";
+          if (!id || !name || !sourcePath || !unpackedPath) {
+            return null;
+          }
+          return {
+            id,
+            name,
+            version: String(entry.version || "").trim(),
+            sourceType,
+            sourcePath,
+            unpackedPath,
+            extensionId: String(entry.extensionId || "").trim(),
+            enabled: entry.enabled !== false,
+            pinned: entry.pinned === true,
+            popupPath: String(entry.popupPath || "").trim(),
+            iconPath: String(entry.iconPath || "").trim()
+          };
+        })
+        .filter(Boolean)
+    : [];
+
   return {
     xamppRootPath: input.xamppRootPath || getXamppRootFromHtdocs(input.htdocsPath || "") || getDefaultXamppRootPath(),
     htdocsPath: input.htdocsPath || (input.xamppRootPath ? path.join(input.xamppRootPath, "htdocs") : getDefaultHtdocsPath()),
@@ -590,7 +623,8 @@ function normalizeSettings(input = {}) {
     downloadDirectory: input.downloadDirectory || app.getPath("downloads"),
     browserPermissions: permissions,
     browserBookmarks: bookmarks,
-    browserShowBookmarksBar: input.browserShowBookmarksBar !== false
+    browserShowBookmarksBar: input.browserShowBookmarksBar !== false,
+    browserExtensions: extensions
   };
 }
 
@@ -1282,6 +1316,327 @@ function getUniqueDownloadPath(targetDirectory, filename) {
   return candidate;
 }
 
+function getExtensionsStoragePath() {
+  const target = path.join(app.getPath("userData"), "browser-extensions");
+  fs.mkdirSync(target, { recursive: true });
+  return target;
+}
+
+function findManifestRoot(directoryPath, depth = 0) {
+  if (!directoryPath || !fs.existsSync(directoryPath) || depth > 2) {
+    return null;
+  }
+
+  const manifestPath = path.join(directoryPath, "manifest.json");
+  if (fs.existsSync(manifestPath)) {
+    return directoryPath;
+  }
+
+  const children = fs.readdirSync(directoryPath, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => findManifestRoot(path.join(directoryPath, entry.name), depth + 1))
+    .filter(Boolean);
+
+  return children[0] || null;
+}
+
+function readExtensionManifest(extensionRoot) {
+  const manifestPath = path.join(extensionRoot, "manifest.json");
+  if (!fs.existsSync(manifestPath)) {
+    throw new Error("manifest.json was not found.");
+  }
+
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const name = String(manifest.name || "").trim();
+  if (!name) {
+    throw new Error("Extension manifest is missing a name.");
+  }
+
+  const popupPath = String(
+    manifest.action?.default_popup
+    || manifest.browser_action?.default_popup
+    || ""
+  ).trim();
+  const icons = manifest.icons && typeof manifest.icons === "object" ? manifest.icons : {};
+  const bestIconKey = Object.keys(icons)
+    .sort((left, right) => Number(right) - Number(left))
+    .find((key) => Boolean(icons[key]));
+  const iconPath = bestIconKey ? String(icons[bestIconKey] || "").trim() : "";
+
+  return {
+    name,
+    version: String(manifest.version || "").trim(),
+    popupPath,
+    iconPath,
+    manifest
+  };
+}
+
+function getBrowserExtensions() {
+  return getSettings().browserExtensions || [];
+}
+
+async function loadExtensionIntoSession(browserSession, extensionEntry) {
+  if (!extensionEntry?.enabled || !extensionEntry.unpackedPath || !fs.existsSync(extensionEntry.unpackedPath)) {
+    return null;
+  }
+
+  const existing = browserSession.extensions.getAllExtensions().find((item) => item.path === extensionEntry.unpackedPath);
+  if (existing) {
+    return existing;
+  }
+
+  return browserSession.extensions.loadExtension(extensionEntry.unpackedPath, {
+    allowFileAccess: true
+  });
+}
+
+async function loadConfiguredExtensionsForSession(browserSession, partition) {
+  const settings = getSettings();
+  for (const extensionEntry of settings.browserExtensions || []) {
+    if (!extensionEntry.enabled) {
+      continue;
+    }
+    try {
+      const loaded = await loadExtensionIntoSession(browserSession, extensionEntry);
+      if (loaded && (extensionEntry.extensionId !== loaded.id || extensionEntry.name !== loaded.name || extensionEntry.version !== loaded.version)) {
+        const fresh = getSettings();
+        const current = (fresh.browserExtensions || []).find((item) => item.id === extensionEntry.id);
+        if (current) {
+          current.extensionId = loaded.id;
+          current.name = loaded.name || current.name;
+          current.version = loaded.version || current.version;
+          saveSettings(fresh);
+        }
+      }
+      extensionLoadFailures.delete(`${partition}::${extensionEntry.id}`);
+    } catch (error) {
+      extensionLoadFailures.set(`${partition}::${extensionEntry.id}`, error.message || "Load failed");
+    }
+  }
+}
+
+function getConfiguredBrowserSessions() {
+  return Array.from(configuredBrowserPartitions).map((partition) => ({
+    partition,
+    browserSession: session.fromPartition(partition)
+  }));
+}
+
+async function loadExtensionAcrossConfiguredSessions(extensionEntry) {
+  for (const { partition, browserSession } of getConfiguredBrowserSessions()) {
+    try {
+      const loaded = await loadExtensionIntoSession(browserSession, extensionEntry);
+      if (loaded && (extensionEntry.extensionId !== loaded.id || extensionEntry.name !== loaded.name || extensionEntry.version !== loaded.version)) {
+        const fresh = getSettings();
+        const current = (fresh.browserExtensions || []).find((item) => item.id === extensionEntry.id);
+        if (current) {
+          current.extensionId = loaded.id;
+          current.name = loaded.name || current.name;
+          current.version = loaded.version || current.version;
+          saveSettings(fresh);
+          extensionEntry.extensionId = current.extensionId;
+          extensionEntry.name = current.name;
+          extensionEntry.version = current.version;
+        }
+      }
+      extensionLoadFailures.delete(`${partition}::${extensionEntry.id}`);
+    } catch (error) {
+      extensionLoadFailures.set(`${partition}::${extensionEntry.id}`, error.message || "Load failed");
+    }
+  }
+}
+
+async function unloadExtensionAcrossConfiguredSessions(extensionEntry) {
+  for (const { browserSession } of getConfiguredBrowserSessions()) {
+    const loaded = browserSession.extensions.getAllExtensions().find((item) =>
+      item.id === extensionEntry.extensionId || item.path === extensionEntry.unpackedPath
+    );
+    if (loaded) {
+      await browserSession.extensions.removeExtension(loaded.id);
+    }
+  }
+}
+
+function upsertBrowserExtension(entry) {
+  const settings = getSettings();
+  settings.browserExtensions = settings.browserExtensions || [];
+  const existingIndex = settings.browserExtensions.findIndex((item) =>
+    item.sourcePath === entry.sourcePath || item.unpackedPath === entry.unpackedPath
+  );
+  if (existingIndex >= 0) {
+    settings.browserExtensions[existingIndex] = {
+      ...settings.browserExtensions[existingIndex],
+      ...entry
+    };
+  } else {
+    settings.browserExtensions.unshift(entry);
+  }
+  saveSettings(settings);
+  return settings.browserExtensions.find((item) => item.id === entry.id)
+    || settings.browserExtensions[existingIndex]
+    || entry;
+}
+
+async function installBrowserExtensionFromFolder(folderPath) {
+  const resolvedRoot = findManifestRoot(folderPath);
+  if (!resolvedRoot) {
+    throw new Error("No unpacked Chromium extension was found in that folder.");
+  }
+
+  const { name, version, popupPath, iconPath } = readExtensionManifest(resolvedRoot);
+  const extensionEntry = upsertBrowserExtension({
+    id: `extension-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    name,
+    version,
+    sourceType: "folder",
+    sourcePath: folderPath,
+    unpackedPath: resolvedRoot,
+    extensionId: "",
+    enabled: true,
+    pinned: false,
+    popupPath,
+    iconPath: iconPath ? path.join(resolvedRoot, iconPath) : ""
+  });
+
+  await loadExtensionAcrossConfiguredSessions(extensionEntry);
+  return extensionEntry;
+}
+
+async function installBrowserExtensionFromArchive(archivePath) {
+  const archiveName = path.basename(archivePath, path.extname(archivePath));
+  const targetDirectory = path.join(
+    getExtensionsStoragePath(),
+    `${archiveName}-${Date.now()}`
+  );
+  fs.mkdirSync(targetDirectory, { recursive: true });
+  const zip = new AdmZip(archivePath);
+  zip.extractAllTo(targetDirectory, true);
+
+  const resolvedRoot = findManifestRoot(targetDirectory);
+  if (!resolvedRoot) {
+    throw new Error("The zip does not contain an unpacked Chromium extension.");
+  }
+
+  const { name, version, popupPath, iconPath } = readExtensionManifest(resolvedRoot);
+  const extensionEntry = upsertBrowserExtension({
+    id: `extension-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    name,
+    version,
+    sourceType: "zip",
+    sourcePath: archivePath,
+    unpackedPath: resolvedRoot,
+    extensionId: "",
+    enabled: true,
+    pinned: false,
+    popupPath,
+    iconPath: iconPath ? path.join(resolvedRoot, iconPath) : ""
+  });
+
+  await loadExtensionAcrossConfiguredSessions(extensionEntry);
+  return extensionEntry;
+}
+
+async function setBrowserExtensionEnabled(extensionId, enabled) {
+  const settings = getSettings();
+  const extensionEntry = (settings.browserExtensions || []).find((item) => item.id === extensionId);
+  if (!extensionEntry) {
+    throw new Error("Extension not found.");
+  }
+
+  extensionEntry.enabled = Boolean(enabled);
+  saveSettings(settings);
+
+  if (extensionEntry.enabled) {
+    await loadExtensionAcrossConfiguredSessions(extensionEntry);
+  } else {
+    await unloadExtensionAcrossConfiguredSessions(extensionEntry);
+  }
+
+  return extensionEntry;
+}
+
+function setBrowserExtensionPinned(extensionId, pinned) {
+  const settings = getSettings();
+  const extensionEntry = (settings.browserExtensions || []).find((item) => item.id === extensionId);
+  if (!extensionEntry) {
+    throw new Error("Extension not found.");
+  }
+
+  extensionEntry.pinned = Boolean(pinned);
+  saveSettings(settings);
+  return extensionEntry;
+}
+
+async function removeBrowserExtension(extensionId) {
+  const settings = getSettings();
+  const index = (settings.browserExtensions || []).findIndex((item) => item.id === extensionId);
+  if (index === -1) {
+    throw new Error("Extension not found.");
+  }
+
+  const [extensionEntry] = settings.browserExtensions.splice(index, 1);
+  saveSettings(settings);
+  await unloadExtensionAcrossConfiguredSessions(extensionEntry);
+  return extensionEntry;
+}
+
+function toChromeExtensionUrl(extensionId, relativePath) {
+  const normalizedPath = String(relativePath || "").replace(/\\/g, "/").replace(/^\/+/, "");
+  return `chrome-extension://${extensionId}/${normalizedPath}`;
+}
+
+function getExtensionByInternalId(extensionId) {
+  return getBrowserExtensions().find((item) => item.id === extensionId) || null;
+}
+
+function openBrowserExtensionPopup(win, extensionId) {
+  const extensionEntry = getExtensionByInternalId(extensionId);
+  if (!extensionEntry) {
+    throw new Error("Extension not found.");
+  }
+  if (!extensionEntry.enabled) {
+    throw new Error("Enable the extension before opening it.");
+  }
+  if (!extensionEntry.extensionId || !extensionEntry.popupPath) {
+    throw new Error("This extension does not expose a popup.");
+  }
+
+  const activeTab = getActiveBrowserTab(win);
+  const popupPartition = activeTab?.partition || "persist:online-shared";
+  configureBrowserSession(win, popupPartition);
+
+  const child = new BrowserWindow({
+    parent: win,
+    width: 420,
+    height: 560,
+    show: false,
+    resizable: true,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    autoHideMenuBar: true,
+    title: extensionEntry.name || "Extension",
+    backgroundColor: "#202124",
+    webPreferences: {
+      partition: popupPartition,
+      sandbox: true,
+      contextIsolation: true,
+      nodeIntegration: false,
+      webSecurity: true
+    }
+  });
+
+  child.once("ready-to-show", () => {
+    if (!child.isDestroyed()) {
+      child.show();
+    }
+  });
+
+  child.loadURL(toChromeExtensionUrl(extensionEntry.extensionId, extensionEntry.popupPath));
+  return true;
+}
+
 function configureBrowserSession(win, partition) {
   if (configuredBrowserPartitions.has(partition)) {
     return;
@@ -1382,6 +1737,8 @@ function configureBrowserSession(win, partition) {
       callback({ confirmed: false, pin: null });
     }
   });
+
+  void loadConfiguredExtensionsForSession(browserSession, partition);
 
   configuredBrowserPartitions.add(partition);
 }
@@ -4594,7 +4951,20 @@ function showBrowserAppMenu(win, position = {}) {
     },
     {
       label: "Extensions",
-      submenu: [{ label: "Coming soon", enabled: false }]
+      submenu: [
+        {
+          label: "Manage extensions",
+          click: () => emitBrowserMenuCommand(win, { action: "extensions" })
+        },
+        {
+          label: "Install extension from folder",
+          click: () => emitBrowserMenuCommand(win, { action: "extensions-install-folder" })
+        },
+        {
+          label: "Install extension from zip",
+          click: () => emitBrowserMenuCommand(win, { action: "extensions-install-zip" })
+        }
+      ]
     },
     {
       label: "Passwords",
@@ -5216,6 +5586,20 @@ ipcMain.handle("dialog:pick-zip", async () => {
   return result.filePaths[0];
 });
 
+ipcMain.handle("dialog:pick-extension-archive", async () => {
+  const result = await dialog.showOpenDialog({
+    title: "Select extension zip",
+    properties: ["openFile"],
+    filters: [{ name: "Zip archives", extensions: ["zip"] }]
+  });
+
+  if (result.canceled || !result.filePaths[0]) {
+    return null;
+  }
+
+  return result.filePaths[0];
+});
+
 ipcMain.handle("dialog:save-backup", async (_event, siteName) => {
   const result = await dialog.showSaveDialog({
     title: "Save site backup",
@@ -5505,6 +5889,14 @@ ipcMain.handle("browser:show-bookmark-context-menu", (event, payload) => {
   return true;
 });
 
+ipcMain.handle("browser:open-extension-popup", (event, extensionId) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win || !extensionId) {
+    return false;
+  }
+  return openBrowserExtensionPopup(win, extensionId);
+});
+
 ipcMain.handle("browser:show-tab-context-menu", (event, tabId) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win || !tabId) {
@@ -5733,6 +6125,46 @@ ipcMain.handle("settings:save-wp-install-defaults", async (_event, payload) => {
     effectiveDbProfile: getEffectiveDbProfile(settings),
     mysqlConfigContent: readMysqlConfigContent(settings),
     xamppPaths: getXamppPathsSummary(settings)
+  };
+});
+
+ipcMain.handle("settings:install-browser-extension-folder", async (_event, folderPath) => {
+  const extension = await installBrowserExtensionFromFolder(folderPath);
+  return {
+    extension,
+    settings: getSettings()
+  };
+});
+
+ipcMain.handle("settings:install-browser-extension-archive", async (_event, archivePath) => {
+  const extension = await installBrowserExtensionFromArchive(archivePath);
+  return {
+    extension,
+    settings: getSettings()
+  };
+});
+
+ipcMain.handle("settings:set-browser-extension-enabled", async (_event, payload) => {
+  const extension = await setBrowserExtensionEnabled(payload?.id, payload?.enabled);
+  return {
+    extension,
+    settings: getSettings()
+  };
+});
+
+ipcMain.handle("settings:set-browser-extension-pinned", async (_event, payload) => {
+  const extension = setBrowserExtensionPinned(payload?.id, payload?.pinned);
+  return {
+    extension,
+    settings: getSettings()
+  };
+});
+
+ipcMain.handle("settings:remove-browser-extension", async (_event, extensionId) => {
+  const extension = await removeBrowserExtension(extensionId);
+  return {
+    extension,
+    settings: getSettings()
   };
 });
 
