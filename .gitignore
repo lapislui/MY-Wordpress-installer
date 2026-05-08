@@ -12,3 +12,4 @@ coverage/
 *.tmp
 *.swp
 early-dist/
+beat-v2-dist/
