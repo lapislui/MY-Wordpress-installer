@@ -939,6 +939,14 @@ function getTabSessionLabel(tab) {
   return profileName ? `Profile: ${profileName}` : "Profile: temporary-session";
 }
 
+function getDisplaySessionName(rawName) {
+  const value = String(rawName || "").trim();
+  if (!value) {
+    return "temporary-session";
+  }
+  return value.replace(/^persist(?::)?/i, "");
+}
+
 function getTabGroupLabel(tab) {
   const groupName = String(tab?.groupName || "").trim();
   return groupName ? `Group: ${groupName}` : "Group: none";
@@ -949,8 +957,8 @@ function getTabSessionInfoCopy(tab) {
     return "No active tab is available.";
   }
 
-  const profileName = String(tab.sessionProfileName || tab.partition || "temporary-session").trim();
-  return `Persist session: ${profileName}.`;
+  const profileName = getDisplaySessionName(tab.sessionProfileName || tab.partition || "temporary-session");
+  return `Session: ${profileName}`;
 }
 
 function getBrowserToolSections() {
@@ -1774,11 +1782,6 @@ function renderTabSessionTooltips() {
     return;
   }
 
-  const shellRect = layer.parentElement?.getBoundingClientRect();
-  if (!shellRect) {
-    return;
-  }
-
   const renderedGroups = new Set();
 
   state.browser.tabs.forEach((tab) => {
@@ -1803,8 +1806,8 @@ function renderTabSessionTooltips() {
     const tooltip = document.createElement("div");
     tooltip.className = "tab-session-tooltip";
     tooltip.textContent = tooltipText;
-    tooltip.style.left = `${anchorRect.left - shellRect.left + anchorRect.width / 2}px`;
-    tooltip.style.bottom = `${shellRect.bottom - anchorRect.top + 10}px`;
+    tooltip.style.left = `${anchorRect.left + anchorRect.width / 2}px`;
+    tooltip.style.top = `${anchorRect.top - 10}px`;
     layer.appendChild(tooltip);
   });
 }

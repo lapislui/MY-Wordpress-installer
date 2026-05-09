@@ -781,8 +781,8 @@ button, input, select, textarea { font: inherit; }
 .tab-close:hover { color: var(--accent); transform: none; }
 
 .tab-session-tooltip {
-  position: absolute;
-  transform: translate(-50%,0);
+  position: fixed;
+  transform: translate(-50%,-100%);
   min-width: 160px;
   max-width: 240px;
   padding: 7px 10px;
@@ -795,7 +795,7 @@ button, input, select, textarea { font: inherit; }
   text-align: left;
   white-space: normal;
   box-shadow: var(--shadow);
-  z-index: 200;
+  z-index: 320;
   pointer-events: none;
 }
 .tab-session-tooltip::after {
