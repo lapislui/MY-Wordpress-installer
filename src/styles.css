@@ -1110,6 +1110,21 @@ button:hover { transform: translateY(-1px); }
   margin: 0;
 }
 .vault-note { margin-top: 4px; }
+.session-save-card {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+.session-save-heading {
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.session-delay-field { margin-top: 8px; }
 
 /* ─── Focus mode ─────────────────────────────────────────────── */
 .app-shell.browser-focus-mode {
@@ -1312,6 +1327,36 @@ button:hover { transform: translateY(-1px); }
 .progress-card.hidden { display: none; }
 .progress-copy { display: grid; gap: 4px; }
 .progress-copy p { margin: 0; color: var(--muted); font-size: 0.88rem; }
+.installer-service-card {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-2);
+}
+.installer-service-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.installer-service-summary {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+.installer-service-grid {
+  display: grid;
+  gap: 6px;
+}
+.installer-service-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.88rem;
+}
+.installer-service-row span { color: var(--text-dim); }
+.installer-service-row strong { color: var(--text); font-weight: 600; }
 
 .create-progress { display: grid; grid-template-columns: 72px minmax(0,1fr); gap: 12px; align-items: center; }
 .circular-progress-shell { position: relative; width: 64px; height: 64px; }

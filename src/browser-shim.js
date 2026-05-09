@@ -84,6 +84,8 @@
     browserShowBookmarkContextMenu: asyncNull,
     browserShowTabContextMenu: asyncNull,
     browserSetTabNickname: asyncNull,
+    browserSaveTabSession: asyncNull,
+    browserUnsaveTabSession: asyncNull,
     browserShowBookmarkSaveDialog: asyncNull,
 
     testDb: () => Promise.resolve({ ok: false, error: "Not available in browser preview." }),
@@ -101,6 +103,8 @@
     setHtdocsPath: asyncNull,
     setLocalSessionSharing: asyncNull,
     setOnlineSessionSharing: asyncNull,
+    setSessionAutoSaveScope: asyncNull,
+    setSessionAutoSaveDelay: asyncNull,
     saveMysqlConfig: asyncNull,
     saveWpInstallDefaults: asyncNull,
     installBrowserExtensionFromFolder: asyncNull,

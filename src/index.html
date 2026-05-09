@@ -225,6 +225,30 @@
                 <div class="vault-note">
                   Turn this on to let tabs from the same online site reuse one persistent session. Leave it off to keep non-local browsing isolated per tab.
                 </div>
+                <div class="session-save-card">
+                  <div class="session-save-heading">Saved session for current tab</div>
+                  <div id="session-save-active-copy" class="vault-note">Open a tab to save or autosave its session.</div>
+                  <div class="button-row compact">
+                    <button id="session-autosave-button" type="button">Autosave</button>
+                    <button id="session-save-button" type="button">Save</button>
+                    <button id="session-unsave-button" type="button">Unsave</button>
+                  </div>
+                </div>
+                <label class="checkbox-row">
+                  <input id="settings-autosave-local-sessions" type="checkbox">
+                  <span>Autosave saved local tabs</span>
+                </label>
+                <label class="checkbox-row">
+                  <input id="settings-autosave-online-sessions" type="checkbox">
+                  <span>Autosave saved online tabs</span>
+                </label>
+                <label class="field session-delay-field">
+                  <span>Autosave delay in seconds</span>
+                  <input id="settings-session-autosave-delay" type="number" min="1" step="1" value="5">
+                </label>
+                <div class="vault-note">
+                  Saved sessions are matched by tab name and group name. Tabs in the same group still share a group profile unless a saved tab session overrides it.
+                </div>
               </div>
             </section>
             <section class="browser-tool-section" data-tool-section="downloads" draggable="true">
@@ -761,6 +785,23 @@
 
       <div class="settings-note">
         This enables <code>WP_ALLOW_MULTISITE</code> in <code>wp-config.php</code> as soon as WordPress creates it, so you can finish Network Setup from wp-admin.
+      </div>
+
+      <div class="installer-service-card">
+        <div class="installer-service-head">
+          <strong>XAMPP services</strong>
+          <span id="installer-service-summary" class="installer-service-summary">Checking Apache and MySQL...</span>
+        </div>
+        <div class="installer-service-grid">
+          <div class="installer-service-row">
+            <span>Apache</span>
+            <strong id="installer-apache-status">Checking...</strong>
+          </div>
+          <div class="installer-service-row">
+            <span>MySQL</span>
+            <strong id="installer-mysql-status">Checking...</strong>
+          </div>
+        </div>
       </div>
 
       <div class="button-row compact">

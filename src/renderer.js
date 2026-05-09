@@ -19,7 +19,8 @@ const state = {
   isEditingAddress: false,
   htdocsPath: "",
   apacheRunning: false,
-  xamppPaths: null
+  xamppPaths: null,
+  xamppServiceStatus: null
 };
 
 const progressState = {
@@ -39,8 +40,11 @@ let addressSuggestionsToken = 0;
 let draggedBrowserToolSection = null;
 let bookmarkFolderDialogContext = null;
 let draggedBookmarkId = null;
+let xamppStatusRefreshTimer = null;
+let xamppStatusRefreshInFlight = null;
 const BROWSER_TOOL_ORDER_KEY = "wp-desktop.browser-tool-order";
 const BROWSER_TOOL_COLLAPSE_KEY = "wp-desktop.browser-tool-collapse";
+const XAMPP_STATUS_REFRESH_INTERVAL_MS = 5000;
 const DEFAULT_BROWSER_TOOL_ORDER = ["sessions", "credentials", "bookmarks", "downloads", "permissions"];
 const DEFAULT_BROWSER_TOOL_COLLAPSE = {
   sessions: false,
@@ -58,7 +62,65 @@ state.effectiveDbProfile = {
 state.mysqlConfigContent = "";
 state.shareLocalSiteSessions = true;
 state.shareOnlineSiteSessions = true;
+state.autoSaveLocalTabSessions = false;
+state.autoSaveOnlineTabSessions = false;
+state.sessionAutoSaveDelaySeconds = 5;
 state.browserExtensions = [];
+
+function isInstallerReady() {
+  return state.xamppServiceStatus?.installerReady === true;
+}
+
+function getInstallerBlockedMessage() {
+  const serviceStatus = state.xamppServiceStatus;
+  if (!serviceStatus) {
+    return "Checking Apache and MySQL status...";
+  }
+
+  const missing = [];
+  if (!serviceStatus.apacheRunning) {
+    missing.push(`start Apache on port ${serviceStatus.apachePorts?.join(", ") || "80"}`);
+  }
+  if (!serviceStatus.mysqlRunning) {
+    missing.push(`start MySQL on ${serviceStatus.mysqlHost || "127.0.0.1"}:${serviceStatus.mysqlPort || 3306}`);
+  }
+
+  return missing.length
+    ? `${missing.join(" and ")} before using the installer.`
+    : "";
+}
+
+function renderInstallerServiceStatus() {
+  if (!elements.installerServiceSummary || !elements.installerApacheStatus || !elements.installerMysqlStatus) {
+    return;
+  }
+
+  const serviceStatus = state.xamppServiceStatus;
+  if (!serviceStatus) {
+    elements.installerServiceSummary.textContent = "Checking Apache and MySQL...";
+    elements.installerApacheStatus.textContent = "Checking...";
+    elements.installerMysqlStatus.textContent = "Checking...";
+    return;
+  }
+
+  elements.installerApacheStatus.textContent = serviceStatus.apacheRunning
+    ? `Running on ${serviceStatus.apachePorts.join(", ")}`
+    : `Stopped on ${serviceStatus.apachePorts.join(", ")}`;
+  elements.installerMysqlStatus.textContent = serviceStatus.mysqlRunning
+    ? `Running on ${serviceStatus.mysqlHost}:${serviceStatus.mysqlPort}`
+    : `Stopped on ${serviceStatus.mysqlHost}:${serviceStatus.mysqlPort}`;
+  elements.installerServiceSummary.textContent = isInstallerReady()
+    ? "Installer ready"
+    : "Start Apache and MySQL to use the installer";
+}
+
+function applyXamppServiceStatusSnapshot(payload = {}) {
+  state.apacheRunning = Boolean(payload.apacheRunning);
+  state.xamppServiceStatus = payload.xamppServiceStatus || state.xamppServiceStatus || null;
+  renderSitesList();
+  renderSiteDetails();
+  renderInstallerServiceStatus();
+}
 
 const elements = {
   appShell: document.getElementById("app-shell"),
@@ -151,6 +213,9 @@ const elements = {
   createDb: document.getElementById("create-db"),
   saveDbProfile: document.getElementById("save-db-profile"),
   enableMultisite: document.getElementById("enable-multisite"),
+  installerServiceSummary: document.getElementById("installer-service-summary"),
+  installerApacheStatus: document.getElementById("installer-apache-status"),
+  installerMysqlStatus: document.getElementById("installer-mysql-status"),
   installButton: document.getElementById("install-button"),
   statusText: document.getElementById("status-text"),
   resultCard: document.getElementById("result-card"),
@@ -187,6 +252,13 @@ const elements = {
   saveWpInstallDefaultsButton: document.getElementById("save-wp-install-defaults-button"),
   settingsShareLocalSessions: document.getElementById("settings-share-local-sessions"),
   settingsShareOnlineSessions: document.getElementById("settings-share-online-sessions"),
+  sessionSaveActiveCopy: document.getElementById("session-save-active-copy"),
+  sessionAutosaveButton: document.getElementById("session-autosave-button"),
+  sessionSaveButton: document.getElementById("session-save-button"),
+  sessionUnsaveButton: document.getElementById("session-unsave-button"),
+  settingsAutosaveLocalSessions: document.getElementById("settings-autosave-local-sessions"),
+  settingsAutosaveOnlineSessions: document.getElementById("settings-autosave-online-sessions"),
+  settingsSessionAutosaveDelay: document.getElementById("settings-session-autosave-delay"),
   settingsMysqlEditor: document.getElementById("settings-mysql-editor"),
   saveMysqlConfigButton: document.getElementById("save-mysql-config-button"),
   installExtensionFolderButton: document.getElementById("install-extension-folder-button"),
@@ -613,6 +685,7 @@ function refreshControls() {
   renderBookmarks();
   renderDownloads();
   renderPermissions();
+  renderSavedSessionControls();
   void syncVaultPanel();
 }
 
@@ -760,8 +833,42 @@ function renderSessionRules() {
     ? "Online tabs reuse persist:online-shared."
     : "Each new online tab gets its own persistent profile.";
 
-  const ruleText = `${localRule} ${onlineRule} Tabs in the same group always reuse that group's profile.`;
+  const ruleText = `${localRule} ${onlineRule} Saved sessions match by tab name and group name.`;
   elements.sessionRulesCopy.textContent = ruleText;
+}
+
+function renderSavedSessionControls() {
+  if (elements.settingsAutosaveLocalSessions) {
+    elements.settingsAutosaveLocalSessions.checked = state.autoSaveLocalTabSessions === true;
+  }
+  if (elements.settingsAutosaveOnlineSessions) {
+    elements.settingsAutosaveOnlineSessions.checked = state.autoSaveOnlineTabSessions === true;
+  }
+  if (elements.settingsSessionAutosaveDelay) {
+    elements.settingsSessionAutosaveDelay.value = String(Math.max(1, Number(state.sessionAutoSaveDelaySeconds) || 5));
+  }
+
+  const active = getActiveBrowserTab();
+  if (!elements.sessionSaveActiveCopy || !elements.sessionAutosaveButton || !elements.sessionSaveButton || !elements.sessionUnsaveButton) {
+    return;
+  }
+
+  if (!active) {
+    elements.sessionSaveActiveCopy.textContent = "Open a tab to save or autosave its session.";
+    elements.sessionAutosaveButton.disabled = true;
+    elements.sessionSaveButton.disabled = true;
+    elements.sessionUnsaveButton.disabled = true;
+    return;
+  }
+
+  const groupName = active.groupName ? ` in ${active.groupName}` : "";
+  const saveState = active.savedSession
+    ? active.autoSavedSession ? "Autosaved" : "Saved"
+    : "Not saved";
+  elements.sessionSaveActiveCopy.textContent = `${saveState}: ${active.sessionName || active.title || active.url}${groupName}.`;
+  elements.sessionAutosaveButton.disabled = false;
+  elements.sessionSaveButton.disabled = false;
+  elements.sessionUnsaveButton.disabled = !active.savedSession;
 }
 
 function renderExtensionsSettings() {
@@ -1101,7 +1208,7 @@ function setCreateProgress(active, message = "Preparing files, database, and loc
   elements.createProgressCard.classList.toggle("hidden", !active);
   elements.createProgressTitle.textContent = "Creating site";
   elements.createProgressText.textContent = message;
-  elements.installButton.disabled = active;
+  elements.installButton.disabled = active || !isInstallerReady();
   elements.closeCreateSiteModal.disabled = active;
 }
 
@@ -1925,7 +2032,18 @@ function renderSitesList() {
   elements.sitesList.innerHTML = "";
   const running = state.apacheRunning ? state.sites.length : 0;
   elements.sitesRunningCount.textContent = `${running} site${running === 1 ? "" : "s"} running`;
-  elements.serverStatus.textContent = `Apache status: ${state.apacheRunning ? "running" : "stopped"}`;
+  const serviceStatus = state.xamppServiceStatus;
+  if (serviceStatus) {
+    const apacheLabel = serviceStatus.apacheRunning
+      ? `Apache running on ${serviceStatus.apachePorts.join(", ")}`
+      : `Apache stopped on ${serviceStatus.apachePorts.join(", ")}`;
+    const mysqlLabel = serviceStatus.mysqlRunning
+      ? `MySQL running on ${serviceStatus.mysqlHost}:${serviceStatus.mysqlPort}`
+      : `MySQL stopped on ${serviceStatus.mysqlHost}:${serviceStatus.mysqlPort}`;
+    elements.serverStatus.textContent = `${apacheLabel} | ${mysqlLabel}`;
+  } else {
+    elements.serverStatus.textContent = `Apache status: ${state.apacheRunning ? "running" : "stopped"}`;
+  }
 
   if (!state.sites.length) {
     const empty = document.createElement("div");
@@ -1983,6 +2101,7 @@ function renderSiteDetails() {
     elements.applyMultisiteButton.textContent = "Apply multisite";
     elements.deleteSiteButton.disabled = true;
     elements.overviewEmptyCard.classList.remove("hidden");
+    setCreateProgress(progressState.creating);
     return;
   }
 
@@ -2010,13 +2129,14 @@ function renderSiteDetails() {
   elements.applyMultisiteButton.textContent = site.multisite?.networkConfigured ? "Reapply multisite" : "Apply multisite";
   elements.deleteSiteButton.disabled = progressState.deleting;
   elements.overviewEmptyCard.classList.add("hidden");
+  setCreateProgress(progressState.creating);
 }
 
 async function refreshSites() {
   const response = await window.desktopAPI.listSites();
   state.sites = response.sites;
   state.htdocsPath = response.htdocsPath || "";
-  state.apacheRunning = Boolean(response.apacheRunning);
+  applyXamppServiceStatusSnapshot(response);
   elements.htdocsPath.value = state.htdocsPath;
   if (!state.selectedSiteId && state.sites[0]) {
     state.selectedSiteId = state.sites[0].id;
@@ -2024,13 +2144,10 @@ async function refreshSites() {
   if (state.selectedSiteId && !state.sites.some((site) => site.id === state.selectedSiteId)) {
     state.selectedSiteId = state.sites[0]?.id || null;
   }
-  renderSitesList();
-  renderSiteDetails();
 }
 
 function applySettingsPayload(settings) {
   state.htdocsPath = settings.htdocsPath || "";
-  state.apacheRunning = Boolean(settings.apacheRunning);
   state.browser.downloadDirectory = settings.downloadDirectory || state.browser.downloadDirectory || "";
   state.xamppPaths = settings.xamppPaths || null;
   state.effectiveDbProfile = settings.effectiveDbProfile || getEffectiveDbProfile();
@@ -2040,6 +2157,9 @@ function applySettingsPayload(settings) {
   state.wpInstallEmail = settings.wpInstallEmail || "";
   state.shareLocalSiteSessions = settings.shareLocalSiteSessions !== false;
   state.shareOnlineSiteSessions = settings.shareOnlineSiteSessions === true;
+  state.autoSaveLocalTabSessions = settings.autoSaveLocalTabSessions === true;
+  state.autoSaveOnlineTabSessions = settings.autoSaveOnlineTabSessions === true;
+  state.sessionAutoSaveDelaySeconds = Math.max(1, Number(settings.sessionAutoSaveDelaySeconds) || 5);
   state.browserExtensions = Array.isArray(settings.browserExtensions) ? settings.browserExtensions : [];
 
   elements.htdocsPath.value = state.htdocsPath;
@@ -2049,12 +2169,13 @@ function applySettingsPayload(settings) {
     elements.basePath.value = state.htdocsPath;
   }
 
+  applyXamppServiceStatusSnapshot(settings);
   renderXamppSettings();
   renderSessionRules();
+  renderSavedSessionControls();
   renderExtensionsSettings();
   renderExtensionsMenuPopup();
   renderThemeAccentInputs();
-  renderSiteDetails();
 }
 
 async function updateLocalSessionSharing() {
@@ -2075,6 +2196,58 @@ async function updateOnlineSessionSharing() {
     ? "Online tabs from the same site now share sessions."
     : "Each online tab has its own isolated session.";
   setStatus(message);
+}
+
+async function updateSessionAutoSaveScope(scope) {
+  const enabled = scope === "local"
+    ? elements.settingsAutosaveLocalSessions.checked
+    : elements.settingsAutosaveOnlineSessions.checked;
+  const result = await window.desktopAPI.setSessionAutoSaveScope({ scope, enabled });
+  applySettingsPayload(result);
+  setStatus(
+    enabled
+      ? `Autosave is enabled for saved ${scope} tabs.`
+      : `Autosave is disabled for saved ${scope} tabs.`
+  );
+}
+
+async function updateSessionAutoSaveDelay() {
+  const seconds = Math.max(1, Number(elements.settingsSessionAutosaveDelay.value) || 5);
+  elements.settingsSessionAutosaveDelay.value = String(seconds);
+  const result = await window.desktopAPI.setSessionAutoSaveDelay(seconds);
+  applySettingsPayload(result);
+  setStatus(`Session autosave delay set to ${seconds} second${seconds === 1 ? "" : "s"}.`);
+}
+
+async function saveActiveTabSession(autoSave = false) {
+  const active = getActiveBrowserTab();
+  if (!active) {
+    setStatus("Open a tab before saving its session.");
+    return;
+  }
+
+  const result = await window.desktopAPI.browserSaveTabSession({ tabId: active.id, autoSave });
+  if (!result?.ok) {
+    setStatus(result?.message || "Could not save this tab session.");
+    return;
+  }
+
+  setStatus(result.message || "Saved the current tab session.");
+}
+
+async function unsaveActiveTabSession() {
+  const active = getActiveBrowserTab();
+  if (!active) {
+    setStatus("Open a tab before removing a saved session.");
+    return;
+  }
+
+  const result = await window.desktopAPI.browserUnsaveTabSession({ tabId: active.id });
+  if (result?.ok === false) {
+    setStatus(result.message || "Could not remove this saved session.");
+    return;
+  }
+  setStatus(result?.message || "Removed the current tab from saved sessions.");
 }
 
 async function pickAndSaveXamppRoot() {
@@ -2147,6 +2320,38 @@ async function saveWpInstallDefaultsFromSettings() {
   } catch (error) {
     setStatus(`Saving auto-fill values failed: ${error.message}`);
   }
+}
+
+async function refreshXamppServiceStatus({ force = false } = {}) {
+  if (xamppStatusRefreshInFlight && !force) {
+    return xamppStatusRefreshInFlight;
+  }
+
+  const request = (async () => {
+    try {
+      const settings = await window.desktopAPI.getSettings();
+      applyXamppServiceStatusSnapshot(settings);
+    } catch (_) {
+      // Ignore transient polling failures and keep the last visible state.
+    } finally {
+      if (xamppStatusRefreshInFlight === request) {
+        xamppStatusRefreshInFlight = null;
+      }
+    }
+  })();
+
+  xamppStatusRefreshInFlight = request;
+  return request;
+}
+
+function startXamppStatusAutoRefresh() {
+  if (xamppStatusRefreshTimer) {
+    clearInterval(xamppStatusRefreshTimer);
+  }
+
+  xamppStatusRefreshTimer = window.setInterval(() => {
+    void refreshXamppServiceStatus();
+  }, XAMPP_STATUS_REFRESH_INTERVAL_MS);
 }
 
 async function saveCurrentSiteCredentials() {
@@ -2524,6 +2729,13 @@ elements.openMysqlConfigButton.addEventListener("click", () =>
 );
 elements.settingsShareLocalSessions.addEventListener("change", () => void updateLocalSessionSharing());
 elements.settingsShareOnlineSessions.addEventListener("change", () => void updateOnlineSessionSharing());
+elements.sessionAutosaveButton?.addEventListener("click", () => void saveActiveTabSession(true));
+elements.sessionSaveButton?.addEventListener("click", () => void saveActiveTabSession(false));
+elements.sessionUnsaveButton?.addEventListener("click", () => void unsaveActiveTabSession());
+elements.settingsAutosaveLocalSessions?.addEventListener("change", () => void updateSessionAutoSaveScope("local"));
+elements.settingsAutosaveOnlineSessions?.addEventListener("change", () => void updateSessionAutoSaveScope("online"));
+elements.settingsSessionAutosaveDelay?.addEventListener("change", () => void updateSessionAutoSaveDelay());
+elements.settingsSessionAutosaveDelay?.addEventListener("blur", () => void updateSessionAutoSaveDelay());
 elements.saveMysqlConfigButton.addEventListener("click", () => void saveMysqlConfigFromSettings());
 elements.installExtensionFolderButton?.addEventListener("click", async () => {
   const selected = await window.desktopAPI.pickFolder();
@@ -2609,6 +2821,10 @@ elements.installButton.addEventListener("click", async () => {
   if (progressState.creating) {
     return;
   }
+  if (!isInstallerReady()) {
+    setStatus(getInstallerBlockedMessage());
+    return;
+  }
 
   setStatus("Creating site...");
   elements.resultCard.classList.add("hidden");
@@ -2660,6 +2876,11 @@ elements.openPhpMyAdminButton.addEventListener("click", () => {
 
 window.desktopAPI.onBrowserState((payload) => {
   state.browser = payload;
+  if (payload?.sessionSettings) {
+    state.autoSaveLocalTabSessions = payload.sessionSettings.autoSaveLocalTabSessions === true;
+    state.autoSaveOnlineTabSessions = payload.sessionSettings.autoSaveOnlineTabSessions === true;
+    state.sessionAutoSaveDelaySeconds = Math.max(1, Number(payload.sessionSettings.sessionAutoSaveDelaySeconds) || 5);
+  }
   renderBrowserTabs();
   refreshControls();
 });
@@ -2749,6 +2970,21 @@ window.desktopAPI.onSitesChanged(() => {
   void refreshSites();
 });
 
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    void refreshXamppServiceStatus({ force: true });
+  }
+});
+window.addEventListener("focus", () => {
+  void refreshXamppServiceStatus({ force: true });
+});
+window.addEventListener("beforeunload", () => {
+  if (xamppStatusRefreshTimer) {
+    clearInterval(xamppStatusRefreshTimer);
+    xamppStatusRefreshTimer = null;
+  }
+});
+
 async function loadSavedState() {
   const settings = await window.desktopAPI.getSettings();
   applySettingsPayload(settings);
@@ -2781,4 +3017,5 @@ setCreateProgress(false);
 setDeleteProgress(false);
 uiState.sidebarCollapsed = localStorage.getItem("wpdesktop.sidebarCollapsed") === "1";
 renderSidebarState();
+startXamppStatusAutoRefresh();
 void loadSavedState();

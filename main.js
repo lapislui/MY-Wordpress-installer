@@ -99,6 +99,21 @@ function getSettingsPath() {
   return path.join(app.getPath("userData"), "settings.json");
 }
 
+async function buildSettingsPayload(settings = getSettings()) {
+  const apacheRunning = await isApacheRunning();
+  const resolvedHtdocsPath = getResolvedHtdocsPath(settings);
+  return {
+    ...settings,
+    htdocsPath: resolvedHtdocsPath,
+    apacheRunning,
+    xamppServiceStatus: await getXamppServiceStatus(settings),
+    detectedDbProfile: detectXamppDbProfile(resolvedHtdocsPath),
+    effectiveDbProfile: getEffectiveDbProfile(settings),
+    mysqlConfigContent: readMysqlConfigContent(settings),
+    xamppPaths: getXamppPathsSummary(settings)
+  };
+}
+
 function getBrowserHistoryPath() {
   return path.join(app.getPath("userData"), "browser-history.json");
 }
@@ -422,6 +437,37 @@ function parseMysqlConfigProfile(source) {
   };
 }
 
+function parseApacheConfigProfile(source) {
+  const text = String(source || "");
+  const listenMatches = [...text.matchAll(/^\s*Listen\s+([^\s#]+)\s*$/gim)];
+  const ports = listenMatches
+    .map((match) => {
+      const raw = String(match?.[1] || "").trim();
+      const portMatch = raw.match(/(?::)?(\d+)$/);
+      return portMatch ? Number(portMatch[1]) : null;
+    })
+    .filter((port) => Number.isInteger(port) && port > 0 && port <= 65535);
+
+  return {
+    ports: Array.from(new Set(ports))
+  };
+}
+
+function readApacheConfigContent(settings) {
+  const apacheConfigPath = getXamppPathsSummary(settings).apacheConfigPath;
+  if (!apacheConfigPath || !fs.existsSync(apacheConfigPath)) {
+    return "";
+  }
+
+  return fs.readFileSync(apacheConfigPath, "utf8");
+}
+
+function getConfiguredApachePorts(settings = getSettings()) {
+  const apacheConfigContent = readApacheConfigContent(settings);
+  const parsed = parseApacheConfigProfile(apacheConfigContent);
+  return parsed.ports.length ? parsed.ports : [80];
+}
+
 function readMysqlConfigContent(settings) {
   const mysqlConfigPath = getXamppPathsSummary(settings).mysqlConfigPath;
   if (!mysqlConfigPath || !fs.existsSync(mysqlConfigPath)) {
@@ -502,6 +548,10 @@ function getDefaultSettings() {
     wpInstallEmail: "",
     shareLocalSiteSessions: true,
     shareOnlineSiteSessions: false,
+    autoSaveLocalTabSessions: false,
+    autoSaveOnlineTabSessions: false,
+    sessionAutoSaveDelaySeconds: 5,
+    savedTabSessions: [],
     downloadDirectory: app.getPath("downloads"),
     browserPermissions: {},
     browserBookmarks: [],
@@ -609,6 +659,27 @@ function normalizeSettings(input = {}) {
         })
         .filter(Boolean)
     : [];
+  const savedTabSessions = Array.isArray(input.savedTabSessions)
+    ? input.savedTabSessions
+        .map((entry) => {
+          if (!entry || typeof entry !== "object") {
+            return null;
+          }
+          const scope = entry.scope === "local" ? "local" : "online";
+          const tabName = String(entry.tabName || "").trim();
+          if (!tabName) {
+            return null;
+          }
+          return {
+            scope,
+            tabName,
+            groupName: String(entry.groupName || "").trim(),
+            autoSave: entry.autoSave === true,
+            updatedAt: Number(entry.updatedAt || Date.now())
+          };
+        })
+        .filter(Boolean)
+    : [];
 
   return {
     xamppRootPath: input.xamppRootPath || getXamppRootFromHtdocs(input.htdocsPath || "") || getDefaultXamppRootPath(),
@@ -620,6 +691,10 @@ function normalizeSettings(input = {}) {
     wpInstallEmail: String(input.wpInstallEmail || "").trim(),
     shareLocalSiteSessions: input.shareLocalSiteSessions !== false,
     shareOnlineSiteSessions: input.shareOnlineSiteSessions === true,
+    autoSaveLocalTabSessions: input.autoSaveLocalTabSessions === true,
+    autoSaveOnlineTabSessions: input.autoSaveOnlineTabSessions === true,
+    sessionAutoSaveDelaySeconds: Math.max(1, Number(input.sessionAutoSaveDelaySeconds) || 5),
+    savedTabSessions,
     downloadDirectory: input.downloadDirectory || app.getPath("downloads"),
     browserPermissions: permissions,
     browserBookmarks: bookmarks,
@@ -809,11 +884,23 @@ async function fetchRemoteSearchSuggestions(query) {
   }
 }
 
-function getPartitionForUrl(url, tabId, mode = "auto", group = null) {
+function getPartitionForUrl(url, tabId, mode = "auto", group = null, options = {}) {
   const settings = getSettings();
 
   if (mode === "isolated") {
     return `${mode}:${tabId}`;
+  }
+
+  if (options.ignoreSavedSessions !== true) {
+    const tabName = String(options.tabName || "").trim();
+    const savedPartition = getSavedPartitionForDescriptor(settings, {
+      scope: isLocalUrl(url) ? "local" : "online",
+      groupName: getTabGroupMatchName(group),
+      tabName
+    });
+    if (savedPartition) {
+      return savedPartition;
+    }
   }
 
   const groupPartition = getTabGroupPartitionName(group);
@@ -839,6 +926,181 @@ function getPartitionForUrl(url, tabId, mode = "auto", group = null) {
   }
 
   return buildTabScopedPartition("online");
+}
+
+function getSessionScopeForUrl(url) {
+  return isLocalUrl(url) ? "local" : "online";
+}
+
+function normalizeSavedSessionMatchValue(value) {
+  return String(value || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toLowerCase();
+}
+
+function getTabGroupMatchName(group) {
+  return String(group?.name || "").trim();
+}
+
+function getFallbackTabSessionName(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname) {
+      return parsed.port ? `${parsed.hostname}:${parsed.port}` : parsed.hostname;
+    }
+  } catch (_) {
+    // Ignore invalid URL input.
+  }
+
+  return String(url || "").trim() || "tab";
+}
+
+function getTabSessionMatchName(tab) {
+  const nickname = String(tab?.nickname || "").trim();
+  if (nickname) {
+    return nickname;
+  }
+
+  const title = String(tab?.title || "").trim();
+  if (title && title.toLowerCase() !== "new tab") {
+    return title;
+  }
+
+  return getFallbackTabSessionName(tab?.url);
+}
+
+function buildSavedTabSessionPartition(scope, groupName, tabName) {
+  return `persist:saved-${scope}-${sanitizeSessionToken(groupName || "ungrouped", "ungrouped")}-${sanitizeSessionToken(tabName, "tab")}`;
+}
+
+function buildSavedTabSessionKey(scope, groupName, tabName) {
+  return [
+    scope === "local" ? "local" : "online",
+    normalizeSavedSessionMatchValue(groupName),
+    normalizeSavedSessionMatchValue(tabName)
+  ].join("::");
+}
+
+function getSavedTabSessionDescriptorForTab(state, tab) {
+  if (!tab?.url) {
+    return null;
+  }
+
+  return {
+    scope: getSessionScopeForUrl(tab.url),
+    groupName: getTabGroupMatchName(getTabGroupForTab(state, tab)),
+    tabName: getTabSessionMatchName(tab)
+  };
+}
+
+function findSavedTabSessionEntry(settings, descriptor) {
+  if (!descriptor?.tabName) {
+    return null;
+  }
+
+  const targetKey = buildSavedTabSessionKey(descriptor.scope, descriptor.groupName, descriptor.tabName);
+  return (settings.savedTabSessions || []).find((entry) =>
+    buildSavedTabSessionKey(entry.scope, entry.groupName, entry.tabName) === targetKey
+  ) || null;
+}
+
+function findSavedTabSessionEntryForPartition(settings, partition) {
+  const target = String(partition || "").trim();
+  if (!target) {
+    return null;
+  }
+
+  return (settings.savedTabSessions || []).find((entry) =>
+    buildSavedTabSessionPartition(entry.scope, entry.groupName, entry.tabName) === target
+  ) || null;
+}
+
+function findSavedTabSessionEntryForTab(settings, state, tab) {
+  return findSavedTabSessionEntry(settings, getSavedTabSessionDescriptorForTab(state, tab))
+    || findSavedTabSessionEntryForPartition(settings, tab?.partition);
+}
+
+function getSavedPartitionForDescriptor(settings, descriptor) {
+  const matched = findSavedTabSessionEntry(settings, descriptor);
+  if (!matched) {
+    return "";
+  }
+
+  return buildSavedTabSessionPartition(matched.scope, matched.groupName, matched.tabName);
+}
+
+function resolvePartitionForTab(state, tab, options = {}) {
+  if (!tab) {
+    return "";
+  }
+
+  if (tab.mode === "isolated") {
+    return `${tab.mode}:${tab.id}`;
+  }
+
+  const settings = getSettings();
+  const descriptor = options.descriptor || getSavedTabSessionDescriptorForTab(state, tab);
+  const savedPartition = getSavedPartitionForDescriptor(settings, descriptor);
+  if (savedPartition) {
+    return savedPartition;
+  }
+
+  const existingSavedEntry = findSavedTabSessionEntryForPartition(settings, tab.partition);
+  if (existingSavedEntry) {
+    return tab.partition;
+  }
+
+  const group = options.group === undefined ? getTabGroupForTab(state, tab) : options.group;
+  return getPartitionForUrl(tab.url, tab.id, tab.mode, group);
+}
+
+function saveNamedTabSession(settings, descriptor, autoSave = false) {
+  const safeSettings = normalizeSettings(settings);
+  if (!descriptor?.tabName) {
+    return safeSettings;
+  }
+
+  const nextEntry = {
+    scope: descriptor.scope === "local" ? "local" : "online",
+    groupName: String(descriptor.groupName || "").trim(),
+    tabName: String(descriptor.tabName || "").trim(),
+    autoSave: autoSave === true,
+    updatedAt: Date.now()
+  };
+  const targetKey = buildSavedTabSessionKey(nextEntry.scope, nextEntry.groupName, nextEntry.tabName);
+  const existingIndex = safeSettings.savedTabSessions.findIndex((entry) =>
+    buildSavedTabSessionKey(entry.scope, entry.groupName, entry.tabName) === targetKey
+  );
+
+  if (existingIndex >= 0) {
+    safeSettings.savedTabSessions.splice(existingIndex, 1, nextEntry);
+  } else {
+    safeSettings.savedTabSessions.push(nextEntry);
+  }
+
+  return safeSettings;
+}
+
+function removeNamedTabSession(settings, descriptor) {
+  const safeSettings = normalizeSettings(settings);
+  if (!descriptor?.tabName) {
+    return safeSettings;
+  }
+
+  const targetKey = buildSavedTabSessionKey(descriptor.scope, descriptor.groupName, descriptor.tabName);
+  safeSettings.savedTabSessions = safeSettings.savedTabSessions.filter((entry) =>
+    buildSavedTabSessionKey(entry.scope, entry.groupName, entry.tabName) !== targetKey
+  );
+  return safeSettings;
+}
+
+function removeNamedTabSessionByPartition(settings, partition) {
+  const safeSettings = normalizeSettings(settings);
+  safeSettings.savedTabSessions = safeSettings.savedTabSessions.filter((entry) =>
+    buildSavedTabSessionPartition(entry.scope, entry.groupName, entry.tabName) !== String(partition || "").trim()
+  );
+  return safeSettings;
 }
 
 function sanitizeSessionToken(value, fallback = "default") {
@@ -1830,7 +2092,36 @@ function testPort(host, port) {
 }
 
 async function isApacheRunning() {
-  return (await testPort("127.0.0.1", 80)) || (await testPort("127.0.0.1", 443));
+  const ports = getConfiguredApachePorts(getSettings());
+  for (const port of ports) {
+    if (await testPort("127.0.0.1", port)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+async function isMysqlRunning(settings = getSettings()) {
+  const dbProfile = getEffectiveDbProfile(settings);
+  return testPort(dbProfile.host || "127.0.0.1", Number(dbProfile.port) || 3306);
+}
+
+async function getXamppServiceStatus(settings = getSettings()) {
+  const apachePorts = getConfiguredApachePorts(settings);
+  const dbProfile = getEffectiveDbProfile(settings);
+  const apachePortChecks = await Promise.all(apachePorts.map((port) => testPort("127.0.0.1", port)));
+  const mysqlPort = Number(dbProfile.port) || 3306;
+  const mysqlHost = dbProfile.host || "127.0.0.1";
+  const mysqlRunning = await testPort(mysqlHost, mysqlPort);
+
+  return {
+    apachePorts,
+    apacheRunning: apachePortChecks.some(Boolean),
+    mysqlHost,
+    mysqlPort,
+    mysqlRunning,
+    installerReady: apachePortChecks.some(Boolean) && mysqlRunning
+  };
 }
 
 async function buildSitesFromHtdocs() {
@@ -1838,10 +2129,11 @@ async function buildSitesFromHtdocs() {
   const htdocsPath = getResolvedHtdocsPath(settings);
   const savedSites = getSites();
   const savedMap = new Map(savedSites.map((site) => [site.id, site]));
-  const apacheRunning = await isApacheRunning();
+  const serviceStatus = await getXamppServiceStatus(settings);
+  const apacheRunning = serviceStatus.apacheRunning;
 
   if (!htdocsPath || !fs.existsSync(htdocsPath)) {
-    return { htdocsPath, apacheRunning, sites: savedSites };
+    return { htdocsPath, apacheRunning, xamppServiceStatus: serviceStatus, sites: savedSites };
   }
 
   const wordpressFolders = findWordPressFolders(htdocsPath);
@@ -1891,7 +2183,7 @@ async function buildSitesFromHtdocs() {
     })
     .sort((a, b) => a.name.localeCompare(b.name));
 
-  return { htdocsPath, apacheRunning, sites: scannedSites };
+  return { htdocsPath, apacheRunning, xamppServiceStatus: serviceStatus, sites: scannedSites };
 }
 
 function sanitizeDbName(name) {
@@ -2555,7 +2847,8 @@ function getBrowserState(win) {
       browserBounds: null,
       browserVisible: false,
       downloads: [],
-      closedTabs: []
+      closedTabs: [],
+      autoSaveTimers: {}
     });
   }
 
@@ -2702,6 +2995,7 @@ function findDownloadRecord(win, downloadId) {
 function serializeBrowserState(state) {
   const activeTab = state.tabs.find((tab) => tab.id === state.activeTabId) || null;
   const navigation = activeTab ? getNavigationApi(activeTab.view.webContents) : null;
+  const settings = getSettings();
   return {
     tabs: state.tabs.map((tab) => ({
       groupId: tab.groupId || null,
@@ -2715,7 +3009,11 @@ function serializeBrowserState(state) {
       muted: Boolean(tab.muted),
       nickname: tab.nickname || "",
       partition: tab.partition,
-      sessionProfileName: getSessionProfileName(tab.partition)
+      sessionProfileName: getSessionProfileName(tab.partition),
+      sessionScope: getSessionScopeForUrl(tab.url),
+      sessionName: getTabSessionMatchName(tab),
+      savedSession: Boolean(findSavedTabSessionEntryForTab(settings, state, tab)),
+      autoSavedSession: Boolean(findSavedTabSessionEntryForTab(settings, state, tab)?.autoSave)
     })),
     tabGroups: state.tabGroups.map((group) => ({
       id: group.id,
@@ -2739,7 +3037,13 @@ function serializeBrowserState(state) {
       status: item.status,
       startedAt: item.startedAt
     })),
-    savedPermissions: getSavedPermissionsList()
+    savedPermissions: getSavedPermissionsList(),
+    sessionSettings: {
+      autoSaveLocalTabSessions: settings.autoSaveLocalTabSessions === true,
+      autoSaveOnlineTabSessions: settings.autoSaveOnlineTabSessions === true,
+      sessionAutoSaveDelaySeconds: Math.max(1, Number(settings.sessionAutoSaveDelaySeconds) || 5),
+      savedTabSessionCount: Array.isArray(settings.savedTabSessions) ? settings.savedTabSessions.length : 0
+    }
   };
 }
 
@@ -3339,8 +3643,122 @@ function setTabNickname(win, tabId, nickname) {
   }
 
   tab.nickname = String(nickname || "").trim();
+  const state = getBrowserState(win);
+  syncSavedSessionPartitionForTab(win, tab, state);
+  scheduleAutoSaveForTab(win, tab);
   emitBrowserState(win);
   return true;
+}
+
+function clearAutoSaveTimer(win, tabId) {
+  const state = getBrowserState(win);
+  const timer = state.autoSaveTimers?.[tabId];
+  if (timer) {
+    clearTimeout(timer);
+    delete state.autoSaveTimers[tabId];
+  }
+}
+
+function isAutoSaveEnabledForScope(settings, scope) {
+  return scope === "local"
+    ? settings.autoSaveLocalTabSessions === true
+    : settings.autoSaveOnlineTabSessions === true;
+}
+
+function syncSavedSessionPartitionForTab(win, tab, state = getBrowserState(win)) {
+  if (!tab) {
+    return false;
+  }
+
+  const nextPartition = resolvePartitionForTab(state, tab);
+  if (!nextPartition || nextPartition === tab.partition) {
+    return false;
+  }
+
+  return replaceTabViewWithPartition(win, tab, nextPartition, tab.url);
+}
+
+function saveCurrentTabSession(win, tabId, { autoSave = false } = {}) {
+  const state = getBrowserState(win);
+  const tab = findTabById(win, tabId);
+  if (!tab) {
+    return { ok: false, message: "Active tab not found." };
+  }
+
+  const descriptor = getSavedTabSessionDescriptorForTab(state, tab);
+  if (!descriptor?.tabName) {
+    return { ok: false, message: "Open a tab with a name before saving its session." };
+  }
+
+  const nextSettings = saveNamedTabSession(getSettings(), descriptor, autoSave);
+  saveSettings(nextSettings);
+  syncSavedSessionPartitionForTab(win, tab, state);
+  emitBrowserState(win);
+  return {
+    ok: true,
+    descriptor,
+    autoSave,
+    message: autoSave
+      ? `Autosave is enabled for "${descriptor.tabName}".`
+      : `Saved session for "${descriptor.tabName}".`
+  };
+}
+
+function unsaveCurrentTabSession(win, tabId) {
+  const state = getBrowserState(win);
+  const tab = findTabById(win, tabId);
+  if (!tab) {
+    return { ok: false, message: "Active tab not found." };
+  }
+
+  const descriptor = getSavedTabSessionDescriptorForTab(state, tab);
+  if (!descriptor?.tabName) {
+    return { ok: false, message: "Open a tab with a name before removing its saved session." };
+  }
+
+  const currentSettings = getSettings();
+  const matchingEntry = findSavedTabSessionEntryForTab(currentSettings, state, tab);
+  const nextSettings = matchingEntry
+    ? removeNamedTabSessionByPartition(currentSettings, tab.partition)
+    : removeNamedTabSession(currentSettings, descriptor);
+  saveSettings(nextSettings);
+  clearAutoSaveTimer(win, tab.id);
+  const nextPartition = getPartitionForUrl(tab.url, tab.id, tab.mode, getTabGroupForTab(state, tab), { ignoreSavedSessions: true });
+  if (nextPartition && nextPartition !== tab.partition) {
+    replaceTabViewWithPartition(win, tab, nextPartition, tab.url);
+  }
+  emitBrowserState(win);
+  return {
+    ok: true,
+    descriptor,
+    message: `Forgot saved session for "${descriptor.tabName}".`
+  };
+}
+
+function scheduleAutoSaveForTab(win, tab) {
+  if (!tab) {
+    return;
+  }
+
+  const state = getBrowserState(win);
+  const descriptor = getSavedTabSessionDescriptorForTab(state, tab);
+  const settings = getSettings();
+  const savedEntry = findSavedTabSessionEntryForTab(settings, state, tab);
+  clearAutoSaveTimer(win, tab.id);
+
+  if (!savedEntry?.autoSave || !isAutoSaveEnabledForScope(settings, descriptor?.scope)) {
+    return;
+  }
+
+  const delay = Math.max(1, Number(settings.sessionAutoSaveDelaySeconds) || 5) * 1000;
+  state.autoSaveTimers[tab.id] = setTimeout(() => {
+    delete state.autoSaveTimers[tab.id];
+    const nextDescriptor = getSavedTabSessionDescriptorForTab(state, tab);
+    const nextSettings = saveNamedTabSession(getSettings(), nextDescriptor, true);
+    saveSettings(nextSettings);
+    syncSavedSessionPartitionForTab(win, tab, state);
+    emitBrowserState(win);
+  }, delay);
 }
 
 function replaceTabViewWithPartition(win, tab, nextPartition, nextUrl = null) {
@@ -3390,6 +3808,12 @@ function renameTabGroup(win, groupId, name) {
   }
 
   group.name = String(name || "").trim() || group.name;
+  state.tabs
+    .filter((tab) => tab.groupId === group.id)
+    .forEach((tab) => {
+      syncSavedSessionPartitionForTab(win, tab, state);
+      scheduleAutoSaveForTab(win, tab);
+    });
   emitBrowserState(win);
   return true;
 }
@@ -3404,7 +3828,7 @@ function moveTabToGroup(win, tabId, groupId) {
 
   const previousGroupId = tab.groupId || null;
   tab.groupId = group.id;
-  replaceTabViewWithPartition(win, tab, getTabGroupPartitionName(group), tab.url);
+  replaceTabViewWithPartition(win, tab, resolvePartitionForTab(state, tab, { group }), tab.url);
   deleteEmptyTabGroup(state, previousGroupId);
   emitBrowserState(win);
   return true;
@@ -3419,7 +3843,7 @@ function removeTabFromGroup(win, tabId) {
 
   const previousGroupId = tab.groupId;
   tab.groupId = null;
-  replaceTabViewWithPartition(win, tab, getPartitionForUrl(tab.url, tab.id, tab.mode), tab.url);
+  replaceTabViewWithPartition(win, tab, resolvePartitionForTab(state, tab, { group: null }), tab.url);
   deleteEmptyTabGroup(state, previousGroupId);
   emitBrowserState(win);
   return true;
@@ -3435,7 +3859,7 @@ function createTabGroupFromTab(win, tabId, groupName = "") {
   const previousGroupId = tab.groupId || null;
   const group = createTabGroupRecord(state, groupName || tab.nickname || tab.title || "Tab group");
   tab.groupId = group.id;
-  replaceTabViewWithPartition(win, tab, getTabGroupPartitionName(group), tab.url);
+  replaceTabViewWithPartition(win, tab, resolvePartitionForTab(state, tab, { group }), tab.url);
   deleteEmptyTabGroup(state, previousGroupId);
   emitBrowserState(win);
   return group;
@@ -3452,7 +3876,7 @@ function dissolveTabGroup(win, groupId) {
     .filter((tab) => tab.groupId === groupId)
     .forEach((tab) => {
       tab.groupId = null;
-      replaceTabViewWithPartition(win, tab, getPartitionForUrl(tab.url, tab.id, tab.mode), tab.url);
+      replaceTabViewWithPartition(win, tab, resolvePartitionForTab(state, tab, { group: null }), tab.url);
     });
 
   deleteEmptyTabGroup(state, groupId);
@@ -3749,6 +4173,7 @@ function wireTabEvents(win, tab) {
 
   wc.on("did-stop-loading", () => {
     tab.isLoading = false;
+    scheduleAutoSaveForTab(win, tab);
     emitBrowserState(win);
     void maybeAutoFillWordPressBootstrap(tab);
     maybePrepareMultisiteSiteForUrl(win, tab.url);
@@ -3758,6 +4183,8 @@ function wireTabEvents(win, tab) {
     event.preventDefault();
     tab.title = title || tab.url;
     recordBrowserHistoryVisit(tab.url, tab.title, false);
+    syncSavedSessionPartitionForTab(win, tab);
+    scheduleAutoSaveForTab(win, tab);
     emitBrowserState(win);
   });
 
@@ -3765,6 +4192,8 @@ function wireTabEvents(win, tab) {
     tab.url = url;
     tab.error = null;
     recordBrowserHistoryVisit(tab.url, tab.title);
+    syncSavedSessionPartitionForTab(win, tab);
+    scheduleAutoSaveForTab(win, tab);
     emitBrowserState(win);
     void maybeAutoFillWordPressBootstrap(tab);
     maybePrepareMultisiteSiteForUrl(win, tab.url);
@@ -3773,6 +4202,8 @@ function wireTabEvents(win, tab) {
   wc.on("did-navigate-in-page", (_event, url) => {
     tab.url = url;
     recordBrowserHistoryVisit(tab.url, tab.title);
+    syncSavedSessionPartitionForTab(win, tab);
+    scheduleAutoSaveForTab(win, tab);
     emitBrowserState(win);
     void maybeAutoFillWordPressBootstrap(tab);
     maybePrepareMultisiteSiteForUrl(win, tab.url);
@@ -3836,7 +4267,9 @@ function createBrowserTab(win, url, mode = "auto", activate = true, insertIndex 
   const resolvedUrl = ensureUrl(url);
   const id = `tab-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`;
   const group = getTabGroupById(state, tabOptions.groupId);
-  const partition = getPartitionForUrl(resolvedUrl, id, mode, group);
+  const partition = getPartitionForUrl(resolvedUrl, id, mode, group, {
+    tabName: String(tabOptions.nickname || "").trim()
+  });
   configureBrowserSession(win, partition);
   const view = new BrowserView({
     webPreferences: buildBrowserWebPreferences(partition)
@@ -3899,6 +4332,7 @@ function closeBrowserTab(win, tabId) {
   const [tab] = state.tabs.splice(index, 1);
   const previousGroupId = tab.groupId || null;
   rememberClosedTab(win, tab);
+  clearAutoSaveTimer(win, tab.id);
   if (state.attachedTabId === tab.id) {
     detachActiveView(win);
   }
@@ -3927,7 +4361,9 @@ function navigateActiveBrowserTab(win, url) {
   }
 
   const resolvedUrl = ensureUrl(url);
-  const nextPartition = getPartitionForUrl(resolvedUrl, active.id, active.mode, getTabGroupForTab(state, active));
+  const nextPartition = getPartitionForUrl(resolvedUrl, active.id, active.mode, getTabGroupForTab(state, active), {
+    tabName: getTabSessionMatchName({ ...active, url: resolvedUrl })
+  });
 
   if (nextPartition !== active.partition) {
     const wasActive = state.activeTabId === active.id;
@@ -5915,6 +6351,28 @@ ipcMain.handle("browser:set-tab-nickname", (event, payload) => {
   return setTabNickname(win, payload.tabId, payload.nickname || "");
 });
 
+ipcMain.handle("browser:save-tab-session", (event, payload) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win) {
+    return { ok: false, message: "Browser window not found." };
+  }
+
+  const state = getBrowserState(win);
+  const activeTabId = payload?.tabId || state.activeTabId;
+  return saveCurrentTabSession(win, activeTabId, { autoSave: payload?.autoSave === true });
+});
+
+ipcMain.handle("browser:unsave-tab-session", (event, payload) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win) {
+    return { ok: false, message: "Browser window not found." };
+  }
+
+  const state = getBrowserState(win);
+  const activeTabId = payload?.tabId || state.activeTabId;
+  return unsaveCurrentTabSession(win, activeTabId);
+});
+
 ipcMain.handle("browser:show-bookmark-save-dialog", async (event, payload) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   if (!win) {
@@ -5999,17 +6457,7 @@ ipcMain.handle("vault:clear-site-credentials", (_event, payload) => {
 
 ipcMain.handle("settings:get", async () => {
   const settings = getSettings();
-  const apacheRunning = await isApacheRunning();
-  const xamppPaths = getXamppPathsSummary(settings);
-  return {
-    ...settings,
-    htdocsPath: getResolvedHtdocsPath(settings),
-    apacheRunning,
-    detectedDbProfile: detectXamppDbProfile(getResolvedHtdocsPath(settings)),
-    effectiveDbProfile: getEffectiveDbProfile(settings),
-    mysqlConfigContent: readMysqlConfigContent(settings),
-    xamppPaths
-  };
+  return buildSettingsPayload(settings);
 });
 
 ipcMain.handle("settings:set-htdocs", async (_event, htdocsPath) => {
@@ -6017,18 +6465,7 @@ ipcMain.handle("settings:set-htdocs", async (_event, htdocsPath) => {
   settings.htdocsPath = htdocsPath || "";
   settings.xamppRootPath = getXamppRootFromHtdocs(settings.htdocsPath) || settings.xamppRootPath || "";
   saveSettings(settings);
-  const apacheRunning = await isApacheRunning();
-  const xamppPaths = getXamppPathsSummary(settings);
-  const resolvedHtdocsPath = getResolvedHtdocsPath(settings);
-  return {
-    ...settings,
-    htdocsPath: resolvedHtdocsPath,
-    apacheRunning,
-    detectedDbProfile: detectXamppDbProfile(resolvedHtdocsPath),
-    effectiveDbProfile: getEffectiveDbProfile(settings),
-    mysqlConfigContent: readMysqlConfigContent(settings),
-    xamppPaths
-  };
+  return buildSettingsPayload(settings);
 });
 
 ipcMain.handle("settings:set-xampp-root", async (_event, xamppRootPath) => {
@@ -6036,50 +6473,21 @@ ipcMain.handle("settings:set-xampp-root", async (_event, xamppRootPath) => {
   settings.xamppRootPath = xamppRootPath || "";
   settings.htdocsPath = xamppRootPath ? path.join(xamppRootPath, "htdocs") : "";
   saveSettings(settings);
-  const apacheRunning = await isApacheRunning();
-  const xamppPaths = getXamppPathsSummary(settings);
-  const resolvedHtdocsPath = getResolvedHtdocsPath(settings);
-  return {
-    ...settings,
-    htdocsPath: resolvedHtdocsPath,
-    apacheRunning,
-    detectedDbProfile: detectXamppDbProfile(resolvedHtdocsPath),
-    effectiveDbProfile: getEffectiveDbProfile(settings),
-    mysqlConfigContent: readMysqlConfigContent(settings),
-    xamppPaths
-  };
+  return buildSettingsPayload(settings);
 });
 
 ipcMain.handle("settings:set-local-session-sharing", async (_event, enabled) => {
   const settings = getSettings();
   settings.shareLocalSiteSessions = enabled !== false;
   saveSettings(settings);
-  const apacheRunning = await isApacheRunning();
-  return {
-    ...settings,
-    htdocsPath: getResolvedHtdocsPath(settings),
-    apacheRunning,
-    detectedDbProfile: detectXamppDbProfile(getResolvedHtdocsPath(settings)),
-    effectiveDbProfile: getEffectiveDbProfile(settings),
-    mysqlConfigContent: readMysqlConfigContent(settings),
-    xamppPaths: getXamppPathsSummary(settings)
-  };
+  return buildSettingsPayload(settings);
 });
 
 ipcMain.handle("settings:set-online-session-sharing", async (_event, enabled) => {
   const settings = getSettings();
   settings.shareOnlineSiteSessions = enabled === true;
   saveSettings(settings);
-  const apacheRunning = await isApacheRunning();
-  return {
-    ...settings,
-    htdocsPath: getResolvedHtdocsPath(settings),
-    apacheRunning,
-    detectedDbProfile: detectXamppDbProfile(getResolvedHtdocsPath(settings)),
-    effectiveDbProfile: getEffectiveDbProfile(settings),
-    mysqlConfigContent: readMysqlConfigContent(settings),
-    xamppPaths: getXamppPathsSummary(settings)
-  };
+  return buildSettingsPayload(settings);
 });
 
 ipcMain.handle("settings:save-mysql-config", async (_event, payload) => {
@@ -6096,17 +6504,26 @@ ipcMain.handle("settings:save-mysql-config", async (_event, payload) => {
   settings.wpInstallPassword = payload.wpInstallPassword ?? "root";
   settings.wpInstallEmail = String(payload.wpInstallEmail || "").trim();
   saveSettings(settings);
+  return buildSettingsPayload(settings);
+});
 
-  const apacheRunning = await isApacheRunning();
-  return {
-    ...settings,
-    htdocsPath: getResolvedHtdocsPath(settings),
-    apacheRunning,
-    detectedDbProfile: detectXamppDbProfile(getResolvedHtdocsPath(settings)),
-    effectiveDbProfile: getEffectiveDbProfile(settings),
-    mysqlConfigContent: readMysqlConfigContent(settings),
-    xamppPaths: getXamppPathsSummary(settings)
-  };
+ipcMain.handle("settings:set-session-autosave-scope", async (_event, payload) => {
+  const settings = getSettings();
+  const scope = payload?.scope === "local" ? "local" : "online";
+  if (scope === "local") {
+    settings.autoSaveLocalTabSessions = payload?.enabled === true;
+  } else {
+    settings.autoSaveOnlineTabSessions = payload?.enabled === true;
+  }
+  saveSettings(settings);
+  return buildSettingsPayload(settings);
+});
+
+ipcMain.handle("settings:set-session-autosave-delay", async (_event, seconds) => {
+  const settings = getSettings();
+  settings.sessionAutoSaveDelaySeconds = Math.max(1, Number(seconds) || 5);
+  saveSettings(settings);
+  return buildSettingsPayload(settings);
 });
 
 ipcMain.handle("settings:save-wp-install-defaults", async (_event, payload) => {
@@ -6115,17 +6532,7 @@ ipcMain.handle("settings:save-wp-install-defaults", async (_event, payload) => {
   settings.wpInstallPassword = payload?.wpInstallPassword ?? "root";
   settings.wpInstallEmail = String(payload?.wpInstallEmail || "").trim();
   saveSettings(settings);
-
-  const apacheRunning = await isApacheRunning();
-  return {
-    ...settings,
-    htdocsPath: getResolvedHtdocsPath(settings),
-    apacheRunning,
-    detectedDbProfile: detectXamppDbProfile(getResolvedHtdocsPath(settings)),
-    effectiveDbProfile: getEffectiveDbProfile(settings),
-    mysqlConfigContent: readMysqlConfigContent(settings),
-    xamppPaths: getXamppPathsSummary(settings)
-  };
+  return buildSettingsPayload(settings);
 });
 
 ipcMain.handle("settings:install-browser-extension-folder", async (_event, folderPath) => {
@@ -6193,6 +6600,13 @@ ipcMain.handle("sites:show-context-menu", async (event, site) => {
 
 ipcMain.handle("installer:run", async (_event, payload) => {
   const settings = getSettings();
+  const serviceStatus = await getXamppServiceStatus(settings);
+  if (!serviceStatus.apacheRunning || !serviceStatus.mysqlRunning) {
+    const apachePortsLabel = serviceStatus.apachePorts.join(", ");
+    throw new Error(
+      `Start Apache on port ${apachePortsLabel} and MySQL on ${serviceStatus.mysqlHost}:${serviceStatus.mysqlPort} before using the installer.`
+    );
+  }
   const resolvedHtdocsPath = getResolvedHtdocsPath(settings);
   const basePath = (payload.basePath || resolvedHtdocsPath || "").trim();
   const folderName = (payload.folderName || "").trim();
