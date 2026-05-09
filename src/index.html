@@ -25,16 +25,20 @@
 
       <nav class="nav">
         <button class="nav-button active" data-screen="browser">
-          <span class="nav-button-short">B</span>
-          <span class="nav-button-label">Browser</span>
+          <span class="nav-button-short">🌐</span>
+          <span class="nav-button-label">🌐Browser</span>
         </button>
         <button class="nav-button" data-screen="installer">
-          <span class="nav-button-short">I</span>
-          <span class="nav-button-label">Installer</span>
+          <span class="nav-button-short">📥</span>
+          <span class="nav-button-label">📥Installer</span>
+        </button>
+        <button class="nav-button" data-screen="workspace">
+          <span class="nav-button-short">💻</span>
+          <span class="nav-button-label">💻Workspace</span>
         </button>
         <button class="nav-button" data-screen="settings">
-          <span class="nav-button-short">S</span>
-          <span class="nav-button-label">Settings</span>
+          <span class="nav-button-short">⚙️</span>
+          <span class="nav-button-label">⚙️Settings</span>
         </button>
         <div class="sidebar-divider"></div>
         <button id="theme-toggle-button" class="theme-toggle-button" type="button" title="Toggle theme">
@@ -730,6 +734,105 @@
               </div>
             </div>
           </div>
+        </div>
+      </section>
+
+      <section class="screen" id="workspace-screen">
+        <div class="workspace-shell">
+          <aside class="workspace-sidebar">
+            <div class="workspace-sidebar-head">
+              <div>
+                <span class="eyebrow">Clients</span>
+                <h2>Project desk</h2>
+              </div>
+              <button id="workspace-add-client-button" class="add-site-button" type="button">+</button>
+            </div>
+            <div id="workspace-client-list" class="workspace-client-list"></div>
+            <div id="workspace-context-menu" class="bookmark-context-menu hidden"></div>
+          </aside>
+
+          <section class="workspace-main">
+            <header class="workspace-hero">
+              <div>
+                <span class="eyebrow">Workspace</span>
+                <h1 id="workspace-client-title">Select a client</h1>
+                <p id="workspace-client-subtitle">Track notes, to-dos, and deadlines for each WordPress client.</p>
+              </div>
+            </header>
+
+            <div class="workspace-grid">
+              <section class="workspace-card workspace-card-wide">
+                <div class="card-header">
+                  <div>
+                    <span class="eyebrow">Client brief</span>
+                    <h3>Project details</h3>
+                  </div>
+                </div>
+                <div class="form-grid four-up">
+                  <label class="field">
+                    <span>Client name</span>
+                    <input id="workspace-client-name" type="text" placeholder="Acme Studio">
+                  </label>
+                  <label class="field">
+                    <span>Project name</span>
+                    <input id="workspace-project-name" type="text" placeholder="Marketing site rebuild">
+                  </label>
+                  <label class="field">
+                    <span>Primary site URL</span>
+                    <input id="workspace-project-url" type="text" placeholder="https://client-site.com">
+                  </label>
+                  <label class="field">
+                    <span>Stage</span>
+                    <input id="workspace-project-stage" type="text" placeholder="Build, QA, launch">
+                  </label>
+                </div>
+              </section>
+
+              <section class="workspace-card">
+                <div class="card-header">
+                  <div>
+                    <span class="eyebrow">Tasks</span>
+                    <h3>To-do list</h3>
+                  </div>
+                </div>
+                <div class="workspace-inline-form">
+                  <input id="workspace-todo-input" type="text" placeholder="Add a task for this client">
+                  <button id="workspace-add-todo-button" type="button" class="primary-button">Add</button>
+                </div>
+                <div id="workspace-todo-list" class="workspace-task-list"></div>
+              </section>
+
+              <section class="workspace-card">
+                <div class="card-header">
+                  <div>
+                    <span class="eyebrow">Calendar</span>
+                    <h3>Deadlines and events</h3>
+                  </div>
+                </div>
+                <div class="workspace-inline-form stacked">
+                  <input id="workspace-event-title" type="text" placeholder="Launch review call">
+                  <div class="workspace-event-row">
+                    <input id="workspace-event-date" type="date">
+                    <button id="workspace-add-event-button" type="button" class="primary-button">Add</button>
+                  </div>
+                </div>
+                <div id="workspace-event-list" class="workspace-event-list"></div>
+              </section>
+
+              <section class="workspace-card workspace-card-wide">
+                <div class="card-header">
+                  <div>
+                    <span class="eyebrow">Notes</span>
+                    <h3>Client notes</h3>
+                  </div>
+                </div>
+                <label class="field">
+                  <span>Working notes</span>
+                  <textarea id="workspace-notes" class="workspace-notes" placeholder="Record plugin decisions, content blockers, credentials needed, launch notes, and client requests."></textarea>
+                </label>
+              </section>
+            </div>
+          </section>
         </div>
       </section>
     </main>

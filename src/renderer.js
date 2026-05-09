@@ -16,6 +16,8 @@ const state = {
   bookmarkFolderTrail: [],
   sites: [],
   selectedSiteId: null,
+  workspaceClients: [],
+  selectedWorkspaceClientId: null,
   isEditingAddress: false,
   htdocsPath: "",
   apacheRunning: false,
@@ -40,11 +42,14 @@ let addressSuggestionsToken = 0;
 let draggedBrowserToolSection = null;
 let bookmarkFolderDialogContext = null;
 let draggedBookmarkId = null;
+let workspaceContextClientId = null;
 let xamppStatusRefreshTimer = null;
 let xamppStatusRefreshInFlight = null;
 const BROWSER_TOOL_ORDER_KEY = "wp-desktop.browser-tool-order";
 const BROWSER_TOOL_COLLAPSE_KEY = "wp-desktop.browser-tool-collapse";
 const XAMPP_STATUS_REFRESH_INTERVAL_MS = 5000;
+const WORKSPACE_CLIENTS_KEY = "wpdesktop.workspace.clients";
+const WORKSPACE_SELECTED_CLIENT_KEY = "wpdesktop.workspace.selected-client";
 const DEFAULT_BROWSER_TOOL_ORDER = ["sessions", "credentials", "bookmarks", "downloads", "permissions"];
 const DEFAULT_BROWSER_TOOL_COLLAPSE = {
   sessions: false,
@@ -206,6 +211,23 @@ const elements = {
   zipPath: document.getElementById("zip-path"),
   basePath: document.getElementById("base-path"),
   folderName: document.getElementById("folder-name"),
+  workspaceAddClientButton: document.getElementById("workspace-add-client-button"),
+  workspaceClientList: document.getElementById("workspace-client-list"),
+  workspaceContextMenu: document.getElementById("workspace-context-menu"),
+  workspaceClientTitle: document.getElementById("workspace-client-title"),
+  workspaceClientSubtitle: document.getElementById("workspace-client-subtitle"),
+  workspaceClientName: document.getElementById("workspace-client-name"),
+  workspaceProjectName: document.getElementById("workspace-project-name"),
+  workspaceProjectUrl: document.getElementById("workspace-project-url"),
+  workspaceProjectStage: document.getElementById("workspace-project-stage"),
+  workspaceTodoInput: document.getElementById("workspace-todo-input"),
+  workspaceAddTodoButton: document.getElementById("workspace-add-todo-button"),
+  workspaceTodoList: document.getElementById("workspace-todo-list"),
+  workspaceEventTitle: document.getElementById("workspace-event-title"),
+  workspaceEventDate: document.getElementById("workspace-event-date"),
+  workspaceAddEventButton: document.getElementById("workspace-add-event-button"),
+  workspaceEventList: document.getElementById("workspace-event-list"),
+  workspaceNotes: document.getElementById("workspace-notes"),
   dbHost: document.getElementById("db-host"),
   dbPort: document.getElementById("db-port"),
   dbUser: document.getElementById("db-user"),
@@ -553,6 +575,69 @@ elements.navButtons.forEach((button) => {
   button.addEventListener("click", () => showScreen(button.dataset.screen));
 });
 elements.sidebarToggleButton.addEventListener("click", toggleSidebar);
+elements.workspaceAddClientButton?.addEventListener("click", () => {
+  const client = buildWorkspaceClientRecord("");
+  state.workspaceClients.unshift(client);
+  state.selectedWorkspaceClientId = client.id;
+  saveWorkspaceClients();
+  showScreen("workspace");
+  renderWorkspace();
+  focusWorkspaceClientNameField();
+});
+elements.workspaceAddTodoButton?.addEventListener("click", () => {
+  const text = String(elements.workspaceTodoInput.value || "").trim();
+  if (!text) {
+    return;
+  }
+  updateSelectedWorkspaceClient((client) => {
+    client.todos.unshift({
+      id: `todo-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
+      text,
+      done: false
+    });
+  });
+  elements.workspaceTodoInput.value = "";
+});
+elements.workspaceTodoInput?.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    elements.workspaceAddTodoButton?.click();
+  }
+});
+elements.workspaceAddEventButton?.addEventListener("click", () => {
+  const title = String(elements.workspaceEventTitle.value || "").trim();
+  const date = String(elements.workspaceEventDate.value || "").trim();
+  if (!title || !date) {
+    return;
+  }
+  updateSelectedWorkspaceClient((client) => {
+    client.events.push({
+      id: `event-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
+      title,
+      date
+    });
+  });
+  elements.workspaceEventTitle.value = "";
+  elements.workspaceEventDate.value = "";
+});
+["workspaceClientName", "workspaceProjectName", "workspaceProjectUrl", "workspaceProjectStage"].forEach((key) => {
+  const map = {
+    workspaceClientName: "clientName",
+    workspaceProjectName: "projectName",
+    workspaceProjectUrl: "projectUrl",
+    workspaceProjectStage: "stage"
+  };
+  elements[key]?.addEventListener("input", (event) => {
+    updateSelectedWorkspaceClient((client) => {
+      client[map[key]] = event.target.value;
+    });
+  });
+});
+elements.workspaceNotes?.addEventListener("input", (event) => {
+  updateSelectedWorkspaceClient((client) => {
+    client.notes = event.target.value;
+  });
+});
 
 function showSiteTab(name) {
   elements.siteTabs.forEach((tab) => {
@@ -1092,6 +1177,370 @@ function writeBrowserToolPrefs(key, value) {
   } catch (_) {
     // Ignore renderer preference persistence failures.
   }
+}
+
+function getWorkspaceClientById(clientId) {
+  return state.workspaceClients.find((client) => client.id === clientId) || null;
+}
+
+function getSelectedWorkspaceClient() {
+  return getWorkspaceClientById(state.selectedWorkspaceClientId);
+}
+
+function saveWorkspaceClients() {
+  writeBrowserToolPrefs(WORKSPACE_CLIENTS_KEY, state.workspaceClients);
+  try {
+    window.localStorage.setItem(WORKSPACE_SELECTED_CLIENT_KEY, state.selectedWorkspaceClientId || "");
+  } catch (_) {
+    // Ignore workspace selection persistence failures.
+  }
+}
+
+function buildWorkspaceClientRecord(seedName = "") {
+  const label = String(seedName || "").trim() || `Client ${state.workspaceClients.length + 1}`;
+  return {
+    id: `client-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`,
+    clientName: label,
+    projectName: "",
+    projectUrl: "",
+    stage: "",
+    notes: "",
+    todos: [],
+    events: [],
+    updatedAt: Date.now()
+  };
+}
+
+function hideWorkspaceContextMenu() {
+  workspaceContextClientId = null;
+  elements.workspaceContextMenu?.classList.add("hidden");
+}
+
+function focusWorkspaceClientNameField() {
+  window.setTimeout(() => {
+    elements.workspaceClientName?.focus();
+    elements.workspaceClientName?.select();
+  }, 0);
+}
+
+function duplicateWorkspaceClient(client) {
+  if (!client) {
+    return;
+  }
+
+  const copy = {
+    ...client,
+    id: `client-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`,
+    clientName: `${client.clientName || "Client"} Copy`,
+    todos: (client.todos || []).map((todo) => ({
+      ...todo,
+      id: `todo-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`
+    })),
+    events: (client.events || []).map((event) => ({
+      ...event,
+      id: `event-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`
+    })),
+    updatedAt: Date.now()
+  };
+  state.workspaceClients.unshift(copy);
+  state.selectedWorkspaceClientId = copy.id;
+  saveWorkspaceClients();
+  renderWorkspace();
+}
+
+function deleteWorkspaceClient(clientId) {
+  const client = getWorkspaceClientById(clientId);
+  if (!client) {
+    return;
+  }
+
+  state.workspaceClients = state.workspaceClients.filter((entry) => entry.id !== clientId);
+  if (state.selectedWorkspaceClientId === clientId) {
+    state.selectedWorkspaceClientId = state.workspaceClients[0]?.id || null;
+  }
+  saveWorkspaceClients();
+  renderWorkspace();
+}
+
+function showWorkspaceContextMenu(clientId, anchorX, anchorY) {
+  const menu = elements.workspaceContextMenu;
+  const client = getWorkspaceClientById(clientId);
+  if (!menu || !client) {
+    return;
+  }
+
+  workspaceContextClientId = clientId;
+  menu.innerHTML = "";
+
+  const actions = [
+    {
+      label: "Open",
+      run: () => {
+        state.selectedWorkspaceClientId = clientId;
+        saveWorkspaceClients();
+        showScreen("workspace");
+        renderWorkspace();
+      }
+    },
+    {
+      label: "Duplicate",
+      run: () => duplicateWorkspaceClient(client)
+    },
+    {
+      label: "Rename",
+      run: () => {
+        state.selectedWorkspaceClientId = clientId;
+        saveWorkspaceClients();
+        showScreen("workspace");
+        renderWorkspace();
+        focusWorkspaceClientNameField();
+      }
+    },
+    {
+      label: "Delete",
+      run: () => deleteWorkspaceClient(clientId)
+    }
+  ];
+
+  actions.forEach((action) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = action.label;
+    button.addEventListener("click", () => {
+      hideWorkspaceContextMenu();
+      action.run();
+    });
+    menu.appendChild(button);
+  });
+
+  menu.classList.remove("hidden");
+  menu.style.left = `${anchorX}px`;
+  menu.style.top = `${anchorY}px`;
+}
+
+function sortWorkspaceEvents(events) {
+  return [...events].sort((left, right) => {
+    const leftDate = String(left?.date || "");
+    const rightDate = String(right?.date || "");
+    return leftDate.localeCompare(rightDate);
+  });
+}
+
+function renderWorkspaceClients() {
+  if (!elements.workspaceClientList) {
+    return;
+  }
+
+  elements.workspaceClientList.innerHTML = "";
+  if (!state.workspaceClients.length) {
+    const empty = document.createElement("div");
+    empty.className = "workspace-empty";
+    empty.textContent = "Create a client workspace to track tasks, notes, and deadlines.";
+    elements.workspaceClientList.appendChild(empty);
+    return;
+  }
+
+  state.workspaceClients.forEach((client) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `workspace-client-item${client.id === state.selectedWorkspaceClientId ? " active" : ""}`;
+    button.innerHTML = `
+      <strong>${escapeHtml(client.clientName || "Untitled client")}</strong>
+      <span>${escapeHtml(client.projectName || client.stage || "No project details yet")}</span>
+    `;
+    button.addEventListener("click", () => {
+      state.selectedWorkspaceClientId = client.id;
+      saveWorkspaceClients();
+      hideWorkspaceContextMenu();
+      renderWorkspace();
+    });
+    button.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      state.selectedWorkspaceClientId = client.id;
+      saveWorkspaceClients();
+      renderWorkspace();
+      showWorkspaceContextMenu(client.id, event.clientX, event.clientY);
+    });
+    elements.workspaceClientList.appendChild(button);
+  });
+}
+
+function renderWorkspaceTodoList(client) {
+  const list = elements.workspaceTodoList;
+  if (!list) {
+    return;
+  }
+
+  list.innerHTML = "";
+  if (!client) {
+    list.innerHTML = `<div class="workspace-empty">Select a client to manage tasks.</div>`;
+    return;
+  }
+  if (!client.todos.length) {
+    list.innerHTML = `<div class="workspace-empty">No tasks yet for this client.</div>`;
+    return;
+  }
+
+  client.todos.forEach((todo) => {
+    const item = document.createElement("div");
+    item.className = `workspace-task-item${todo.done ? " done" : ""}`;
+    item.innerHTML = `
+      <div class="workspace-item-copy">
+        <strong>${escapeHtml(todo.text || "")}</strong>
+        <span>${todo.done ? "Completed" : "Open task"}</span>
+      </div>
+      <div class="workspace-item-actions">
+        <button type="button" data-workspace-toggle-todo="${todo.id}">${todo.done ? "Undo" : "Done"}</button>
+        <button type="button" data-workspace-delete-todo="${todo.id}">Delete</button>
+      </div>
+    `;
+    item.querySelector("[data-workspace-toggle-todo]")?.addEventListener("click", () => {
+      todo.done = !todo.done;
+      client.updatedAt = Date.now();
+      saveWorkspaceClients();
+      renderWorkspace();
+    });
+    item.querySelector("[data-workspace-delete-todo]")?.addEventListener("click", () => {
+      client.todos = client.todos.filter((entry) => entry.id !== todo.id);
+      client.updatedAt = Date.now();
+      saveWorkspaceClients();
+      renderWorkspace();
+    });
+    list.appendChild(item);
+  });
+}
+
+function renderWorkspaceEventList(client) {
+  const list = elements.workspaceEventList;
+  if (!list) {
+    return;
+  }
+
+  list.innerHTML = "";
+  if (!client) {
+    list.innerHTML = `<div class="workspace-empty">Select a client to manage the calendar.</div>`;
+    return;
+  }
+  if (!client.events.length) {
+    list.innerHTML = `<div class="workspace-empty">No deadlines or events yet.</div>`;
+    return;
+  }
+
+  sortWorkspaceEvents(client.events).forEach((event) => {
+    const item = document.createElement("div");
+    item.className = "workspace-event-item";
+    item.innerHTML = `
+      <div class="workspace-item-copy">
+        <strong>${escapeHtml(event.title || "")}</strong>
+        <span>${escapeHtml(event.date || "No date")}</span>
+      </div>
+      <div class="workspace-item-actions">
+        <button type="button" data-workspace-delete-event="${event.id}">Delete</button>
+      </div>
+    `;
+    item.querySelector("[data-workspace-delete-event]")?.addEventListener("click", () => {
+      client.events = client.events.filter((entry) => entry.id !== event.id);
+      client.updatedAt = Date.now();
+      saveWorkspaceClients();
+      renderWorkspace();
+    });
+    list.appendChild(item);
+  });
+}
+
+function renderWorkspace() {
+  const client = getSelectedWorkspaceClient();
+  hideWorkspaceContextMenu();
+  renderWorkspaceClients();
+  const hasClient = Boolean(client);
+  [
+    elements.workspaceClientName,
+    elements.workspaceProjectName,
+    elements.workspaceProjectUrl,
+    elements.workspaceProjectStage,
+    elements.workspaceTodoInput,
+    elements.workspaceAddTodoButton,
+    elements.workspaceEventTitle,
+    elements.workspaceEventDate,
+    elements.workspaceAddEventButton,
+    elements.workspaceNotes
+  ].forEach((element) => {
+    if (element) {
+      element.disabled = !hasClient;
+    }
+  });
+
+  if (!client) {
+    elements.workspaceClientTitle.textContent = "Select a client";
+    elements.workspaceClientSubtitle.textContent = "Track notes, to-dos, and deadlines for each WordPress client.";
+    elements.workspaceClientName.value = "";
+    elements.workspaceProjectName.value = "";
+    elements.workspaceProjectUrl.value = "";
+    elements.workspaceProjectStage.value = "";
+    elements.workspaceNotes.value = "";
+    renderWorkspaceTodoList(null);
+    renderWorkspaceEventList(null);
+    return;
+  }
+
+  elements.workspaceClientTitle.textContent = client.clientName || "Untitled client";
+  elements.workspaceClientSubtitle.textContent = client.projectName || client.stage || "Workspace ready for planning.";
+  elements.workspaceClientName.value = client.clientName || "";
+  elements.workspaceProjectName.value = client.projectName || "";
+  elements.workspaceProjectUrl.value = client.projectUrl || "";
+  elements.workspaceProjectStage.value = client.stage || "";
+  elements.workspaceNotes.value = client.notes || "";
+  renderWorkspaceTodoList(client);
+  renderWorkspaceEventList(client);
+}
+
+function updateSelectedWorkspaceClient(mutator) {
+  const client = getSelectedWorkspaceClient();
+  if (!client) {
+    return;
+  }
+
+  mutator(client);
+  client.updatedAt = Date.now();
+  saveWorkspaceClients();
+  renderWorkspace();
+}
+
+function loadWorkspaceState() {
+  const clients = readBrowserToolPrefs(WORKSPACE_CLIENTS_KEY, []);
+  state.workspaceClients = Array.isArray(clients) ? clients.map((client) => ({
+    id: String(client?.id || `client-${Date.now()}`),
+    clientName: String(client?.clientName || "").trim(),
+    projectName: String(client?.projectName || "").trim(),
+    projectUrl: String(client?.projectUrl || "").trim(),
+    stage: String(client?.stage || "").trim(),
+    notes: String(client?.notes || ""),
+    todos: Array.isArray(client?.todos) ? client.todos.map((todo) => ({
+      id: String(todo?.id || `todo-${Date.now()}`),
+      text: String(todo?.text || "").trim(),
+      done: todo?.done === true
+    })).filter((todo) => todo.text) : [],
+    events: Array.isArray(client?.events) ? client.events.map((event) => ({
+      id: String(event?.id || `event-${Date.now()}`),
+      title: String(event?.title || "").trim(),
+      date: String(event?.date || "").trim()
+    })).filter((event) => event.title) : [],
+    updatedAt: Number(client?.updatedAt || Date.now())
+  })) : [];
+
+  try {
+    state.selectedWorkspaceClientId = window.localStorage.getItem(WORKSPACE_SELECTED_CLIENT_KEY) || "";
+  } catch (_) {
+    state.selectedWorkspaceClientId = "";
+  }
+
+  if (state.selectedWorkspaceClientId && !getSelectedWorkspaceClient()) {
+    state.selectedWorkspaceClientId = "";
+  }
+  if (!state.selectedWorkspaceClientId && state.workspaceClients[0]) {
+    state.selectedWorkspaceClientId = state.workspaceClients[0].id;
+  }
+  renderWorkspace();
 }
 
 function saveBrowserToolOrder() {
@@ -1811,9 +2260,14 @@ function renderBrowserTabs() {
     button.dataset.tabId = tab.id;
     button.className = `tab-button${tab.id === state.browser.activeTabId ? " active" : ""}${tab.pinned ? " pinned" : ""}`;
     const title = escapeHtml(tab.title || tab.url);
+    const favicon = String(tab.favicon || "").trim();
+    const faviconMarkup = favicon
+      ? `<img class="tab-favicon" src="${escapeHtml(favicon)}" alt="" />`
+      : `<span class="tab-favicon tab-favicon-fallback" aria-hidden="true">${escapeHtml((tab.title || tab.url || "?").trim().charAt(0).toUpperCase() || "?")}</span>`;
     button.title = `${tab.title || tab.url}\n${getTabSessionInfoCopy(tab)}`;
     button.innerHTML = `
       <span class="tab-copy">
+        ${faviconMarkup}
         <span class="tab-title">${tab.pinned ? "[Pin] " : ""}${title}${tab.muted ? " [Muted]" : ""}</span>
       </span>
       <span class="tab-close" data-close="${tab.id}">x</span>
@@ -2645,6 +3099,7 @@ document.addEventListener("pointerdown", (event) => {
   if (target instanceof Element && (
     target.closest("#bookmark-context-menu")
     || target.closest(".bookmark-folder-chip")
+    || target.closest("#workspace-context-menu")
   )) {
     if (!target.closest(".extension-menu-shell")) {
       hideExtensionsMenuPopup();
@@ -2653,11 +3108,15 @@ document.addEventListener("pointerdown", (event) => {
   }
 
   hideBookmarkFolderMenu();
+  hideWorkspaceContextMenu();
   hideExtensionsMenuPopup();
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && isBookmarkFolderMenuOpen()) {
     hideBookmarkFolderMenu();
+  }
+  if (event.key === "Escape") {
+    hideWorkspaceContextMenu();
   }
   if (event.key === "Escape") {
     hideExtensionsMenuPopup();
@@ -2986,6 +3445,7 @@ window.addEventListener("beforeunload", () => {
 });
 
 async function loadSavedState() {
+  loadWorkspaceState();
   const settings = await window.desktopAPI.getSettings();
   applySettingsPayload(settings);
   elements.saveDbProfile.checked = false;

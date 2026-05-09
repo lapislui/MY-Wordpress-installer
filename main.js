@@ -1157,6 +1157,25 @@ function buildBrowserWebPreferences(partition) {
   };
 }
 
+function shouldOpenAsPopupWindow(details = {}) {
+  const featureText = String(details.features || "").trim();
+  const disposition = String(details.disposition || "").trim().toLowerCase();
+  return Boolean(featureText) || disposition === "new-window";
+}
+
+function buildPopupBrowserWindowOptions(parentWindow, partition) {
+  return {
+    parent: parentWindow,
+    width: 520,
+    height: 720,
+    minWidth: 420,
+    minHeight: 520,
+    autoHideMenuBar: true,
+    show: true,
+    webPreferences: buildBrowserWebPreferences(partition)
+  };
+}
+
 function getStoredPermissionDecision(origin, permission) {
   if (!origin || !permission) {
     return null;
@@ -3002,6 +3021,7 @@ function serializeBrowserState(state) {
       groupName: getTabGroupById(state, tab.groupId)?.name || "",
       id: tab.id,
       title: tab.nickname || tab.title || tab.url,
+      favicon: tab.favicon || "",
       url: tab.url,
       isLoading: Boolean(tab.isLoading),
       error: tab.error || null,
@@ -4159,6 +4179,14 @@ function wireTabEvents(win, tab) {
   });
 
   wc.setWindowOpenHandler((details) => {
+    if (shouldOpenAsPopupWindow(details)) {
+      configureBrowserSession(win, tab.partition);
+      return {
+        action: "allow",
+        overrideBrowserWindowOptions: buildPopupBrowserWindowOptions(win, tab.partition)
+      };
+    }
+
     createBrowserTab(win, details.url, tab.mode || "auto", true, null, {
       groupId: tab.groupId || null
     });
@@ -4185,6 +4213,11 @@ function wireTabEvents(win, tab) {
     recordBrowserHistoryVisit(tab.url, tab.title, false);
     syncSavedSessionPartitionForTab(win, tab);
     scheduleAutoSaveForTab(win, tab);
+    emitBrowserState(win);
+  });
+
+  wc.on("page-favicon-updated", (_event, favicons) => {
+    tab.favicon = Array.isArray(favicons) ? String(favicons[0] || "").trim() : "";
     emitBrowserState(win);
   });
 
@@ -4278,6 +4311,7 @@ function createBrowserTab(win, url, mode = "auto", activate = true, insertIndex 
   const tab = {
     id,
     title: "New Tab",
+    favicon: "",
     nickname: String(tabOptions.nickname || "").trim(),
     groupId: group?.id || null,
     url: resolvedUrl,
