@@ -1485,7 +1485,9 @@ button:hover { transform: translateY(-1px); }
 
 .workspace-notes {
   min-height: 240px;
+  max-height: 70vh;
   resize: vertical;
+  overflow: auto;
 }
 
 .workspace-notes-pages {
@@ -1502,12 +1504,14 @@ button:hover { transform: translateY(-1px); }
 
 .workspace-notes-preview {
   min-height: 240px;
+  max-height: 70vh;
   padding: 18px 20px;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: var(--surface-2);
   color: var(--text);
   overflow: auto;
+  resize: vertical;
 }
 
 .workspace-notes-preview.hidden,
