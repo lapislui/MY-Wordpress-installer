@@ -1,6 +1,6 @@
 {
   "name": "my-wordpress-installer",
-  "version": "1.0.0",
+  "version": "0.0.5",
   "description": "Electron browser and WordPress installer for local XAMPP workflows.",
   "productName": "WP Desktop",
   "author": "Keval",
