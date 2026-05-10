@@ -1831,6 +1831,7 @@ function applyWorkspaceMarkdownInline(text) {
       const safeTitle = title ? ` title="${escapeHtml(title)}"` : "";
       return `<a href="${safeHref}" target="_blank" rel="noreferrer noopener"${safeTitle}>${label}</a>`;
     })
+    .replace(/\$([^$\n]+)\$/g, "<code>$1</code>")
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/__([^_]+)__/g, "<strong>$1</strong>")
@@ -1845,53 +1846,210 @@ function renderWorkspaceMarkdownToHtml(source) {
     return `<p>Nothing to preview yet.</p>`;
   }
 
-  const fenceStore = [];
-  const withFencesTokenized = text.replace(/```([\w-]*)\n([\s\S]*?)```/g, (_, language, code) => {
-    const token = `@@FENCE_${fenceStore.length}@@`;
-    fenceStore.push(`<pre><code${language ? ` data-language="${escapeHtml(language)}"` : ""}>${escapeHtml(code.replace(/\n$/, ""))}</code></pre>`);
+  const tokenStore = [];
+  const tokenizeBlock = (markup) => {
+    const token = `@@BLOCK_${tokenStore.length}@@`;
+    tokenStore.push(markup);
     return token;
-  });
+  };
 
-  const blocks = withFencesTokenized.split(/\n\s*\n/);
-  const html = blocks.map((block) => {
-    const trimmed = block.trim();
-    if (!trimmed) {
-      return "";
-    }
-    if (/^@@FENCE_\d+@@$/.test(trimmed)) {
-      return trimmed;
-    }
-    if (/^<[^>]+>/.test(trimmed)) {
-      return trimmed;
-    }
-    if (/^#{1,6}\s+/.test(trimmed)) {
-      const [, hashes, content] = trimmed.match(/^(#{1,6})\s+([\s\S]+)$/) || [];
-      return `<h${hashes.length}>${applyWorkspaceMarkdownInline(escapeHtml(content || ""))}</h${hashes.length}>`;
-    }
-    if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)) {
-      return "<hr>";
-    }
-    if (/^(>.*\n?)+$/.test(trimmed)) {
-      const lines = trimmed.split("\n").map((line) => line.replace(/^>\s?/, ""));
-      return `<blockquote>${lines.map((line) => `<p>${applyWorkspaceMarkdownInline(escapeHtml(line))}</p>`).join("")}</blockquote>`;
-    }
-    if (/^(\s*[-*+]\s+.+\n?)+$/.test(trimmed)) {
-      const items = trimmed.split("\n").map((line) => line.replace(/^\s*[-*+]\s+/, "").trim()).filter(Boolean);
-      return `<ul>${items.map((item) => `<li>${applyWorkspaceMarkdownInline(escapeHtml(item))}</li>`).join("")}</ul>`;
-    }
-    if (/^(\s*\d+\.\s+.+\n?)+$/.test(trimmed)) {
-      const items = trimmed.split("\n").map((line) => line.replace(/^\s*\d+\.\s+/, "").trim()).filter(Boolean);
-      return `<ol>${items.map((item) => `<li>${applyWorkspaceMarkdownInline(escapeHtml(item))}</li>`).join("")}</ol>`;
-    }
+  const tokenized = text
+    .replace(/\$\$([\s\S]*?)\$\$/g, (_, math) => tokenizeBlock(`<pre><code>${escapeHtml(String(math || "").trim())}</code></pre>`))
+    .replace(/```([\w-]*)\n([\s\S]*?)```/g, (_, language, code) => (
+      tokenizeBlock(
+        `<pre><code${language ? ` data-language="${escapeHtml(language)}"` : ""}>${escapeHtml(code.replace(/\n$/, ""))}</code></pre>`
+      )
+    ));
 
-    const paragraph = trimmed
-      .split("\n")
-      .map((line) => applyWorkspaceMarkdownInline(escapeHtml(line)))
+  const lines = tokenized.split("\n");
+
+  function isBlank(line) {
+    return !String(line || "").trim();
+  }
+
+  function isTokenLine(line) {
+    return /^@@BLOCK_\d+@@$/.test(String(line || "").trim());
+  }
+
+  function renderTokenLine(line) {
+    return String(line || "").trim().replace(/@@BLOCK_(\d+)@@/g, (_, index) => tokenStore[Number(index)] || "");
+  }
+
+  function renderParagraph(blockLines) {
+    const paragraph = blockLines
+      .map((line) => applyWorkspaceMarkdownInline(escapeHtml(line.trimEnd())))
       .join("<br>");
     return `<p>${paragraph}</p>`;
-  }).join("\n");
+  }
 
-  return html.replace(/@@FENCE_(\d+)@@/g, (_, index) => fenceStore[Number(index)] || "");
+  function isTableSeparator(line) {
+    return /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$/.test(line);
+  }
+
+  function splitTableRow(line) {
+    return String(line || "")
+      .trim()
+      .replace(/^\||\|$/g, "")
+      .split("|")
+      .map((cell) => cell.trim());
+  }
+
+  function renderTable(headerLine, bodyLines) {
+    const headers = splitTableRow(headerLine);
+    const rows = bodyLines.map((line) => splitTableRow(line));
+    return `
+      <table>
+        <thead>
+          <tr>${headers.map((cell) => `<th>${applyWorkspaceMarkdownInline(escapeHtml(cell))}</th>`).join("")}</tr>
+        </thead>
+        <tbody>
+          ${rows.map((row) => `<tr>${headers.map((_, index) => `<td>${applyWorkspaceMarkdownInline(escapeHtml(row[index] || ""))}</td>`).join("")}</tr>`).join("")}
+        </tbody>
+      </table>
+    `;
+  }
+
+  function renderList(lineSet, startIndex, ordered) {
+    const items = [];
+    let index = startIndex;
+    const itemPattern = ordered ? /^\s*\d+\.\s+(.*)$/ : /^\s*[-*+]\s+(.*)$/;
+
+    while (index < lineSet.length) {
+      const match = lineSet[index].match(itemPattern);
+      if (!match) {
+        break;
+      }
+
+      const itemLines = [match[1]];
+      index += 1;
+      while (index < lineSet.length) {
+        const nextLine = lineSet[index];
+        if (isBlank(nextLine)) {
+          itemLines.push("");
+          index += 1;
+          continue;
+        }
+        if (itemPattern.test(nextLine)) {
+          break;
+        }
+        if (/^\s{2,}|^\t|^>/.test(nextLine)) {
+          itemLines.push(nextLine.replace(/^\s{1,4}/, ""));
+          index += 1;
+          continue;
+        }
+        break;
+      }
+
+      items.push(itemLines.join("\n").trim());
+    }
+
+    const tag = ordered ? "ol" : "ul";
+    return {
+      html: `<${tag}>${items.map((item) => `<li>${renderBlocks(item.split("\n"))}</li>`).join("")}</${tag}>`,
+      nextIndex: index
+    };
+  }
+
+  function renderBlocks(blockLines) {
+    const parts = [];
+    for (let index = 0; index < blockLines.length;) {
+      const line = blockLines[index];
+      if (isBlank(line)) {
+        index += 1;
+        continue;
+      }
+
+      if (isTokenLine(line)) {
+        parts.push(renderTokenLine(line));
+        index += 1;
+        continue;
+      }
+
+      if (/^#{1,6}\s+/.test(line)) {
+        const [, hashes, content] = line.match(/^(#{1,6})\s+([\s\S]+)$/) || [];
+        parts.push(`<h${hashes.length}>${applyWorkspaceMarkdownInline(escapeHtml(content || ""))}</h${hashes.length}>`);
+        index += 1;
+        continue;
+      }
+
+      if (/^(-{3,}|\*{3,}|_{3,})\s*$/.test(line.trim())) {
+        parts.push("<hr>");
+        index += 1;
+        continue;
+      }
+
+      if (index + 1 < blockLines.length && /\|/.test(line) && isTableSeparator(blockLines[index + 1])) {
+        const body = [];
+        index += 2;
+        while (index < blockLines.length && /\|/.test(blockLines[index]) && !isBlank(blockLines[index])) {
+          body.push(blockLines[index]);
+          index += 1;
+        }
+        parts.push(renderTable(line, body));
+        continue;
+      }
+
+      if (/^\s*>/.test(line)) {
+        const quoteLines = [];
+        while (index < blockLines.length && (/^\s*>/.test(blockLines[index]) || isBlank(blockLines[index]))) {
+          quoteLines.push(blockLines[index].replace(/^\s*>\s?/, ""));
+          index += 1;
+        }
+        parts.push(`<blockquote>${renderBlocks(quoteLines)}</blockquote>`);
+        continue;
+      }
+
+      if (/^\s*[-*+]\s+/.test(line)) {
+        const result = renderList(blockLines, index, false);
+        parts.push(result.html);
+        index = result.nextIndex;
+        continue;
+      }
+
+      if (/^\s*\d+\.\s+/.test(line)) {
+        const result = renderList(blockLines, index, true);
+        parts.push(result.html);
+        index = result.nextIndex;
+        continue;
+      }
+
+      if (/^\s*<[^>]+>/.test(line)) {
+        const htmlLines = [line];
+        index += 1;
+        while (index < blockLines.length && !isBlank(blockLines[index])) {
+          htmlLines.push(blockLines[index]);
+          index += 1;
+        }
+        parts.push(htmlLines.join("\n"));
+        continue;
+      }
+
+      const paragraphLines = [line];
+      index += 1;
+      while (index < blockLines.length) {
+        const nextLine = blockLines[index];
+        if (
+          isBlank(nextLine)
+          || isTokenLine(nextLine)
+          || /^#{1,6}\s+/.test(nextLine)
+          || /^(-{3,}|\*{3,}|_{3,})\s*$/.test(nextLine.trim())
+          || /^\s*>/.test(nextLine)
+          || /^\s*[-*+]\s+/.test(nextLine)
+          || /^\s*\d+\.\s+/.test(nextLine)
+          || (/\|/.test(nextLine) && index + 1 < blockLines.length && isTableSeparator(blockLines[index + 1]))
+        ) {
+          break;
+        }
+        paragraphLines.push(nextLine);
+        index += 1;
+      }
+      parts.push(renderParagraph(paragraphLines));
+    }
+
+    return parts.join("\n");
+  }
+
+  return renderBlocks(lines).replace(/@@BLOCK_(\d+)@@/g, (_, index) => tokenStore[Number(index)] || "");
 }
 
 function sanitizeWorkspaceNotesHtml(html) {
@@ -2674,16 +2832,12 @@ function findWorkspacePanelDropTarget(pointerY, currentPanel) {
 
 function initWorkspacePanels() {
   getWorkspacePanels().forEach((panel) => {
+    const dragHandle = panel.querySelector(".workspace-panel-drag");
     panel.querySelector("[data-workspace-panel-toggle]")?.addEventListener("click", () => {
       toggleWorkspacePanel(panel);
     });
 
-    panel.addEventListener("dragstart", (event) => {
-      if (!(event.target instanceof Element) || !event.target.closest(".workspace-panel-drag")) {
-        event.preventDefault();
-        return;
-      }
-
+    dragHandle?.addEventListener("dragstart", (event) => {
       draggedWorkspacePanel = panel;
       panel.classList.add("dragging");
       if (event.dataTransfer) {
@@ -2692,7 +2846,7 @@ function initWorkspacePanels() {
       }
     });
 
-    panel.addEventListener("dragend", () => {
+    dragHandle?.addEventListener("dragend", () => {
       draggedWorkspacePanel?.classList.remove("dragging");
       draggedWorkspacePanel = null;
       saveWorkspacePanelOrder();
