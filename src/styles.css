@@ -1488,6 +1488,18 @@ button:hover { transform: translateY(-1px); }
   resize: vertical;
 }
 
+.workspace-notes-pages {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.workspace-notes-pages select {
+  flex: 1;
+  min-width: 220px;
+}
+
 .workspace-notes-preview {
   min-height: 240px;
   padding: 18px 20px;

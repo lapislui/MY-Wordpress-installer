@@ -48,6 +48,7 @@ let draggedWorkspacePanel = null;
 let bookmarkFolderDialogContext = null;
 let draggedBookmarkId = null;
 let workspaceContextClientId = null;
+let workspaceMediaContextResource = null;
 let xamppStatusRefreshTimer = null;
 let xamppStatusRefreshInFlight = null;
 const BROWSER_TOOL_ORDER_KEY = "wp-desktop.browser-tool-order";
@@ -229,6 +230,7 @@ const elements = {
   workspaceAddClientButton: document.getElementById("workspace-add-client-button"),
   workspaceClientList: document.getElementById("workspace-client-list"),
   workspaceContextMenu: document.getElementById("workspace-context-menu"),
+  workspaceMediaContextMenu: document.getElementById("workspace-media-context-menu"),
   workspaceGrid: document.getElementById("workspace-grid"),
   workspaceClientTitle: document.getElementById("workspace-client-title"),
   workspaceClientSubtitle: document.getElementById("workspace-client-subtitle"),
@@ -263,6 +265,10 @@ const elements = {
   workspaceNotes: document.getElementById("workspace-notes"),
   workspaceNotesEditorShell: document.getElementById("workspace-notes-editor-shell"),
   workspaceNotesPreview: document.getElementById("workspace-notes-preview"),
+  workspaceNotesPageSelect: document.getElementById("workspace-notes-page-select"),
+  workspaceAddNotesPageButton: document.getElementById("workspace-add-notes-page-button"),
+  workspaceDeleteNotesPageButton: document.getElementById("workspace-delete-notes-page-button"),
+  workspaceNotesPageTitle: document.getElementById("workspace-notes-page-title"),
   workspaceNotesEditButton: document.getElementById("workspace-notes-edit-button"),
   workspaceNotesPreviewButton: document.getElementById("workspace-notes-preview-button"),
   workspaceClearNotesButton: document.getElementById("workspace-clear-notes-button"),
@@ -801,7 +807,45 @@ elements.workspaceTodoEventLink?.addEventListener("change", () => {
 });
 elements.workspaceNotes?.addEventListener("input", (event) => {
   updateSelectedWorkspaceClient((client) => {
-    client.notes = event.target.value;
+    const page = getSelectedWorkspaceNotePage(client);
+    if (page) {
+      page.content = event.target.value;
+    }
+  });
+});
+elements.workspaceNotesPageSelect?.addEventListener("change", (event) => {
+  updateSelectedWorkspaceClient((client) => {
+    client.selectedNotePageId = String(event.target.value || "");
+    ensureWorkspaceNotePages(client);
+  });
+});
+elements.workspaceNotesPageTitle?.addEventListener("input", (event) => {
+  updateSelectedWorkspaceClient((client) => {
+    const page = getSelectedWorkspaceNotePage(client);
+    if (page) {
+      page.title = String(event.target.value || "").trimStart();
+    }
+  });
+});
+elements.workspaceAddNotesPageButton?.addEventListener("click", () => {
+  updateSelectedWorkspaceClient((client) => {
+    const pages = ensureWorkspaceNotePages(client);
+    const newPage = buildWorkspaceNotePage(`Page ${pages.length + 1}`);
+    pages.push(newPage);
+    client.selectedNotePageId = newPage.id;
+  });
+});
+elements.workspaceDeleteNotesPageButton?.addEventListener("click", () => {
+  updateSelectedWorkspaceClient((client) => {
+    const pages = ensureWorkspaceNotePages(client);
+    if (pages.length <= 1) {
+      pages[0].content = "";
+      pages[0].title = "Notes";
+      client.selectedNotePageId = pages[0].id;
+      return;
+    }
+    client.notePages = pages.filter((page) => page.id !== client.selectedNotePageId);
+    client.selectedNotePageId = client.notePages[0]?.id || "";
   });
 });
 elements.workspaceNotesEditButton?.addEventListener("click", () => {
@@ -817,7 +861,10 @@ elements.workspaceClearNotesButton?.addEventListener("click", () => {
     return;
   }
   updateSelectedWorkspaceClient((client) => {
-    client.notes = "";
+    const page = getSelectedWorkspaceNotePage(client);
+    if (page) {
+      page.content = "";
+    }
   });
 });
 
@@ -1385,6 +1432,7 @@ function saveWorkspaceClients() {
 
 function buildWorkspaceClientRecord(seedName = "") {
   const label = String(seedName || "").trim() || `Client ${state.workspaceClients.length + 1}`;
+  const initialPage = buildWorkspaceNotePage("Notes");
   return {
     id: `client-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`,
     clientName: label,
@@ -1399,11 +1447,45 @@ function buildWorkspaceClientRecord(seedName = "") {
     adminUrl: "",
     priority: "",
     notes: "",
+    notePages: [initialPage],
+    selectedNotePageId: initialPage.id,
     todos: [],
     events: [],
     resources: [],
     updatedAt: Date.now()
   };
+}
+
+function buildWorkspaceNotePage(seedTitle = "Notes", seedContent = "") {
+  return {
+    id: `note-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`,
+    title: String(seedTitle || "").trim() || "Notes",
+    content: String(seedContent || "")
+  };
+}
+
+function ensureWorkspaceNotePages(client) {
+  if (!client) {
+    return [];
+  }
+
+  if (!Array.isArray(client.notePages) || !client.notePages.length) {
+    client.notePages = [buildWorkspaceNotePage("Notes", client.notes || "")];
+  }
+  client.notePages = client.notePages.map((page) => ({
+    id: String(page?.id || `note-${Date.now()}`),
+    title: String(page?.title || "").trim() || "Notes",
+    content: String(page?.content || "")
+  }));
+  if (!client.selectedNotePageId || !client.notePages.some((page) => page.id === client.selectedNotePageId)) {
+    client.selectedNotePageId = client.notePages[0].id;
+  }
+  return client.notePages;
+}
+
+function getSelectedWorkspaceNotePage(client) {
+  const pages = ensureWorkspaceNotePages(client);
+  return pages.find((page) => page.id === client.selectedNotePageId) || pages[0] || null;
 }
 
 function resetWorkspaceTodoForm() {
@@ -1533,6 +1615,59 @@ function hideWorkspaceContextMenu() {
   elements.workspaceContextMenu?.classList.add("hidden");
 }
 
+function hideWorkspaceMediaContextMenu() {
+  workspaceMediaContextResource = null;
+  elements.workspaceMediaContextMenu?.classList.add("hidden");
+}
+
+function showWorkspaceMediaContextMenu(resource, anchorX, anchorY) {
+  const menu = elements.workspaceMediaContextMenu;
+  if (!menu || !resource) {
+    return;
+  }
+
+  workspaceMediaContextResource = resource;
+  menu.innerHTML = "";
+
+  const actions = [
+    {
+      label: "Copy media",
+      run: async () => {
+        const result = await window.desktopAPI.copyWorkspaceMedia(resource.target);
+        setStatus(result?.message || "Copied media.");
+      }
+    },
+    {
+      label: "Open with",
+      run: async () => {
+        const result = await window.desktopAPI.openWorkspaceMediaWith(resource.target);
+        if (result?.message) {
+          setStatus(result.message);
+        }
+      }
+    }
+  ];
+
+  actions.forEach((action) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = action.label;
+    button.addEventListener("click", async () => {
+      hideWorkspaceMediaContextMenu();
+      try {
+        await action.run();
+      } catch (error) {
+        setStatus(error?.message || "Workspace media action failed.");
+      }
+    });
+    menu.appendChild(button);
+  });
+
+  menu.classList.remove("hidden");
+  menu.style.left = `${anchorX}px`;
+  menu.style.top = `${anchorY}px`;
+}
+
 function focusWorkspaceClientNameField() {
   window.setTimeout(() => {
     elements.workspaceClientName?.focus();
@@ -1547,6 +1682,7 @@ function duplicateWorkspaceClient(client) {
 
   const eventIdMap = new Map();
   const resourceIdMap = new Map();
+  const notePageIdMap = new Map();
   const duplicatedEvents = (client.events || []).map((event) => {
     const id = `event-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
     eventIdMap.set(event.id, id);
@@ -1563,11 +1699,21 @@ function duplicateWorkspaceClient(client) {
       id
     };
   });
+  const duplicatedNotePages = ensureWorkspaceNotePages(client).map((page) => {
+    const id = `note-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`;
+    notePageIdMap.set(page.id, id);
+    return {
+      ...page,
+      id
+    };
+  });
 
   const copy = {
     ...client,
     id: `client-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`,
     clientName: `${client.clientName || "Client"} Copy`,
+    notePages: duplicatedNotePages,
+    selectedNotePageId: notePageIdMap.get(client.selectedNotePageId) || duplicatedNotePages[0]?.id || "",
     todos: (client.todos || []).map((todo) => ({
       ...todo,
       id: `todo-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
@@ -1800,10 +1946,26 @@ function sanitizeWorkspaceNotesHtml(html) {
 
 function renderWorkspaceNotesPanel(client) {
   const hasClient = Boolean(client);
-  const notesValue = client?.notes || "";
+  const selectedPage = client ? getSelectedWorkspaceNotePage(client) : null;
+  const notesValue = selectedPage?.content || "";
 
   if (elements.workspaceNotes) {
     elements.workspaceNotes.value = notesValue;
+  }
+  if (elements.workspaceNotesPageTitle) {
+    elements.workspaceNotesPageTitle.value = selectedPage?.title || "";
+  }
+  if (elements.workspaceNotesPageSelect) {
+    elements.workspaceNotesPageSelect.innerHTML = "";
+    if (client) {
+      ensureWorkspaceNotePages(client).forEach((page) => {
+        const option = document.createElement("option");
+        option.value = page.id;
+        option.textContent = page.title || "Untitled page";
+        elements.workspaceNotesPageSelect.appendChild(option);
+      });
+      elements.workspaceNotesPageSelect.value = selectedPage?.id || "";
+    }
   }
 
   if (elements.workspaceNotesEditButton) {
@@ -1816,6 +1978,18 @@ function renderWorkspaceNotesPanel(client) {
   const showPreview = hasClient && uiState.workspaceNotesMode === "preview";
   elements.workspaceNotesEditorShell?.classList.toggle("hidden", showPreview);
   elements.workspaceNotesPreview?.classList.toggle("hidden", !showPreview);
+  if (elements.workspaceAddNotesPageButton) {
+    elements.workspaceAddNotesPageButton.disabled = !hasClient;
+  }
+  if (elements.workspaceDeleteNotesPageButton) {
+    elements.workspaceDeleteNotesPageButton.disabled = !hasClient;
+  }
+  if (elements.workspaceNotesPageSelect) {
+    elements.workspaceNotesPageSelect.disabled = !hasClient;
+  }
+  if (elements.workspaceNotesPageTitle) {
+    elements.workspaceNotesPageTitle.disabled = !hasClient;
+  }
 
   if (elements.workspaceNotesPreview) {
     elements.workspaceNotesPreview.innerHTML = sanitizeWorkspaceNotesHtml(renderWorkspaceMarkdownToHtml(notesValue));
@@ -2127,6 +2301,13 @@ function renderWorkspaceResourceList(client) {
       }
       void openExistingPath(resource.target, "Resource path was not found.");
     });
+    item.querySelector("[data-workspace-preview-resource]")?.addEventListener("contextmenu", (event) => {
+      if (!isPreviewableImage) {
+        return;
+      }
+      event.preventDefault();
+      showWorkspaceMediaContextMenu(resource, event.clientX, event.clientY);
+    });
     item.querySelector("[data-workspace-preview-resource]")?.addEventListener("keydown", (event) => {
       if (event.key !== "Enter" && event.key !== " ") {
         return;
@@ -2228,6 +2409,10 @@ function renderWorkspace() {
     elements.workspaceEventDate,
     elements.workspaceAddEventButton,
     elements.workspaceNotes,
+    elements.workspaceNotesPageSelect,
+    elements.workspaceNotesPageTitle,
+    elements.workspaceAddNotesPageButton,
+    elements.workspaceDeleteNotesPageButton,
     elements.workspaceNotesEditButton,
     elements.workspaceNotesPreviewButton,
     elements.workspaceResourceType,
@@ -2352,6 +2537,12 @@ function loadWorkspaceState() {
     adminUrl: String(client?.adminUrl || "").trim(),
     priority: String(client?.priority || "").trim(),
     notes: String(client?.notes || ""),
+    notePages: Array.isArray(client?.notePages) ? client.notePages.map((page) => ({
+      id: String(page?.id || `note-${Date.now()}`),
+      title: String(page?.title || "").trim() || "Notes",
+      content: String(page?.content || "")
+    })) : [],
+    selectedNotePageId: String(client?.selectedNotePageId || ""),
     todos: Array.isArray(client?.todos) ? client.todos.map((todo) => ({
       id: String(todo?.id || `todo-${Date.now()}`),
       text: String(todo?.text || "").trim(),
@@ -2376,6 +2567,10 @@ function loadWorkspaceState() {
     })).filter((resource) => resource.target) : [],
     updatedAt: Number(client?.updatedAt || Date.now())
   })) : [];
+
+  state.workspaceClients.forEach((client) => {
+    ensureWorkspaceNotePages(client);
+  });
 
   try {
     state.selectedWorkspaceClientId = window.localStorage.getItem(WORKSPACE_SELECTED_CLIENT_KEY) || "";
@@ -4063,6 +4258,7 @@ document.addEventListener("pointerdown", (event) => {
     target.closest("#bookmark-context-menu")
     || target.closest(".bookmark-folder-chip")
     || target.closest("#workspace-context-menu")
+    || target.closest("#workspace-media-context-menu")
   )) {
     if (!target.closest(".extension-menu-shell")) {
       hideExtensionsMenuPopup();
@@ -4072,6 +4268,7 @@ document.addEventListener("pointerdown", (event) => {
 
   hideBookmarkFolderMenu();
   hideWorkspaceContextMenu();
+  hideWorkspaceMediaContextMenu();
   hideExtensionsMenuPopup();
 });
 document.addEventListener("keydown", (event) => {
@@ -4083,6 +4280,9 @@ document.addEventListener("keydown", (event) => {
   }
   if (event.key === "Escape") {
     hideWorkspaceContextMenu();
+  }
+  if (event.key === "Escape") {
+    hideWorkspaceMediaContextMenu();
   }
   if (event.key === "Escape") {
     hideExtensionsMenuPopup();

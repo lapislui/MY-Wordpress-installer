@@ -92,6 +92,8 @@
     testDb: () => Promise.resolve({ ok: false, error: "Not available in browser preview." }),
     installWordPress: () => Promise.resolve({ ok: false, logs: ["Not available in browser preview."] }),
     openPath: asyncNull,
+    copyWorkspaceMedia: asyncNull,
+    openWorkspaceMediaWith: asyncNull,
 
     listSites: asyncEmpty,
     backupSite: asyncNull,

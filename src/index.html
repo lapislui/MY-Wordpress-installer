@@ -749,6 +749,7 @@
             </div>
             <div id="workspace-client-list" class="workspace-client-list"></div>
             <div id="workspace-context-menu" class="bookmark-context-menu hidden"></div>
+            <div id="workspace-media-context-menu" class="bookmark-context-menu hidden"></div>
           </aside>
 
           <section class="workspace-main">
@@ -898,6 +899,15 @@
                   </div>
                 </div>
                 <div class="workspace-card-body">
+                <div class="workspace-notes-pages">
+                  <select id="workspace-notes-page-select"></select>
+                  <button id="workspace-add-notes-page-button" type="button">New page</button>
+                  <button id="workspace-delete-notes-page-button" type="button">Delete page</button>
+                </div>
+                <label class="field">
+                  <span>Page title</span>
+                  <input id="workspace-notes-page-title" type="text" placeholder="Sprint notes">
+                </label>
                 <label class="field" id="workspace-notes-editor-shell">
                   <span>Working notes</span>
                   <textarea id="workspace-notes" class="workspace-notes" placeholder="Record plugin decisions, content blockers, credentials needed, launch notes, and client requests."></textarea>

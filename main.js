@@ -11,6 +11,7 @@ const {
   desktopCapturer,
   dialog,
   ipcMain,
+  nativeImage,
   session,
   safeStorage,
   screen,
@@ -6757,4 +6758,47 @@ ipcMain.handle("installer:run", async (_event, payload) => {
 
 ipcMain.handle("shell:open-path", async (_event, targetPath) => {
   await shell.openPath(targetPath);
+});
+
+ipcMain.handle("workspace:copy-media", async (_event, targetPath) => {
+  const resolvedPath = String(targetPath || "").trim();
+  if (!resolvedPath || !fs.existsSync(resolvedPath)) {
+    return { ok: false, message: "Media file was not found." };
+  }
+
+  const image = nativeImage.createFromPath(resolvedPath);
+  if (image.isEmpty()) {
+    clipboard.writeText(resolvedPath);
+    return { ok: true, message: "Copied media path." };
+  }
+
+  clipboard.writeImage(image);
+  return { ok: true, message: "Copied image to clipboard." };
+});
+
+ipcMain.handle("workspace:open-with", async (_event, targetPath) => {
+  const resolvedPath = String(targetPath || "").trim();
+  if (!resolvedPath || !fs.existsSync(resolvedPath)) {
+    return { ok: false, message: "Media file was not found." };
+  }
+
+  if (process.platform === "win32") {
+    return await new Promise((resolve) => {
+      const child = spawn(
+        path.join(process.env.WINDIR || "C:\\Windows", "System32", "rundll32.exe"),
+        ["shell32.dll,OpenAs_RunDLL", resolvedPath],
+        { windowsHide: true, detached: true, stdio: "ignore" }
+      );
+
+      child.on("error", (error) => {
+        resolve({ ok: false, message: error.message || "Could not open the Open with dialog." });
+      });
+
+      child.unref();
+      resolve({ ok: true, message: "Opened the Open with dialog." });
+    });
+  }
+
+  await shell.openPath(resolvedPath);
+  return { ok: true, message: "Opened the media file." };
 });
