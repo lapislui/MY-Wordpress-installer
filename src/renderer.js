@@ -35,6 +35,7 @@ const uiState = {
   sidebarCollapsed: false,
   browserFocusMode: false,
   showTabSessionInfo: false,
+  workspaceNotesMode: "edit",
   editingWorkspaceTodoId: null,
   editingWorkspaceEventId: null,
   editingWorkspaceResourceId: null
@@ -43,6 +44,7 @@ const uiState = {
 let browserFeedbackTimer = null;
 let addressSuggestionsToken = 0;
 let draggedBrowserToolSection = null;
+let draggedWorkspacePanel = null;
 let bookmarkFolderDialogContext = null;
 let draggedBookmarkId = null;
 let workspaceContextClientId = null;
@@ -53,6 +55,8 @@ const BROWSER_TOOL_COLLAPSE_KEY = "wp-desktop.browser-tool-collapse";
 const XAMPP_STATUS_REFRESH_INTERVAL_MS = 5000;
 const WORKSPACE_CLIENTS_KEY = "wpdesktop.workspace.clients";
 const WORKSPACE_SELECTED_CLIENT_KEY = "wpdesktop.workspace.selected-client";
+const WORKSPACE_PANEL_ORDER_KEY = "wpdesktop.workspace.panel-order";
+const WORKSPACE_PANEL_COLLAPSE_KEY = "wpdesktop.workspace.panel-collapse";
 const DEFAULT_BROWSER_TOOL_ORDER = ["sessions", "credentials", "bookmarks", "downloads", "permissions"];
 const DEFAULT_BROWSER_TOOL_COLLAPSE = {
   sessions: false,
@@ -60,6 +64,14 @@ const DEFAULT_BROWSER_TOOL_COLLAPSE = {
   bookmarks: true,
   downloads: true,
   permissions: true
+};
+const DEFAULT_WORKSPACE_PANEL_ORDER = ["details", "tasks", "calendar", "notes", "resources"];
+const DEFAULT_WORKSPACE_PANEL_COLLAPSE = {
+  details: false,
+  tasks: false,
+  calendar: false,
+  notes: false,
+  resources: false
 };
 state.effectiveDbProfile = {
   host: "127.0.0.1",
@@ -217,6 +229,7 @@ const elements = {
   workspaceAddClientButton: document.getElementById("workspace-add-client-button"),
   workspaceClientList: document.getElementById("workspace-client-list"),
   workspaceContextMenu: document.getElementById("workspace-context-menu"),
+  workspaceGrid: document.getElementById("workspace-grid"),
   workspaceClientTitle: document.getElementById("workspace-client-title"),
   workspaceClientSubtitle: document.getElementById("workspace-client-subtitle"),
   workspaceEditClientButton: document.getElementById("workspace-edit-client-button"),
@@ -248,6 +261,10 @@ const elements = {
   workspaceAddEventButton: document.getElementById("workspace-add-event-button"),
   workspaceEventList: document.getElementById("workspace-event-list"),
   workspaceNotes: document.getElementById("workspace-notes"),
+  workspaceNotesEditorShell: document.getElementById("workspace-notes-editor-shell"),
+  workspaceNotesPreview: document.getElementById("workspace-notes-preview"),
+  workspaceNotesEditButton: document.getElementById("workspace-notes-edit-button"),
+  workspaceNotesPreviewButton: document.getElementById("workspace-notes-preview-button"),
   workspaceClearNotesButton: document.getElementById("workspace-clear-notes-button"),
   workspaceResourceType: document.getElementById("workspace-resource-type"),
   workspaceResourceLabel: document.getElementById("workspace-resource-label"),
@@ -258,6 +275,11 @@ const elements = {
   workspaceCancelResourceButton: document.getElementById("workspace-cancel-resource-button"),
   workspaceAddResourceButton: document.getElementById("workspace-add-resource-button"),
   workspaceResourceList: document.getElementById("workspace-resource-list"),
+  workspaceImageModal: document.getElementById("workspace-image-modal"),
+  closeWorkspaceImageModalButton: document.getElementById("close-workspace-image-modal-button"),
+  workspaceImageModalTitle: document.getElementById("workspace-image-modal-title"),
+  workspaceImageModalMeta: document.getElementById("workspace-image-modal-meta"),
+  workspaceImageModalImage: document.getElementById("workspace-image-modal-image"),
   dbHost: document.getElementById("db-host"),
   dbPort: document.getElementById("db-port"),
   dbUser: document.getElementById("db-user"),
@@ -697,6 +719,10 @@ elements.workspacePickResourceButton?.addEventListener("click", async () => {
   const selected = await window.desktopAPI.pickWorkspaceResource();
   if (selected) {
     elements.workspaceResourceTarget.value = selected;
+    const inferredType = inferWorkspaceResourceTypeFromTarget(selected);
+    if (inferredType && elements.workspaceResourceType) {
+      elements.workspaceResourceType.value = inferredType;
+    }
   }
 });
 elements.workspaceAddResourceButton?.addEventListener("click", () => {
@@ -707,13 +733,15 @@ elements.workspaceAddResourceButton?.addEventListener("click", () => {
   if (!target) {
     return;
   }
+  const inferredType = inferWorkspaceResourceTypeFromTarget(target);
+  const resolvedType = inferredType === "image" || inferredType === "media" ? inferredType : type;
 
   updateSelectedWorkspaceClient((client) => {
     client.resources = client.resources || [];
     const existingResource = client.resources.find((resource) => resource.id === uiState.editingWorkspaceResourceId);
-    const computedLabel = label || target.split(/[\\/]/).pop() || type;
+    const computedLabel = label || target.split(/[\\/]/).pop() || resolvedType;
     if (existingResource) {
-      existingResource.type = type;
+      existingResource.type = resolvedType;
       existingResource.label = computedLabel;
       existingResource.target = target;
       existingResource.notes = notes;
@@ -722,7 +750,7 @@ elements.workspaceAddResourceButton?.addEventListener("click", () => {
 
     client.resources.unshift({
       id: `resource-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
-      type,
+      type: resolvedType,
       label: computedLabel,
       target,
       notes,
@@ -776,6 +804,14 @@ elements.workspaceNotes?.addEventListener("input", (event) => {
     client.notes = event.target.value;
   });
 });
+elements.workspaceNotesEditButton?.addEventListener("click", () => {
+  uiState.workspaceNotesMode = "edit";
+  renderWorkspaceNotesPanel(getSelectedWorkspaceClient());
+});
+elements.workspaceNotesPreviewButton?.addEventListener("click", () => {
+  uiState.workspaceNotesMode = "preview";
+  renderWorkspaceNotesPanel(getSelectedWorkspaceClient());
+});
 elements.workspaceClearNotesButton?.addEventListener("click", () => {
   if (!getSelectedWorkspaceClient()) {
     return;
@@ -799,6 +835,7 @@ elements.siteTabs.forEach((tab) => {
 });
 
 initBrowserToolSections();
+initWorkspacePanels();
 
 function ensureUrl(input) {
   const raw = input.trim();
@@ -1303,6 +1340,10 @@ function getBrowserToolSections() {
   return Array.from(document.querySelectorAll(".browser-tool-section[data-tool-section]"));
 }
 
+function getWorkspacePanels() {
+  return Array.from(document.querySelectorAll(".workspace-panel[data-workspace-panel]"));
+}
+
 function readBrowserToolPrefs(key, fallback) {
   try {
     const raw = window.localStorage.getItem(key);
@@ -1408,6 +1449,34 @@ function resetWorkspaceResourceForm() {
     elements.workspaceResourceNotes.value = "";
   }
   renderWorkspaceFormActions();
+}
+
+function closeWorkspaceImageModal() {
+  elements.workspaceImageModal?.classList.add("hidden");
+  if (elements.workspaceImageModalImage) {
+    elements.workspaceImageModalImage.removeAttribute("src");
+  }
+  if (elements.workspaceImageModalTitle) {
+    elements.workspaceImageModalTitle.textContent = "Image preview";
+  }
+  if (elements.workspaceImageModalMeta) {
+    elements.workspaceImageModalMeta.textContent = "";
+  }
+}
+
+function openWorkspaceImageModal(resource) {
+  if (!resource || !elements.workspaceImageModal || !elements.workspaceImageModalImage) {
+    return;
+  }
+
+  elements.workspaceImageModalImage.src = toWorkspaceTargetUrl(resource.target);
+  if (elements.workspaceImageModalTitle) {
+    elements.workspaceImageModalTitle.textContent = resource.label || "Image preview";
+  }
+  if (elements.workspaceImageModalMeta) {
+    elements.workspaceImageModalMeta.textContent = resource.target || "";
+  }
+  elements.workspaceImageModal.classList.remove("hidden");
 }
 
 function startEditingWorkspaceTodo(todoId) {
@@ -1603,29 +1672,191 @@ function formatWorkspaceTimestamp(value) {
   return `Created ${new Date(value).toLocaleString()}`;
 }
 
+function applyWorkspaceMarkdownInline(text) {
+  return String(text || "")
+    .replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"([^"]+)")?\)/g, (_, alt, src, title) => {
+      const safeSrc = escapeHtml(src);
+      const safeAlt = escapeHtml(alt);
+      const safeTitle = title ? ` title="${escapeHtml(title)}"` : "";
+      return `<img src="${safeSrc}" alt="${safeAlt}"${safeTitle}>`;
+    })
+    .replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+"([^"]+)")?\)/g, (_, label, href, title) => {
+      const safeHref = escapeHtml(href);
+      const safeTitle = title ? ` title="${escapeHtml(title)}"` : "";
+      return `<a href="${safeHref}" target="_blank" rel="noreferrer noopener"${safeTitle}>${label}</a>`;
+    })
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/__([^_]+)__/g, "<strong>$1</strong>")
+    .replace(/\*([^*]+)\*/g, "<em>$1</em>")
+    .replace(/_([^_]+)_/g, "<em>$1</em>")
+    .replace(/~~([^~]+)~~/g, "<del>$1</del>");
+}
+
+function renderWorkspaceMarkdownToHtml(source) {
+  const text = String(source || "").replace(/\r\n?/g, "\n");
+  if (!text.trim()) {
+    return `<p>Nothing to preview yet.</p>`;
+  }
+
+  const fenceStore = [];
+  const withFencesTokenized = text.replace(/```([\w-]*)\n([\s\S]*?)```/g, (_, language, code) => {
+    const token = `@@FENCE_${fenceStore.length}@@`;
+    fenceStore.push(`<pre><code${language ? ` data-language="${escapeHtml(language)}"` : ""}>${escapeHtml(code.replace(/\n$/, ""))}</code></pre>`);
+    return token;
+  });
+
+  const blocks = withFencesTokenized.split(/\n\s*\n/);
+  const html = blocks.map((block) => {
+    const trimmed = block.trim();
+    if (!trimmed) {
+      return "";
+    }
+    if (/^@@FENCE_\d+@@$/.test(trimmed)) {
+      return trimmed;
+    }
+    if (/^<[^>]+>/.test(trimmed)) {
+      return trimmed;
+    }
+    if (/^#{1,6}\s+/.test(trimmed)) {
+      const [, hashes, content] = trimmed.match(/^(#{1,6})\s+([\s\S]+)$/) || [];
+      return `<h${hashes.length}>${applyWorkspaceMarkdownInline(escapeHtml(content || ""))}</h${hashes.length}>`;
+    }
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)) {
+      return "<hr>";
+    }
+    if (/^(>.*\n?)+$/.test(trimmed)) {
+      const lines = trimmed.split("\n").map((line) => line.replace(/^>\s?/, ""));
+      return `<blockquote>${lines.map((line) => `<p>${applyWorkspaceMarkdownInline(escapeHtml(line))}</p>`).join("")}</blockquote>`;
+    }
+    if (/^(\s*[-*+]\s+.+\n?)+$/.test(trimmed)) {
+      const items = trimmed.split("\n").map((line) => line.replace(/^\s*[-*+]\s+/, "").trim()).filter(Boolean);
+      return `<ul>${items.map((item) => `<li>${applyWorkspaceMarkdownInline(escapeHtml(item))}</li>`).join("")}</ul>`;
+    }
+    if (/^(\s*\d+\.\s+.+\n?)+$/.test(trimmed)) {
+      const items = trimmed.split("\n").map((line) => line.replace(/^\s*\d+\.\s+/, "").trim()).filter(Boolean);
+      return `<ol>${items.map((item) => `<li>${applyWorkspaceMarkdownInline(escapeHtml(item))}</li>`).join("")}</ol>`;
+    }
+
+    const paragraph = trimmed
+      .split("\n")
+      .map((line) => applyWorkspaceMarkdownInline(escapeHtml(line)))
+      .join("<br>");
+    return `<p>${paragraph}</p>`;
+  }).join("\n");
+
+  return html.replace(/@@FENCE_(\d+)@@/g, (_, index) => fenceStore[Number(index)] || "");
+}
+
+function sanitizeWorkspaceNotesHtml(html) {
+  const template = document.createElement("template");
+  template.innerHTML = html;
+
+  const allowedTags = new Set([
+    "A", "P", "BR", "STRONG", "EM", "DEL", "CODE", "PRE", "BLOCKQUOTE",
+    "UL", "OL", "LI", "H1", "H2", "H3", "H4", "H5", "H6", "HR",
+    "IMG", "TABLE", "THEAD", "TBODY", "TR", "TH", "TD", "DIV", "SPAN"
+  ]);
+  const allowedAttrs = {
+    A: new Set(["href", "title", "target", "rel"]),
+    IMG: new Set(["src", "alt", "title"]),
+    CODE: new Set(["data-language"]),
+    TH: new Set(["colspan", "rowspan"]),
+    TD: new Set(["colspan", "rowspan"])
+  };
+
+  const sanitizeNode = (node) => {
+    Array.from(node.children).forEach((child) => {
+      const tag = child.tagName;
+      if (!allowedTags.has(tag)) {
+        child.replaceWith(...Array.from(child.childNodes));
+        return;
+      }
+
+      Array.from(child.attributes).forEach((attribute) => {
+        const name = attribute.name.toLowerCase();
+        const allowed = allowedAttrs[tag];
+        if (!allowed || !allowed.has(attribute.name)) {
+          child.removeAttribute(attribute.name);
+          return;
+        }
+        if ((name === "href" || name === "src") && !/^(https?:|file:|data:image\/)/i.test(attribute.value)) {
+          child.removeAttribute(attribute.name);
+        }
+      });
+
+      if (tag === "A") {
+        child.setAttribute("target", "_blank");
+        child.setAttribute("rel", "noreferrer noopener");
+      }
+
+      sanitizeNode(child);
+    });
+  };
+
+  sanitizeNode(template.content);
+  return template.innerHTML;
+}
+
+function renderWorkspaceNotesPanel(client) {
+  const hasClient = Boolean(client);
+  const notesValue = client?.notes || "";
+
+  if (elements.workspaceNotes) {
+    elements.workspaceNotes.value = notesValue;
+  }
+
+  if (elements.workspaceNotesEditButton) {
+    elements.workspaceNotesEditButton.classList.toggle("primary-button", uiState.workspaceNotesMode === "edit");
+  }
+  if (elements.workspaceNotesPreviewButton) {
+    elements.workspaceNotesPreviewButton.classList.toggle("primary-button", uiState.workspaceNotesMode === "preview");
+  }
+
+  const showPreview = hasClient && uiState.workspaceNotesMode === "preview";
+  elements.workspaceNotesEditorShell?.classList.toggle("hidden", showPreview);
+  elements.workspaceNotesPreview?.classList.toggle("hidden", !showPreview);
+
+  if (elements.workspaceNotesPreview) {
+    elements.workspaceNotesPreview.innerHTML = sanitizeWorkspaceNotesHtml(renderWorkspaceMarkdownToHtml(notesValue));
+  }
+}
+
+function inferWorkspaceResourceTypeFromTarget(target) {
+  const value = String(target || "").trim().toLowerCase();
+  if (!value) {
+    return "";
+  }
+  if (/docs\.google\.com\/spreadsheets/.test(value)) {
+    return "google-sheet";
+  }
+  if (/\.(xlsx|xls|csv)(?:[\?#].*)?$/.test(value)) {
+    return "excel";
+  }
+  if (/\.(png|jpg|jpeg|gif|webp|svg|bmp|ico|avif)(?:[\?#].*)?$/.test(value)) {
+    return "image";
+  }
+  if (/\.(mp4|webm|mp3|wav|m4a|ogg|mov)(?:[\?#].*)?$/.test(value)) {
+    return "media";
+  }
+  if (/^https?:\/\//.test(value)) {
+    return "site";
+  }
+  return "file";
+}
+
 function getWorkspaceResourceDisplayType(resource) {
+  const inferredType = inferWorkspaceResourceTypeFromTarget(resource?.target || "");
+  if (inferredType === "image" || inferredType === "media") {
+    return inferredType;
+  }
+
   const explicitType = String(resource?.type || "").trim();
   if (explicitType) {
     return explicitType;
   }
 
-  const target = String(resource?.target || "").trim().toLowerCase();
-  if (/docs\.google\.com\/spreadsheets/.test(target)) {
-    return "google-sheet";
-  }
-  if (/\.(xlsx|xls|csv)$/.test(target)) {
-    return "excel";
-  }
-  if (/\.(png|jpg|jpeg|gif|webp|svg)$/.test(target)) {
-    return "image";
-  }
-  if (/\.(mp4|webm|mp3|wav)$/.test(target)) {
-    return "media";
-  }
-  if (/^https?:\/\//.test(target)) {
-    return "site";
-  }
-  return "file";
+  return inferredType;
 }
 
 function isWorkspaceUrlTarget(target) {
@@ -1860,10 +2091,17 @@ function renderWorkspaceResourceList(client) {
     const targetUrl = toWorkspaceTargetUrl(resource.target);
     const item = document.createElement("div");
     item.className = "workspace-resource-item";
-    const previewMarkup = isWorkspaceImageResource(resource)
-      ? `<div class="workspace-resource-preview"><img src="${escapeHtml(targetUrl)}" alt="${escapeHtml(resource.label || "Image attachment")}" /></div>`
-      : isWorkspaceMediaResource(resource) && /\.(mp4|webm)$/i.test(String(resource.target || ""))
-        ? `<div class="workspace-resource-preview"><video src="${escapeHtml(targetUrl)}" controls preload="metadata"></video></div>`
+    const isPreviewableImage = isWorkspaceImageResource(resource);
+    const isPreviewableVideo = isWorkspaceMediaResource(resource) && /\.(mp4|webm)$/i.test(String(resource.target || ""));
+    const hasInlinePreview = isPreviewableImage || isPreviewableVideo;
+    const previewMarkup = isPreviewableImage
+      ? `<div class="workspace-resource-preview workspace-resource-preview-button" data-workspace-preview-resource="${resource.id}" role="button" tabindex="0" aria-label="Open ${escapeHtml(resource.label || "image")}">
+          <img src="${escapeHtml(targetUrl)}" alt="${escapeHtml(resource.label || "Image attachment")}" />
+        </div>`
+      : isPreviewableVideo
+        ? `<div class="workspace-resource-preview workspace-resource-preview-button" data-workspace-preview-resource="${resource.id}" role="button" tabindex="0" aria-label="Open ${escapeHtml(resource.label || "video")}">
+            <video src="${escapeHtml(targetUrl)}" controls preload="metadata"></video>
+          </div>`
         : "";
     item.innerHTML = `
       <div class="workspace-item-copy">
@@ -1873,11 +2111,37 @@ function renderWorkspaceResourceList(client) {
         ${previewMarkup}
       </div>
       <div class="workspace-item-actions">
-        <button type="button" data-workspace-open-resource="${resource.id}">Open</button>
+        ${hasInlinePreview ? "" : `<button type="button" data-workspace-open-resource="${resource.id}">Open</button>`}
         <button type="button" data-workspace-edit-resource="${resource.id}">Edit</button>
         <button type="button" data-workspace-delete-resource="${resource.id}">Delete</button>
       </div>
     `;
+    item.querySelector("[data-workspace-preview-resource]")?.addEventListener("click", () => {
+      if (isPreviewableImage) {
+        openWorkspaceImageModal(resource);
+        return;
+      }
+      if (isWorkspaceUrlTarget(resource.target)) {
+        openUrlInAppBrowser(resource.target);
+        return;
+      }
+      void openExistingPath(resource.target, "Resource path was not found.");
+    });
+    item.querySelector("[data-workspace-preview-resource]")?.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") {
+        return;
+      }
+      event.preventDefault();
+      if (isPreviewableImage) {
+        openWorkspaceImageModal(resource);
+        return;
+      }
+      if (isWorkspaceUrlTarget(resource.target)) {
+        openUrlInAppBrowser(resource.target);
+        return;
+      }
+      void openExistingPath(resource.target, "Resource path was not found.");
+    });
     item.querySelector("[data-workspace-open-resource]")?.addEventListener("click", () => {
       if (isWorkspaceUrlTarget(resource.target)) {
         openUrlInAppBrowser(resource.target);
@@ -1964,6 +2228,8 @@ function renderWorkspace() {
     elements.workspaceEventDate,
     elements.workspaceAddEventButton,
     elements.workspaceNotes,
+    elements.workspaceNotesEditButton,
+    elements.workspaceNotesPreviewButton,
     elements.workspaceResourceType,
     elements.workspaceResourceLabel,
     elements.workspaceResourceTarget,
@@ -1999,7 +2265,6 @@ function renderWorkspace() {
     elements.workspaceTodoEventLink.value = "";
     elements.workspaceEventTitle.value = "";
     elements.workspaceEventDate.value = "";
-    elements.workspaceNotes.value = "";
     elements.workspaceTodoResourceLink.value = "";
     elements.workspaceResourceLabel.value = "";
     elements.workspaceResourceTarget.value = "";
@@ -2013,6 +2278,7 @@ function renderWorkspace() {
     renderWorkspaceTodoList(null);
     renderWorkspaceEventList(null);
     renderWorkspaceResourceList(null);
+    renderWorkspaceNotesPanel(null);
     renderWorkspaceFormActions();
     return;
   }
@@ -2030,7 +2296,6 @@ function renderWorkspace() {
   elements.workspaceHosting.value = client.hosting || "";
   elements.workspaceAdminUrl.value = client.adminUrl || "";
   elements.workspacePriority.value = client.priority || "";
-  elements.workspaceNotes.value = client.notes || "";
   elements.workspaceResourceType.value = elements.workspaceResourceType.value || "google-sheet";
   renderWorkspaceTodoEventOptions(client);
   renderWorkspaceTodoResourceOptions(client);
@@ -2055,6 +2320,7 @@ function renderWorkspace() {
   renderWorkspaceTodoList(client);
   renderWorkspaceEventList(client);
   renderWorkspaceResourceList(client);
+  renderWorkspaceNotesPanel(client);
   renderWorkspaceFormActions();
 }
 
@@ -2158,6 +2424,114 @@ function applyBrowserToolSectionPrefs() {
   getBrowserToolSections().forEach((section) => {
     section.classList.toggle("collapsed", Boolean(collapsed[section.dataset.toolSection]));
   });
+}
+
+function saveWorkspacePanelOrder() {
+  writeBrowserToolPrefs(WORKSPACE_PANEL_ORDER_KEY, getWorkspacePanels().map((panel) => panel.dataset.workspacePanel));
+}
+
+function saveWorkspacePanelCollapseState() {
+  const collapsed = Object.fromEntries(
+    getWorkspacePanels().map((panel) => [panel.dataset.workspacePanel, panel.classList.contains("collapsed")])
+  );
+  writeBrowserToolPrefs(WORKSPACE_PANEL_COLLAPSE_KEY, collapsed);
+}
+
+function applyWorkspacePanelPrefs() {
+  const grid = elements.workspaceGrid;
+  if (!grid) {
+    return;
+  }
+
+  const order = readBrowserToolPrefs(WORKSPACE_PANEL_ORDER_KEY, DEFAULT_WORKSPACE_PANEL_ORDER);
+  const collapsed = readBrowserToolPrefs(WORKSPACE_PANEL_COLLAPSE_KEY, DEFAULT_WORKSPACE_PANEL_COLLAPSE);
+  const panelMap = new Map(getWorkspacePanels().map((panel) => [panel.dataset.workspacePanel, panel]));
+
+  order.forEach((id) => {
+    const panel = panelMap.get(id);
+    if (panel) {
+      grid.appendChild(panel);
+    }
+  });
+
+  getWorkspacePanels().forEach((panel) => {
+    panel.classList.toggle("collapsed", Boolean(collapsed[panel.dataset.workspacePanel]));
+  });
+}
+
+function toggleWorkspacePanel(panel) {
+  panel.classList.toggle("collapsed");
+  saveWorkspacePanelCollapseState();
+}
+
+function findWorkspacePanelDropTarget(pointerY, currentPanel) {
+  const panels = getWorkspacePanels().filter((panel) => panel !== currentPanel);
+
+  for (const panel of panels) {
+    const rect = panel.getBoundingClientRect();
+    if (pointerY < rect.top + rect.height / 2) {
+      return { panel, position: "before" };
+    }
+  }
+
+  return { panel: panels.at(-1) || null, position: "after" };
+}
+
+function initWorkspacePanels() {
+  getWorkspacePanels().forEach((panel) => {
+    panel.querySelector("[data-workspace-panel-toggle]")?.addEventListener("click", () => {
+      toggleWorkspacePanel(panel);
+    });
+
+    panel.addEventListener("dragstart", (event) => {
+      if (!(event.target instanceof Element) || !event.target.closest(".workspace-panel-drag")) {
+        event.preventDefault();
+        return;
+      }
+
+      draggedWorkspacePanel = panel;
+      panel.classList.add("dragging");
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", panel.dataset.workspacePanel || "");
+      }
+    });
+
+    panel.addEventListener("dragend", () => {
+      draggedWorkspacePanel?.classList.remove("dragging");
+      draggedWorkspacePanel = null;
+      saveWorkspacePanelOrder();
+    });
+
+    panel.addEventListener("dragover", (event) => {
+      if (!draggedWorkspacePanel || draggedWorkspacePanel === panel) {
+        return;
+      }
+
+      event.preventDefault();
+      const target = findWorkspacePanelDropTarget(event.clientY, draggedWorkspacePanel);
+      if (!target.panel) {
+        return;
+      }
+
+      if (target.position === "before") {
+        target.panel.before(draggedWorkspacePanel);
+      } else {
+        target.panel.after(draggedWorkspacePanel);
+      }
+    });
+
+    panel.addEventListener("drop", (event) => {
+      if (!draggedWorkspacePanel) {
+        return;
+      }
+
+      event.preventDefault();
+      saveWorkspacePanelOrder();
+    });
+  });
+
+  applyWorkspacePanelPrefs();
 }
 
 function toggleBrowserToolSection(section) {
@@ -3649,6 +4023,12 @@ elements.bookmarkFolderModal.addEventListener("click", (event) => {
     closeBookmarkFolderDialog();
   }
 });
+elements.closeWorkspaceImageModalButton?.addEventListener("click", closeWorkspaceImageModal);
+elements.workspaceImageModal?.addEventListener("click", (event) => {
+  if (event.target === elements.workspaceImageModal) {
+    closeWorkspaceImageModal();
+  }
+});
 elements.bookmarkFolderNameInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
@@ -3697,6 +4077,9 @@ document.addEventListener("pointerdown", (event) => {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && isBookmarkFolderMenuOpen()) {
     hideBookmarkFolderMenu();
+  }
+  if (event.key === "Escape") {
+    closeWorkspaceImageModal();
   }
   if (event.key === "Escape") {
     hideWorkspaceContextMenu();

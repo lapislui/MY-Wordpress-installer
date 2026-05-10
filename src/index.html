@@ -765,14 +765,19 @@
               </div>
             </header>
 
-            <div class="workspace-grid">
-              <section class="workspace-card workspace-card-wide">
+            <div class="workspace-grid" id="workspace-grid">
+              <section class="workspace-card workspace-card-wide workspace-panel" data-workspace-panel="details" draggable="true">
                 <div class="card-header">
                   <div>
                     <span class="eyebrow">Client brief</span>
                     <h3>Project details</h3>
                   </div>
+                  <div class="workspace-card-actions">
+                    <button class="workspace-panel-toggle" type="button" data-workspace-panel-toggle aria-label="Collapse panel">▾</button>
+                    <span class="workspace-panel-drag" aria-hidden="true">☰</span>
+                  </div>
                 </div>
+                <div class="workspace-card-body">
                 <div class="form-grid four-up">
                   <label class="field">
                     <span>Client name</span>
@@ -819,9 +824,10 @@
                     <input id="workspace-priority" type="text" placeholder="High, medium, low">
                   </label>
                 </div>
+                </div>
               </section>
 
-              <section class="workspace-card">
+              <section class="workspace-card workspace-panel" data-workspace-panel="tasks" draggable="true">
                 <div class="card-header">
                   <div>
                     <span class="eyebrow">Tasks</span>
@@ -830,8 +836,11 @@
                   <div class="workspace-card-actions">
                     <span id="workspace-todo-form-state" class="workspace-form-state">New task</span>
                     <button id="workspace-cancel-todo-button" type="button">Cancel</button>
+                    <button class="workspace-panel-toggle" type="button" data-workspace-panel-toggle aria-label="Collapse panel">▾</button>
+                    <span class="workspace-panel-drag" aria-hidden="true">☰</span>
                   </div>
                 </div>
+                <div class="workspace-card-body">
                 <div class="workspace-inline-form">
                   <input id="workspace-todo-input" type="text" placeholder="Add a task for this client">
                   <input id="workspace-todo-deadline" type="date">
@@ -846,9 +855,10 @@
                   <button id="workspace-add-todo-button" type="button" class="primary-button">Add</button>
                 </div>
                 <div id="workspace-todo-list" class="workspace-task-list"></div>
+                </div>
               </section>
 
-              <section class="workspace-card">
+              <section class="workspace-card workspace-panel" data-workspace-panel="calendar" draggable="true">
                 <div class="card-header">
                   <div>
                     <span class="eyebrow">Calendar</span>
@@ -857,8 +867,11 @@
                   <div class="workspace-card-actions">
                     <span id="workspace-event-form-state" class="workspace-form-state">New event</span>
                     <button id="workspace-cancel-event-button" type="button">Cancel</button>
+                    <button class="workspace-panel-toggle" type="button" data-workspace-panel-toggle aria-label="Collapse panel">▾</button>
+                    <span class="workspace-panel-drag" aria-hidden="true">☰</span>
                   </div>
                 </div>
+                <div class="workspace-card-body">
                 <div class="workspace-inline-form stacked">
                   <input id="workspace-event-title" type="text" placeholder="Launch review call">
                   <div class="workspace-event-row">
@@ -867,25 +880,33 @@
                   </div>
                 </div>
                 <div id="workspace-event-list" class="workspace-event-list"></div>
+                </div>
               </section>
 
-              <section class="workspace-card workspace-card-wide">
+              <section class="workspace-card workspace-card-wide workspace-panel" data-workspace-panel="notes" draggable="true">
                 <div class="card-header">
                   <div>
                     <span class="eyebrow">Notes</span>
                     <h3>Client notes</h3>
                   </div>
                   <div class="workspace-card-actions">
+                    <button id="workspace-notes-edit-button" type="button" class="primary-button">Edit</button>
+                    <button id="workspace-notes-preview-button" type="button">Preview</button>
                     <button id="workspace-clear-notes-button" type="button">Clear notes</button>
+                    <button class="workspace-panel-toggle" type="button" data-workspace-panel-toggle aria-label="Collapse panel">▾</button>
+                    <span class="workspace-panel-drag" aria-hidden="true">☰</span>
                   </div>
                 </div>
-                <label class="field">
+                <div class="workspace-card-body">
+                <label class="field" id="workspace-notes-editor-shell">
                   <span>Working notes</span>
                   <textarea id="workspace-notes" class="workspace-notes" placeholder="Record plugin decisions, content blockers, credentials needed, launch notes, and client requests."></textarea>
                 </label>
+                <div id="workspace-notes-preview" class="workspace-notes-preview hidden" aria-live="polite"></div>
+                </div>
               </section>
 
-              <section class="workspace-card workspace-card-wide">
+              <section class="workspace-card workspace-card-wide workspace-panel" data-workspace-panel="resources" draggable="true">
                 <div class="card-header">
                   <div>
                     <span class="eyebrow">Resources</span>
@@ -894,8 +915,11 @@
                   <div class="workspace-card-actions">
                     <span id="workspace-resource-form-state" class="workspace-form-state">New resource</span>
                     <button id="workspace-cancel-resource-button" type="button">Cancel</button>
+                    <button class="workspace-panel-toggle" type="button" data-workspace-panel-toggle aria-label="Collapse panel">▾</button>
+                    <span class="workspace-panel-drag" aria-hidden="true">☰</span>
                   </div>
                 </div>
+                <div class="workspace-card-body">
                 <div class="workspace-inline-form">
                   <select id="workspace-resource-type">
                     <option value="google-sheet">Google Sheet</option>
@@ -918,6 +942,7 @@
                   <textarea id="workspace-resource-notes" class="workspace-resource-notes" placeholder="Add notes for this sheet, image, media file, or client asset."></textarea>
                 </label>
                 <div id="workspace-resource-list" class="workspace-resource-list"></div>
+                </div>
               </section>
             </div>
           </section>
@@ -1008,6 +1033,21 @@
           <strong id="create-progress-title">Creating site</strong>
           <p id="create-progress-text">Preparing files, database, and local site records...</p>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="workspace-image-modal" class="modal-backdrop workspace-image-modal hidden">
+    <div class="modal-card workspace-image-modal-card">
+      <div class="workspace-image-modal-head">
+        <div>
+          <strong id="workspace-image-modal-title">Image preview</strong>
+          <div id="workspace-image-modal-meta" class="workspace-image-modal-meta"></div>
+        </div>
+        <button id="close-workspace-image-modal-button" type="button" class="icon-button">Close</button>
+      </div>
+      <div class="workspace-image-modal-stage">
+        <img id="workspace-image-modal-image" alt="Workspace attachment preview">
       </div>
     </div>
   </div>
