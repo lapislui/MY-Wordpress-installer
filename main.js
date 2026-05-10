@@ -6070,6 +6070,26 @@ ipcMain.handle("dialog:pick-extension-archive", async () => {
   return result.filePaths[0];
 });
 
+ipcMain.handle("dialog:pick-workspace-resource", async () => {
+  const result = await dialog.showOpenDialog({
+    title: "Select workspace resource",
+    properties: ["openFile"],
+    filters: [
+      { name: "Supported files", extensions: ["xlsx", "xls", "csv", "png", "jpg", "jpeg", "gif", "webp", "svg", "mp4", "webm", "mp3", "wav", "pdf", "doc", "docx", "ppt", "pptx"] },
+      { name: "Excel and spreadsheets", extensions: ["xlsx", "xls", "csv"] },
+      { name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "svg"] },
+      { name: "Media", extensions: ["mp4", "webm", "mp3", "wav"] },
+      { name: "All files", extensions: ["*"] }
+    ]
+  });
+
+  if (result.canceled || !result.filePaths[0]) {
+    return null;
+  }
+
+  return result.filePaths[0];
+});
+
 ipcMain.handle("dialog:save-backup", async (_event, siteName) => {
   const result = await dialog.showSaveDialog({
     title: "Save site backup",

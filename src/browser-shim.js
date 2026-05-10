@@ -52,6 +52,7 @@
     pickFolder: asyncNull,
     pickZip: asyncNull,
     pickExtensionArchive: asyncNull,
+    pickWorkspaceResource: asyncNull,
     saveBackup: asyncNull,
 
     browserCreateTab: asyncNull,

@@ -758,6 +758,11 @@
                 <h1 id="workspace-client-title">Select a client</h1>
                 <p id="workspace-client-subtitle">Track notes, to-dos, and deadlines for each WordPress client.</p>
               </div>
+              <div class="workspace-hero-actions">
+                <button id="workspace-edit-client-button" type="button">Edit</button>
+                <button id="workspace-duplicate-client-button" type="button">Duplicate</button>
+                <button id="workspace-delete-client-button" type="button" class="danger-button">Delete</button>
+              </div>
             </header>
 
             <div class="workspace-grid">
@@ -774,6 +779,10 @@
                     <input id="workspace-client-name" type="text" placeholder="Acme Studio">
                   </label>
                   <label class="field">
+                    <span>Contact person</span>
+                    <input id="workspace-contact-name" type="text" placeholder="Jane Doe">
+                  </label>
+                  <label class="field">
                     <span>Project name</span>
                     <input id="workspace-project-name" type="text" placeholder="Marketing site rebuild">
                   </label>
@@ -785,6 +794,30 @@
                     <span>Stage</span>
                     <input id="workspace-project-stage" type="text" placeholder="Build, QA, launch">
                   </label>
+                  <label class="field">
+                    <span>Client email</span>
+                    <input id="workspace-contact-email" type="email" placeholder="client@example.com">
+                  </label>
+                  <label class="field">
+                    <span>Client phone</span>
+                    <input id="workspace-contact-phone" type="text" placeholder="+91 ...">
+                  </label>
+                  <label class="field">
+                    <span>Repository</span>
+                    <input id="workspace-project-repo" type="text" placeholder="https://github.com/...">
+                  </label>
+                  <label class="field">
+                    <span>Hosting / server</span>
+                    <input id="workspace-hosting" type="text" placeholder="Cloudways, WP Engine, VPS">
+                  </label>
+                  <label class="field">
+                    <span>WordPress admin</span>
+                    <input id="workspace-admin-url" type="text" placeholder="https://client-site.com/wp-admin">
+                  </label>
+                  <label class="field">
+                    <span>Priority</span>
+                    <input id="workspace-priority" type="text" placeholder="High, medium, low">
+                  </label>
                 </div>
               </section>
 
@@ -794,9 +827,22 @@
                     <span class="eyebrow">Tasks</span>
                     <h3>To-do list</h3>
                   </div>
+                  <div class="workspace-card-actions">
+                    <span id="workspace-todo-form-state" class="workspace-form-state">New task</span>
+                    <button id="workspace-cancel-todo-button" type="button">Cancel</button>
+                  </div>
                 </div>
                 <div class="workspace-inline-form">
                   <input id="workspace-todo-input" type="text" placeholder="Add a task for this client">
+                  <input id="workspace-todo-deadline" type="date">
+                </div>
+                <div class="workspace-inline-form">
+                  <select id="workspace-todo-event-link">
+                    <option value="">Link deadline to calendar event</option>
+                  </select>
+                  <select id="workspace-todo-resource-link">
+                    <option value="">Attach resource to task</option>
+                  </select>
                   <button id="workspace-add-todo-button" type="button" class="primary-button">Add</button>
                 </div>
                 <div id="workspace-todo-list" class="workspace-task-list"></div>
@@ -807,6 +853,10 @@
                   <div>
                     <span class="eyebrow">Calendar</span>
                     <h3>Deadlines and events</h3>
+                  </div>
+                  <div class="workspace-card-actions">
+                    <span id="workspace-event-form-state" class="workspace-form-state">New event</span>
+                    <button id="workspace-cancel-event-button" type="button">Cancel</button>
                   </div>
                 </div>
                 <div class="workspace-inline-form stacked">
@@ -825,11 +875,49 @@
                     <span class="eyebrow">Notes</span>
                     <h3>Client notes</h3>
                   </div>
+                  <div class="workspace-card-actions">
+                    <button id="workspace-clear-notes-button" type="button">Clear notes</button>
+                  </div>
                 </div>
                 <label class="field">
                   <span>Working notes</span>
                   <textarea id="workspace-notes" class="workspace-notes" placeholder="Record plugin decisions, content blockers, credentials needed, launch notes, and client requests."></textarea>
                 </label>
+              </section>
+
+              <section class="workspace-card workspace-card-wide">
+                <div class="card-header">
+                  <div>
+                    <span class="eyebrow">Resources</span>
+                    <h3>Connected sheets, sites, files, and media</h3>
+                  </div>
+                  <div class="workspace-card-actions">
+                    <span id="workspace-resource-form-state" class="workspace-form-state">New resource</span>
+                    <button id="workspace-cancel-resource-button" type="button">Cancel</button>
+                  </div>
+                </div>
+                <div class="workspace-inline-form">
+                  <select id="workspace-resource-type">
+                    <option value="google-sheet">Google Sheet</option>
+                    <option value="excel">Excel / CSV</option>
+                    <option value="site">Site</option>
+                    <option value="doc">Document</option>
+                    <option value="image">Image</option>
+                    <option value="media">Media</option>
+                    <option value="file">Other file</option>
+                  </select>
+                  <input id="workspace-resource-label" type="text" placeholder="Launch tracker">
+                </div>
+                <div class="workspace-inline-form">
+                  <input id="workspace-resource-target" type="text" placeholder="Paste URL or pick a local file">
+                  <button id="workspace-pick-resource-button" type="button">Pick file</button>
+                  <button id="workspace-add-resource-button" type="button" class="primary-button">Attach</button>
+                </div>
+                <label class="field">
+                  <span>Resource notes</span>
+                  <textarea id="workspace-resource-notes" class="workspace-resource-notes" placeholder="Add notes for this sheet, image, media file, or client asset."></textarea>
+                </label>
+                <div id="workspace-resource-list" class="workspace-resource-list"></div>
               </section>
             </div>
           </section>

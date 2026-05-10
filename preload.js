@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld("desktopAPI", {
   pickFolder: () => ipcRenderer.invoke("dialog:pick-folder"),
   pickZip: () => ipcRenderer.invoke("dialog:pick-zip"),
   pickExtensionArchive: () => ipcRenderer.invoke("dialog:pick-extension-archive"),
+  pickWorkspaceResource: () => ipcRenderer.invoke("dialog:pick-workspace-resource"),
   saveBackup: (siteName) => ipcRenderer.invoke("dialog:save-backup", siteName),
   browserCreateTab: (payload) => ipcRenderer.invoke("browser:create-tab", payload),
   browserActivateTab: (tabId) => ipcRenderer.invoke("browser:activate-tab", tabId),

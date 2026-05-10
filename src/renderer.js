@@ -34,7 +34,10 @@ const progressState = {
 const uiState = {
   sidebarCollapsed: false,
   browserFocusMode: false,
-  showTabSessionInfo: false
+  showTabSessionInfo: false,
+  editingWorkspaceTodoId: null,
+  editingWorkspaceEventId: null,
+  editingWorkspaceResourceId: null
 };
 
 let browserFeedbackTimer = null;
@@ -216,18 +219,45 @@ const elements = {
   workspaceContextMenu: document.getElementById("workspace-context-menu"),
   workspaceClientTitle: document.getElementById("workspace-client-title"),
   workspaceClientSubtitle: document.getElementById("workspace-client-subtitle"),
+  workspaceEditClientButton: document.getElementById("workspace-edit-client-button"),
+  workspaceDuplicateClientButton: document.getElementById("workspace-duplicate-client-button"),
+  workspaceDeleteClientButton: document.getElementById("workspace-delete-client-button"),
   workspaceClientName: document.getElementById("workspace-client-name"),
+  workspaceContactName: document.getElementById("workspace-contact-name"),
   workspaceProjectName: document.getElementById("workspace-project-name"),
   workspaceProjectUrl: document.getElementById("workspace-project-url"),
   workspaceProjectStage: document.getElementById("workspace-project-stage"),
+  workspaceContactEmail: document.getElementById("workspace-contact-email"),
+  workspaceContactPhone: document.getElementById("workspace-contact-phone"),
+  workspaceProjectRepo: document.getElementById("workspace-project-repo"),
+  workspaceHosting: document.getElementById("workspace-hosting"),
+  workspaceAdminUrl: document.getElementById("workspace-admin-url"),
+  workspacePriority: document.getElementById("workspace-priority"),
   workspaceTodoInput: document.getElementById("workspace-todo-input"),
+  workspaceTodoDeadline: document.getElementById("workspace-todo-deadline"),
+  workspaceTodoEventLink: document.getElementById("workspace-todo-event-link"),
+  workspaceTodoResourceLink: document.getElementById("workspace-todo-resource-link"),
+  workspaceTodoFormState: document.getElementById("workspace-todo-form-state"),
+  workspaceCancelTodoButton: document.getElementById("workspace-cancel-todo-button"),
   workspaceAddTodoButton: document.getElementById("workspace-add-todo-button"),
   workspaceTodoList: document.getElementById("workspace-todo-list"),
   workspaceEventTitle: document.getElementById("workspace-event-title"),
   workspaceEventDate: document.getElementById("workspace-event-date"),
+  workspaceEventFormState: document.getElementById("workspace-event-form-state"),
+  workspaceCancelEventButton: document.getElementById("workspace-cancel-event-button"),
   workspaceAddEventButton: document.getElementById("workspace-add-event-button"),
   workspaceEventList: document.getElementById("workspace-event-list"),
   workspaceNotes: document.getElementById("workspace-notes"),
+  workspaceClearNotesButton: document.getElementById("workspace-clear-notes-button"),
+  workspaceResourceType: document.getElementById("workspace-resource-type"),
+  workspaceResourceLabel: document.getElementById("workspace-resource-label"),
+  workspaceResourceTarget: document.getElementById("workspace-resource-target"),
+  workspaceResourceNotes: document.getElementById("workspace-resource-notes"),
+  workspacePickResourceButton: document.getElementById("workspace-pick-resource-button"),
+  workspaceResourceFormState: document.getElementById("workspace-resource-form-state"),
+  workspaceCancelResourceButton: document.getElementById("workspace-cancel-resource-button"),
+  workspaceAddResourceButton: document.getElementById("workspace-add-resource-button"),
+  workspaceResourceList: document.getElementById("workspace-resource-list"),
   dbHost: document.getElementById("db-host"),
   dbPort: document.getElementById("db-port"),
   dbUser: document.getElementById("db-user"),
@@ -584,19 +614,51 @@ elements.workspaceAddClientButton?.addEventListener("click", () => {
   renderWorkspace();
   focusWorkspaceClientNameField();
 });
+elements.workspaceEditClientButton?.addEventListener("click", () => {
+  if (!getSelectedWorkspaceClient()) {
+    return;
+  }
+  focusWorkspaceClientNameField();
+});
+elements.workspaceDuplicateClientButton?.addEventListener("click", () => {
+  duplicateWorkspaceClient(getSelectedWorkspaceClient());
+});
+elements.workspaceDeleteClientButton?.addEventListener("click", () => {
+  const client = getSelectedWorkspaceClient();
+  if (!client) {
+    return;
+  }
+  deleteWorkspaceClient(client.id);
+});
 elements.workspaceAddTodoButton?.addEventListener("click", () => {
   const text = String(elements.workspaceTodoInput.value || "").trim();
+  const deadline = String(elements.workspaceTodoDeadline.value || "").trim();
+  const eventId = String(elements.workspaceTodoEventLink.value || "").trim();
+  const resourceId = String(elements.workspaceTodoResourceLink.value || "").trim();
   if (!text) {
     return;
   }
   updateSelectedWorkspaceClient((client) => {
+    const existingTodo = (client.todos || []).find((todo) => todo.id === uiState.editingWorkspaceTodoId);
+    if (existingTodo) {
+      existingTodo.text = text;
+      existingTodo.deadline = deadline;
+      existingTodo.eventId = eventId;
+      existingTodo.resourceId = resourceId;
+      return;
+    }
+
     client.todos.unshift({
       id: `todo-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
       text,
-      done: false
+      done: false,
+      createdAt: Date.now(),
+      deadline,
+      eventId,
+      resourceId
     });
   });
-  elements.workspaceTodoInput.value = "";
+  resetWorkspaceTodoForm();
 });
 elements.workspaceTodoInput?.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
@@ -604,6 +666,7 @@ elements.workspaceTodoInput?.addEventListener("keydown", (event) => {
     elements.workspaceAddTodoButton?.click();
   }
 });
+elements.workspaceCancelTodoButton?.addEventListener("click", resetWorkspaceTodoForm);
 elements.workspaceAddEventButton?.addEventListener("click", () => {
   const title = String(elements.workspaceEventTitle.value || "").trim();
   const date = String(elements.workspaceEventDate.value || "").trim();
@@ -611,21 +674,96 @@ elements.workspaceAddEventButton?.addEventListener("click", () => {
     return;
   }
   updateSelectedWorkspaceClient((client) => {
+    const existingEvent = (client.events || []).find((event) => event.id === uiState.editingWorkspaceEventId);
+    if (existingEvent) {
+      existingEvent.title = title;
+      existingEvent.date = date;
+      client.todos = (client.todos || []).map((todo) => (
+        todo.eventId === existingEvent.id ? { ...todo, deadline: date } : todo
+      ));
+      return;
+    }
+
     client.events.push({
       id: `event-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
       title,
       date
     });
   });
-  elements.workspaceEventTitle.value = "";
-  elements.workspaceEventDate.value = "";
+  resetWorkspaceEventForm();
 });
-["workspaceClientName", "workspaceProjectName", "workspaceProjectUrl", "workspaceProjectStage"].forEach((key) => {
+elements.workspaceCancelEventButton?.addEventListener("click", resetWorkspaceEventForm);
+elements.workspacePickResourceButton?.addEventListener("click", async () => {
+  const selected = await window.desktopAPI.pickWorkspaceResource();
+  if (selected) {
+    elements.workspaceResourceTarget.value = selected;
+  }
+});
+elements.workspaceAddResourceButton?.addEventListener("click", () => {
+  const type = String(elements.workspaceResourceType.value || "").trim() || "file";
+  const label = String(elements.workspaceResourceLabel.value || "").trim();
+  const target = String(elements.workspaceResourceTarget.value || "").trim();
+  const notes = String(elements.workspaceResourceNotes.value || "").trim();
+  if (!target) {
+    return;
+  }
+
+  updateSelectedWorkspaceClient((client) => {
+    client.resources = client.resources || [];
+    const existingResource = client.resources.find((resource) => resource.id === uiState.editingWorkspaceResourceId);
+    const computedLabel = label || target.split(/[\\/]/).pop() || type;
+    if (existingResource) {
+      existingResource.type = type;
+      existingResource.label = computedLabel;
+      existingResource.target = target;
+      existingResource.notes = notes;
+      return;
+    }
+
+    client.resources.unshift({
+      id: `resource-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
+      type,
+      label: computedLabel,
+      target,
+      notes,
+      createdAt: Date.now()
+    });
+  });
+  resetWorkspaceResourceForm();
+});
+elements.workspaceCancelResourceButton?.addEventListener("click", resetWorkspaceResourceForm);
+elements.workspaceTodoEventLink?.addEventListener("change", () => {
+  const client = getSelectedWorkspaceClient();
+  const linkedEvent = client?.events.find((event) => event.id === elements.workspaceTodoEventLink.value);
+  if (linkedEvent?.date) {
+    elements.workspaceTodoDeadline.value = linkedEvent.date;
+  }
+});
+[
+  "workspaceClientName",
+  "workspaceContactName",
+  "workspaceProjectName",
+  "workspaceProjectUrl",
+  "workspaceProjectStage",
+  "workspaceContactEmail",
+  "workspaceContactPhone",
+  "workspaceProjectRepo",
+  "workspaceHosting",
+  "workspaceAdminUrl",
+  "workspacePriority"
+].forEach((key) => {
   const map = {
     workspaceClientName: "clientName",
+    workspaceContactName: "contactName",
     workspaceProjectName: "projectName",
     workspaceProjectUrl: "projectUrl",
-    workspaceProjectStage: "stage"
+    workspaceProjectStage: "stage",
+    workspaceContactEmail: "contactEmail",
+    workspaceContactPhone: "contactPhone",
+    workspaceProjectRepo: "projectRepo",
+    workspaceHosting: "hosting",
+    workspaceAdminUrl: "adminUrl",
+    workspacePriority: "priority"
   };
   elements[key]?.addEventListener("input", (event) => {
     updateSelectedWorkspaceClient((client) => {
@@ -636,6 +774,14 @@ elements.workspaceAddEventButton?.addEventListener("click", () => {
 elements.workspaceNotes?.addEventListener("input", (event) => {
   updateSelectedWorkspaceClient((client) => {
     client.notes = event.target.value;
+  });
+});
+elements.workspaceClearNotesButton?.addEventListener("click", () => {
+  if (!getSelectedWorkspaceClient()) {
+    return;
+  }
+  updateSelectedWorkspaceClient((client) => {
+    client.notes = "";
   });
 });
 
@@ -1201,14 +1347,116 @@ function buildWorkspaceClientRecord(seedName = "") {
   return {
     id: `client-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`,
     clientName: label,
+    contactName: "",
     projectName: "",
     projectUrl: "",
     stage: "",
+    contactEmail: "",
+    contactPhone: "",
+    projectRepo: "",
+    hosting: "",
+    adminUrl: "",
+    priority: "",
     notes: "",
     todos: [],
     events: [],
+    resources: [],
     updatedAt: Date.now()
   };
+}
+
+function resetWorkspaceTodoForm() {
+  uiState.editingWorkspaceTodoId = null;
+  if (elements.workspaceTodoInput) {
+    elements.workspaceTodoInput.value = "";
+  }
+  if (elements.workspaceTodoDeadline) {
+    elements.workspaceTodoDeadline.value = "";
+  }
+  if (elements.workspaceTodoEventLink) {
+    elements.workspaceTodoEventLink.value = "";
+  }
+  if (elements.workspaceTodoResourceLink) {
+    elements.workspaceTodoResourceLink.value = "";
+  }
+  renderWorkspaceFormActions();
+}
+
+function resetWorkspaceEventForm() {
+  uiState.editingWorkspaceEventId = null;
+  if (elements.workspaceEventTitle) {
+    elements.workspaceEventTitle.value = "";
+  }
+  if (elements.workspaceEventDate) {
+    elements.workspaceEventDate.value = "";
+  }
+  renderWorkspaceFormActions();
+}
+
+function resetWorkspaceResourceForm() {
+  uiState.editingWorkspaceResourceId = null;
+  if (elements.workspaceResourceType) {
+    elements.workspaceResourceType.value = "google-sheet";
+  }
+  if (elements.workspaceResourceLabel) {
+    elements.workspaceResourceLabel.value = "";
+  }
+  if (elements.workspaceResourceTarget) {
+    elements.workspaceResourceTarget.value = "";
+  }
+  if (elements.workspaceResourceNotes) {
+    elements.workspaceResourceNotes.value = "";
+  }
+  renderWorkspaceFormActions();
+}
+
+function startEditingWorkspaceTodo(todoId) {
+  const client = getSelectedWorkspaceClient();
+  const todo = client?.todos.find((entry) => entry.id === todoId);
+  if (!todo) {
+    return;
+  }
+
+  uiState.editingWorkspaceTodoId = todo.id;
+  elements.workspaceTodoInput.value = todo.text || "";
+  elements.workspaceTodoDeadline.value = todo.deadline || "";
+  elements.workspaceTodoEventLink.value = todo.eventId || "";
+  elements.workspaceTodoResourceLink.value = todo.resourceId || "";
+  elements.workspaceTodoInput?.focus();
+  elements.workspaceTodoInput?.select();
+  renderWorkspaceFormActions();
+}
+
+function startEditingWorkspaceEvent(eventId) {
+  const client = getSelectedWorkspaceClient();
+  const entry = client?.events.find((event) => event.id === eventId);
+  if (!entry) {
+    return;
+  }
+
+  uiState.editingWorkspaceEventId = entry.id;
+  elements.workspaceEventTitle.value = entry.title || "";
+  elements.workspaceEventDate.value = entry.date || "";
+  elements.workspaceEventTitle?.focus();
+  elements.workspaceEventTitle?.select();
+  renderWorkspaceFormActions();
+}
+
+function startEditingWorkspaceResource(resourceId) {
+  const client = getSelectedWorkspaceClient();
+  const resource = client?.resources.find((entry) => entry.id === resourceId);
+  if (!resource) {
+    return;
+  }
+
+  uiState.editingWorkspaceResourceId = resource.id;
+  elements.workspaceResourceType.value = resource.type || "file";
+  elements.workspaceResourceLabel.value = resource.label || "";
+  elements.workspaceResourceTarget.value = resource.target || "";
+  elements.workspaceResourceNotes.value = resource.notes || "";
+  elements.workspaceResourceLabel?.focus();
+  elements.workspaceResourceLabel?.select();
+  renderWorkspaceFormActions();
 }
 
 function hideWorkspaceContextMenu() {
@@ -1228,18 +1476,37 @@ function duplicateWorkspaceClient(client) {
     return;
   }
 
+  const eventIdMap = new Map();
+  const resourceIdMap = new Map();
+  const duplicatedEvents = (client.events || []).map((event) => {
+    const id = `event-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+    eventIdMap.set(event.id, id);
+    return {
+      ...event,
+      id
+    };
+  });
+  const duplicatedResources = (client.resources || []).map((resource) => {
+    const id = `resource-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`;
+    resourceIdMap.set(resource.id, id);
+    return {
+      ...resource,
+      id
+    };
+  });
+
   const copy = {
     ...client,
     id: `client-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`,
     clientName: `${client.clientName || "Client"} Copy`,
     todos: (client.todos || []).map((todo) => ({
       ...todo,
-      id: `todo-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`
+      id: `todo-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`,
+      eventId: eventIdMap.get(todo.eventId) || "",
+      resourceId: resourceIdMap.get(todo.resourceId) || ""
     })),
-    events: (client.events || []).map((event) => ({
-      ...event,
-      id: `event-${Date.now()}-${Math.random().toString(16).slice(2, 6)}`
-    })),
+    events: duplicatedEvents,
+    resources: duplicatedResources,
     updatedAt: Date.now()
   };
   state.workspaceClients.unshift(copy);
@@ -1257,6 +1524,9 @@ function deleteWorkspaceClient(clientId) {
   state.workspaceClients = state.workspaceClients.filter((entry) => entry.id !== clientId);
   if (state.selectedWorkspaceClientId === clientId) {
     state.selectedWorkspaceClientId = state.workspaceClients[0]?.id || null;
+    resetWorkspaceTodoForm();
+    resetWorkspaceEventForm();
+    resetWorkspaceResourceForm();
   }
   saveWorkspaceClients();
   renderWorkspace();
@@ -1326,6 +1596,103 @@ function sortWorkspaceEvents(events) {
   });
 }
 
+function formatWorkspaceTimestamp(value) {
+  if (!value) {
+    return "Created just now";
+  }
+  return `Created ${new Date(value).toLocaleString()}`;
+}
+
+function getWorkspaceResourceDisplayType(resource) {
+  const explicitType = String(resource?.type || "").trim();
+  if (explicitType) {
+    return explicitType;
+  }
+
+  const target = String(resource?.target || "").trim().toLowerCase();
+  if (/docs\.google\.com\/spreadsheets/.test(target)) {
+    return "google-sheet";
+  }
+  if (/\.(xlsx|xls|csv)$/.test(target)) {
+    return "excel";
+  }
+  if (/\.(png|jpg|jpeg|gif|webp|svg)$/.test(target)) {
+    return "image";
+  }
+  if (/\.(mp4|webm|mp3|wav)$/.test(target)) {
+    return "media";
+  }
+  if (/^https?:\/\//.test(target)) {
+    return "site";
+  }
+  return "file";
+}
+
+function isWorkspaceUrlTarget(target) {
+  return /^https?:\/\//i.test(String(target || "").trim());
+}
+
+function toWorkspaceTargetUrl(target) {
+  const raw = String(target || "").trim();
+  if (!raw) {
+    return "";
+  }
+  if (isWorkspaceUrlTarget(raw) || /^file:\/\//i.test(raw)) {
+    return raw;
+  }
+  return `file:///${raw.replace(/\\/g, "/").replace(/^\/+/, "")}`;
+}
+
+function isWorkspaceImageResource(resource) {
+  return getWorkspaceResourceDisplayType(resource) === "image";
+}
+
+function isWorkspaceMediaResource(resource) {
+  return getWorkspaceResourceDisplayType(resource) === "media";
+}
+
+function renderWorkspaceTodoEventOptions(client) {
+  const select = elements.workspaceTodoEventLink;
+  if (!select) {
+    return;
+  }
+
+  select.innerHTML = `<option value="">Link deadline to calendar event</option>`;
+  if (!client) {
+    select.disabled = true;
+    return;
+  }
+
+  sortWorkspaceEvents(client.events || []).forEach((event) => {
+    const option = document.createElement("option");
+    option.value = event.id;
+    option.textContent = `${event.title} (${event.date || "No date"})`;
+    select.appendChild(option);
+  });
+  select.disabled = false;
+}
+
+function renderWorkspaceTodoResourceOptions(client) {
+  const select = elements.workspaceTodoResourceLink;
+  if (!select) {
+    return;
+  }
+
+  select.innerHTML = `<option value="">Attach resource to task</option>`;
+  if (!client) {
+    select.disabled = true;
+    return;
+  }
+
+  (client.resources || []).forEach((resource) => {
+    const option = document.createElement("option");
+    option.value = resource.id;
+    option.textContent = resource.label || resource.target || "Untitled resource";
+    select.appendChild(option);
+  });
+  select.disabled = false;
+}
+
 function renderWorkspaceClients() {
   if (!elements.workspaceClientList) {
     return;
@@ -1382,18 +1749,28 @@ function renderWorkspaceTodoList(client) {
   }
 
   client.todos.forEach((todo) => {
+    const linkedEvent = (client.events || []).find((event) => event.id === todo.eventId);
+    const linkedResource = (client.resources || []).find((resource) => resource.id === todo.resourceId);
+    const deadlineLabel = linkedEvent?.date || todo.deadline || "No deadline";
+    const eventLabel = linkedEvent?.title ? ` · ${linkedEvent.title}` : "";
+    const resourceLabel = linkedResource?.label ? ` · Resource: ${linkedResource.label}` : "";
     const item = document.createElement("div");
     item.className = `workspace-task-item${todo.done ? " done" : ""}`;
     item.innerHTML = `
       <div class="workspace-item-copy">
         <strong>${escapeHtml(todo.text || "")}</strong>
-        <span>${todo.done ? "Completed" : "Open task"}</span>
+        <span>${todo.done ? "Completed" : "Open task"} · ${escapeHtml(deadlineLabel)}${escapeHtml(eventLabel)}${escapeHtml(resourceLabel)}</span>
+        <span>${escapeHtml(formatWorkspaceTimestamp(todo.createdAt))}</span>
       </div>
       <div class="workspace-item-actions">
+        <button type="button" data-workspace-edit-todo="${todo.id}">Edit</button>
         <button type="button" data-workspace-toggle-todo="${todo.id}">${todo.done ? "Undo" : "Done"}</button>
         <button type="button" data-workspace-delete-todo="${todo.id}">Delete</button>
       </div>
     `;
+    item.querySelector("[data-workspace-edit-todo]")?.addEventListener("click", () => {
+      startEditingWorkspaceTodo(todo.id);
+    });
     item.querySelector("[data-workspace-toggle-todo]")?.addEventListener("click", () => {
       todo.done = !todo.done;
       client.updatedAt = Date.now();
@@ -1402,6 +1779,9 @@ function renderWorkspaceTodoList(client) {
     });
     item.querySelector("[data-workspace-delete-todo]")?.addEventListener("click", () => {
       client.todos = client.todos.filter((entry) => entry.id !== todo.id);
+      if (uiState.editingWorkspaceTodoId === todo.id) {
+        resetWorkspaceTodoForm();
+      }
       client.updatedAt = Date.now();
       saveWorkspaceClients();
       renderWorkspace();
@@ -1435,17 +1815,127 @@ function renderWorkspaceEventList(client) {
         <span>${escapeHtml(event.date || "No date")}</span>
       </div>
       <div class="workspace-item-actions">
+        <button type="button" data-workspace-edit-event="${event.id}">Edit</button>
         <button type="button" data-workspace-delete-event="${event.id}">Delete</button>
       </div>
     `;
+    item.querySelector("[data-workspace-edit-event]")?.addEventListener("click", () => {
+      startEditingWorkspaceEvent(event.id);
+    });
     item.querySelector("[data-workspace-delete-event]")?.addEventListener("click", () => {
       client.events = client.events.filter((entry) => entry.id !== event.id);
+      client.todos = (client.todos || []).map((todo) => (
+        todo.eventId === event.id
+          ? { ...todo, eventId: "", deadline: "" }
+          : todo
+      ));
+      if (uiState.editingWorkspaceEventId === event.id) {
+        resetWorkspaceEventForm();
+      }
       client.updatedAt = Date.now();
       saveWorkspaceClients();
       renderWorkspace();
     });
     list.appendChild(item);
   });
+}
+
+function renderWorkspaceResourceList(client) {
+  const list = elements.workspaceResourceList;
+  if (!list) {
+    return;
+  }
+
+  list.innerHTML = "";
+  if (!client) {
+    list.innerHTML = `<div class="workspace-empty">Select a client to connect sheets, sites, files, and media.</div>`;
+    return;
+  }
+  if (!client.resources?.length) {
+    list.innerHTML = `<div class="workspace-empty">No connected resources yet.</div>`;
+    return;
+  }
+
+  client.resources.forEach((resource) => {
+    const targetUrl = toWorkspaceTargetUrl(resource.target);
+    const item = document.createElement("div");
+    item.className = "workspace-resource-item";
+    const previewMarkup = isWorkspaceImageResource(resource)
+      ? `<div class="workspace-resource-preview"><img src="${escapeHtml(targetUrl)}" alt="${escapeHtml(resource.label || "Image attachment")}" /></div>`
+      : isWorkspaceMediaResource(resource) && /\.(mp4|webm)$/i.test(String(resource.target || ""))
+        ? `<div class="workspace-resource-preview"><video src="${escapeHtml(targetUrl)}" controls preload="metadata"></video></div>`
+        : "";
+    item.innerHTML = `
+      <div class="workspace-item-copy">
+        <strong>${escapeHtml(resource.label || "Untitled resource")}</strong>
+        <span>${escapeHtml(getWorkspaceResourceDisplayType(resource))} · ${escapeHtml(resource.target || "")}</span>
+        ${resource.notes ? `<span>${escapeHtml(resource.notes)}</span>` : ""}
+        ${previewMarkup}
+      </div>
+      <div class="workspace-item-actions">
+        <button type="button" data-workspace-open-resource="${resource.id}">Open</button>
+        <button type="button" data-workspace-edit-resource="${resource.id}">Edit</button>
+        <button type="button" data-workspace-delete-resource="${resource.id}">Delete</button>
+      </div>
+    `;
+    item.querySelector("[data-workspace-open-resource]")?.addEventListener("click", () => {
+      if (isWorkspaceUrlTarget(resource.target)) {
+        openUrlInAppBrowser(resource.target);
+        return;
+      }
+      void openExistingPath(resource.target, "Resource path was not found.");
+    });
+    item.querySelector("[data-workspace-edit-resource]")?.addEventListener("click", () => {
+      startEditingWorkspaceResource(resource.id);
+    });
+    item.querySelector("[data-workspace-delete-resource]")?.addEventListener("click", () => {
+      client.resources = (client.resources || []).filter((entry) => entry.id !== resource.id);
+      client.todos = (client.todos || []).map((todo) => (
+        todo.resourceId === resource.id
+          ? { ...todo, resourceId: "" }
+          : todo
+      ));
+      if (uiState.editingWorkspaceResourceId === resource.id) {
+        resetWorkspaceResourceForm();
+      }
+      client.updatedAt = Date.now();
+      saveWorkspaceClients();
+      renderWorkspace();
+    });
+    list.appendChild(item);
+  });
+}
+
+function renderWorkspaceFormActions() {
+  if (elements.workspaceTodoFormState) {
+    elements.workspaceTodoFormState.textContent = uiState.editingWorkspaceTodoId ? "Editing task" : "New task";
+  }
+  if (elements.workspaceAddTodoButton) {
+    elements.workspaceAddTodoButton.textContent = uiState.editingWorkspaceTodoId ? "Save" : "Add";
+  }
+  if (elements.workspaceCancelTodoButton) {
+    elements.workspaceCancelTodoButton.disabled = !getSelectedWorkspaceClient() || !uiState.editingWorkspaceTodoId;
+  }
+
+  if (elements.workspaceEventFormState) {
+    elements.workspaceEventFormState.textContent = uiState.editingWorkspaceEventId ? "Editing event" : "New event";
+  }
+  if (elements.workspaceAddEventButton) {
+    elements.workspaceAddEventButton.textContent = uiState.editingWorkspaceEventId ? "Save" : "Add";
+  }
+  if (elements.workspaceCancelEventButton) {
+    elements.workspaceCancelEventButton.disabled = !getSelectedWorkspaceClient() || !uiState.editingWorkspaceEventId;
+  }
+
+  if (elements.workspaceResourceFormState) {
+    elements.workspaceResourceFormState.textContent = uiState.editingWorkspaceResourceId ? "Editing resource" : "New resource";
+  }
+  if (elements.workspaceAddResourceButton) {
+    elements.workspaceAddResourceButton.textContent = uiState.editingWorkspaceResourceId ? "Save" : "Attach";
+  }
+  if (elements.workspaceCancelResourceButton) {
+    elements.workspaceCancelResourceButton.disabled = !getSelectedWorkspaceClient() || !uiState.editingWorkspaceResourceId;
+  }
 }
 
 function renderWorkspace() {
@@ -1455,15 +1945,35 @@ function renderWorkspace() {
   const hasClient = Boolean(client);
   [
     elements.workspaceClientName,
+    elements.workspaceContactName,
     elements.workspaceProjectName,
     elements.workspaceProjectUrl,
     elements.workspaceProjectStage,
+    elements.workspaceContactEmail,
+    elements.workspaceContactPhone,
+    elements.workspaceProjectRepo,
+    elements.workspaceHosting,
+    elements.workspaceAdminUrl,
+    elements.workspacePriority,
     elements.workspaceTodoInput,
     elements.workspaceAddTodoButton,
+    elements.workspaceTodoDeadline,
+    elements.workspaceTodoEventLink,
+    elements.workspaceTodoResourceLink,
     elements.workspaceEventTitle,
     elements.workspaceEventDate,
     elements.workspaceAddEventButton,
-    elements.workspaceNotes
+    elements.workspaceNotes,
+    elements.workspaceResourceType,
+    elements.workspaceResourceLabel,
+    elements.workspaceResourceTarget,
+    elements.workspaceResourceNotes,
+    elements.workspacePickResourceButton,
+    elements.workspaceAddResourceButton,
+    elements.workspaceEditClientButton,
+    elements.workspaceDuplicateClientButton,
+    elements.workspaceDeleteClientButton,
+    elements.workspaceClearNotesButton
   ].forEach((element) => {
     if (element) {
       element.disabled = !hasClient;
@@ -1474,24 +1984,78 @@ function renderWorkspace() {
     elements.workspaceClientTitle.textContent = "Select a client";
     elements.workspaceClientSubtitle.textContent = "Track notes, to-dos, and deadlines for each WordPress client.";
     elements.workspaceClientName.value = "";
+    elements.workspaceContactName.value = "";
     elements.workspaceProjectName.value = "";
     elements.workspaceProjectUrl.value = "";
     elements.workspaceProjectStage.value = "";
+    elements.workspaceContactEmail.value = "";
+    elements.workspaceContactPhone.value = "";
+    elements.workspaceProjectRepo.value = "";
+    elements.workspaceHosting.value = "";
+    elements.workspaceAdminUrl.value = "";
+    elements.workspacePriority.value = "";
+    elements.workspaceTodoInput.value = "";
+    elements.workspaceTodoDeadline.value = "";
+    elements.workspaceTodoEventLink.value = "";
+    elements.workspaceEventTitle.value = "";
+    elements.workspaceEventDate.value = "";
     elements.workspaceNotes.value = "";
+    elements.workspaceTodoResourceLink.value = "";
+    elements.workspaceResourceLabel.value = "";
+    elements.workspaceResourceTarget.value = "";
+    elements.workspaceResourceNotes.value = "";
+    elements.workspaceResourceType.value = "google-sheet";
+    resetWorkspaceTodoForm();
+    resetWorkspaceEventForm();
+    resetWorkspaceResourceForm();
+    renderWorkspaceTodoEventOptions(null);
+    renderWorkspaceTodoResourceOptions(null);
     renderWorkspaceTodoList(null);
     renderWorkspaceEventList(null);
+    renderWorkspaceResourceList(null);
+    renderWorkspaceFormActions();
     return;
   }
 
   elements.workspaceClientTitle.textContent = client.clientName || "Untitled client";
   elements.workspaceClientSubtitle.textContent = client.projectName || client.stage || "Workspace ready for planning.";
   elements.workspaceClientName.value = client.clientName || "";
+  elements.workspaceContactName.value = client.contactName || "";
   elements.workspaceProjectName.value = client.projectName || "";
   elements.workspaceProjectUrl.value = client.projectUrl || "";
   elements.workspaceProjectStage.value = client.stage || "";
+  elements.workspaceContactEmail.value = client.contactEmail || "";
+  elements.workspaceContactPhone.value = client.contactPhone || "";
+  elements.workspaceProjectRepo.value = client.projectRepo || "";
+  elements.workspaceHosting.value = client.hosting || "";
+  elements.workspaceAdminUrl.value = client.adminUrl || "";
+  elements.workspacePriority.value = client.priority || "";
   elements.workspaceNotes.value = client.notes || "";
+  elements.workspaceResourceType.value = elements.workspaceResourceType.value || "google-sheet";
+  renderWorkspaceTodoEventOptions(client);
+  renderWorkspaceTodoResourceOptions(client);
+  if (uiState.editingWorkspaceTodoId) {
+    const editingTodo = (client.todos || []).find((todo) => todo.id === uiState.editingWorkspaceTodoId);
+    if (!editingTodo) {
+      resetWorkspaceTodoForm();
+    }
+  }
+  if (uiState.editingWorkspaceEventId) {
+    const editingEvent = (client.events || []).find((event) => event.id === uiState.editingWorkspaceEventId);
+    if (!editingEvent) {
+      resetWorkspaceEventForm();
+    }
+  }
+  if (uiState.editingWorkspaceResourceId) {
+    const editingResource = (client.resources || []).find((resource) => resource.id === uiState.editingWorkspaceResourceId);
+    if (!editingResource) {
+      resetWorkspaceResourceForm();
+    }
+  }
   renderWorkspaceTodoList(client);
   renderWorkspaceEventList(client);
+  renderWorkspaceResourceList(client);
+  renderWorkspaceFormActions();
 }
 
 function updateSelectedWorkspaceClient(mutator) {
@@ -1511,20 +2075,39 @@ function loadWorkspaceState() {
   state.workspaceClients = Array.isArray(clients) ? clients.map((client) => ({
     id: String(client?.id || `client-${Date.now()}`),
     clientName: String(client?.clientName || "").trim(),
+    contactName: String(client?.contactName || "").trim(),
     projectName: String(client?.projectName || "").trim(),
     projectUrl: String(client?.projectUrl || "").trim(),
     stage: String(client?.stage || "").trim(),
+    contactEmail: String(client?.contactEmail || "").trim(),
+    contactPhone: String(client?.contactPhone || "").trim(),
+    projectRepo: String(client?.projectRepo || "").trim(),
+    hosting: String(client?.hosting || "").trim(),
+    adminUrl: String(client?.adminUrl || "").trim(),
+    priority: String(client?.priority || "").trim(),
     notes: String(client?.notes || ""),
     todos: Array.isArray(client?.todos) ? client.todos.map((todo) => ({
       id: String(todo?.id || `todo-${Date.now()}`),
       text: String(todo?.text || "").trim(),
-      done: todo?.done === true
+      done: todo?.done === true,
+      createdAt: Number(todo?.createdAt || Date.now()),
+      deadline: String(todo?.deadline || "").trim(),
+      eventId: String(todo?.eventId || "").trim(),
+      resourceId: String(todo?.resourceId || "").trim()
     })).filter((todo) => todo.text) : [],
     events: Array.isArray(client?.events) ? client.events.map((event) => ({
       id: String(event?.id || `event-${Date.now()}`),
       title: String(event?.title || "").trim(),
       date: String(event?.date || "").trim()
     })).filter((event) => event.title) : [],
+    resources: Array.isArray(client?.resources) ? client.resources.map((resource) => ({
+      id: String(resource?.id || `resource-${Date.now()}`),
+      type: String(resource?.type || "").trim(),
+      label: String(resource?.label || "").trim(),
+      target: String(resource?.target || "").trim(),
+      notes: String(resource?.notes || "").trim(),
+      createdAt: Number(resource?.createdAt || Date.now())
+    })).filter((resource) => resource.target) : [],
     updatedAt: Number(client?.updatedAt || Date.now())
   })) : [];
 
