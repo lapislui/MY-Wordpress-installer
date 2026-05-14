@@ -530,15 +530,46 @@ button, input, select, textarea { font: inherit; }
   cursor: pointer;
   min-width: 28px;
   transition: background 0.12s, color 0.12s;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1;
 }
 .bookmark-chip:hover { background: var(--surface-3); color: var(--text); transform: none; }
-.bookmark-folder-chip { background: var(--accent-soft); border-color: var(--accent-dim); color: var(--accent-strong); }
+.bookmark-folder-chip {
+  background: linear-gradient(180deg, var(--surface-2), color-mix(in srgb, var(--accent-soft) 72%, var(--surface-2) 28%));
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line) 66%);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.04);
+}
+.bookmark-folder-chip:hover {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent-soft) 75%, var(--surface-3) 25%), color-mix(in srgb, var(--accent-dim) 68%, var(--surface-2) 32%));
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line) 45%);
+  color: var(--text);
+}
+.bookmark-folder-glyph {
+  color: var(--accent-hover);
+  font-size: 0.95rem;
+  flex: 0 0 auto;
+}
+.bookmark-folder-title {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bookmark-folder-caret {
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  flex: 0 0 auto;
+}
 .bookmark-bar-empty { color: var(--muted); }
 
 /* ─── Context menus ──────────────────────────────────────────── */
 .bookmark-context-menu {
   position: fixed;
-  z-index: 50;
+  z-index: 1200;
   min-width: 200px;
   display: grid;
   gap: 2px;
@@ -1203,6 +1234,49 @@ button:hover { transform: translateY(-1px); }
 .sites-running-count { padding: 0 14px 8px; color: var(--muted); font-size: 0.88rem; }
 
 .sites-list { display: grid; gap: 4px; padding: 0 8px 12px; overflow: auto; }
+
+.sites-backups-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 14px 8px;
+  border-top: 1px solid var(--line-soft);
+}
+
+.backups-list { padding-top: 0; }
+
+.backup-item {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+}
+
+.backup-item-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.backup-item-copy strong,
+.backup-item-copy span {
+  display: block;
+}
+
+.backup-item-copy span {
+  color: var(--muted);
+  font-size: 0.8rem;
+  word-break: break-word;
+}
+
+.backup-item-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 
 .site-list-item,
 .site-list-empty {

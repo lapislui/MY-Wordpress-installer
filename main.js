@@ -2534,6 +2534,237 @@ function getBackupDefaultPath(siteName, sitePath = "") {
   return path.join(getSiteBackupDirectory(sitePath), `${safeName}-backup-${getBackupTimestamp()}.zip`);
 }
 
+function getBackupSearchDirectories(settings = getSettings()) {
+  const directories = new Set([path.join(app.getPath("documents"), "WP Desktop Backups")]);
+  const htdocsPath = getResolvedHtdocsPath(settings);
+  if (htdocsPath) {
+    directories.add(path.join(htdocsPath, "backups"));
+  }
+  return Array.from(directories);
+}
+
+function readBackupMetadata(backupPath) {
+  const zip = new AdmZip(backupPath);
+  const entry = zip.getEntries().find((candidate) => /(^|\/)backup\.json$/i.test(candidate.entryName));
+  if (!entry) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(entry.getData().toString("utf8"));
+  } catch (_) {
+    return null;
+  }
+}
+
+function listSiteBackups(settings = getSettings()) {
+  const backups = [];
+
+  for (const directory of getBackupSearchDirectories(settings)) {
+    if (!directory || !fs.existsSync(directory)) {
+      continue;
+    }
+
+    let entries = [];
+    try {
+      entries = fs.readdirSync(directory, { withFileTypes: true });
+    } catch (_) {
+      continue;
+    }
+
+    for (const entry of entries) {
+      if (!entry.isFile() || path.extname(entry.name).toLowerCase() !== ".zip") {
+        continue;
+      }
+
+      const backupPath = path.join(directory, entry.name);
+      let stats = null;
+      try {
+        stats = fs.statSync(backupPath);
+      } catch (_) {
+        continue;
+      }
+
+      const metadata = readBackupMetadata(backupPath) || {};
+      backups.push({
+        id: backupPath,
+        path: backupPath,
+        fileName: entry.name,
+        siteName: metadata.site?.name || entry.name.replace(/-backup-\d{8}-\d{6}\.zip$/i, ""),
+        targetPath: metadata.site?.path || "",
+        dbName: metadata.database?.name || "",
+        createdAt: metadata.createdAt || stats.mtime.toISOString(),
+        backupFormat: metadata.backup?.format || "legacy-partial",
+        selfContained: metadata.backup?.selfContained === true
+      });
+    }
+  }
+
+  return backups.sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)));
+}
+
+function findWordPressCoreTemplate(targetPath, settings = getSettings()) {
+  const htdocsPath = getResolvedHtdocsPath(settings);
+  if (!htdocsPath || !fs.existsSync(htdocsPath)) {
+    return "";
+  }
+
+  const resolvedTargetPath = path.resolve(targetPath);
+  const candidates = findWordPressFolders(htdocsPath, 8).filter((folderPath) => {
+    const resolvedFolderPath = path.resolve(folderPath);
+    return (
+      resolvedFolderPath !== resolvedTargetPath &&
+      fs.existsSync(path.join(resolvedFolderPath, "wp-admin")) &&
+      fs.existsSync(path.join(resolvedFolderPath, "wp-includes"))
+    );
+  });
+
+  return candidates[0] || "";
+}
+
+function copyWordPressCoreTemplate(templatePath, targetPath) {
+  const entries = fs.readdirSync(templatePath, { withFileTypes: true });
+  for (const entry of entries) {
+    if (["wp-content", "wp-config.php", "backups"].includes(entry.name.toLowerCase())) {
+      continue;
+    }
+
+    fs.cpSync(path.join(templatePath, entry.name), path.join(targetPath, entry.name), {
+      recursive: true,
+      force: true
+    });
+  }
+}
+
+function resolveRestoreTargetPath(metadata, settings = getSettings()) {
+  const htdocsPath = getResolvedHtdocsPath(settings);
+  const rawTarget = String(metadata?.site?.path || "").trim();
+  if (rawTarget && htdocsPath && isPathInside(path.resolve(htdocsPath), path.resolve(rawTarget))) {
+    return path.resolve(rawTarget);
+  }
+
+  return path.resolve(htdocsPath || app.getPath("documents"), metadata?.site?.name || "restored-site");
+}
+
+async function restoreBackupPackage(payload) {
+  const backupPath = String(payload?.backupPath || "").trim();
+  if (!backupPath || !fs.existsSync(backupPath)) {
+    throw new Error("Backup file was not found.");
+  }
+
+  const settings = getSettings();
+  const metadata = readBackupMetadata(backupPath);
+  if (!metadata?.site?.name) {
+    throw new Error("Backup metadata is missing or invalid.");
+  }
+
+  const targetPath = resolveRestoreTargetPath(metadata, settings);
+  const htdocsPath = getResolvedHtdocsPath(settings);
+  if (htdocsPath && !isPathInside(path.resolve(htdocsPath), targetPath)) {
+    throw new Error("Refusing to restore outside the configured htdocs folder.");
+  }
+
+  ensureDir(targetPath);
+
+  const tempRoot = fs.mkdtempSync(path.join(app.getPath("temp"), "wpdesktop-restore-"));
+  try {
+    const zip = new AdmZip(backupPath);
+    zip.extractAllTo(tempRoot, true);
+
+    const extractedRoot = fs.readdirSync(tempRoot, { withFileTypes: true }).find((entry) => entry.isDirectory());
+    if (!extractedRoot) {
+      throw new Error("Backup archive is empty.");
+    }
+
+    const packageRoot = path.join(tempRoot, extractedRoot.name);
+    const fullSiteRoot = path.join(packageRoot, "site-full");
+    const hasFullSiteSnapshot = (
+      fs.existsSync(path.join(fullSiteRoot, "wp-admin")) &&
+      fs.existsSync(path.join(fullSiteRoot, "wp-includes")) &&
+      fs.existsSync(path.join(fullSiteRoot, "wp-content"))
+    );
+
+    if (hasFullSiteSnapshot) {
+      copyDirectoryContentsIfExists(fullSiteRoot, targetPath);
+    } else {
+      if (!fs.existsSync(path.join(targetPath, "wp-admin")) || !fs.existsSync(path.join(targetPath, "wp-includes"))) {
+        const templatePath = findWordPressCoreTemplate(targetPath, settings);
+        if (!templatePath) {
+          throw new Error("This backup does not include WordPress core files. Keep at least one working local WordPress site to restore older backups.");
+        }
+        copyWordPressCoreTemplate(templatePath, targetPath);
+      }
+
+      copyIfExists(path.join(packageRoot, "site-content", "plugins"), path.join(targetPath, "wp-content", "plugins"));
+      copyIfExists(path.join(packageRoot, "site-content", "themes"), path.join(targetPath, "wp-content", "themes"));
+      copyIfExists(path.join(packageRoot, "site-content", "uploads"), path.join(targetPath, "wp-content", "uploads"));
+      copyIfExists(path.join(packageRoot, "wp-config.php"), path.join(targetPath, "wp-config.php"));
+    }
+
+    const sqlDirectory = path.join(packageRoot, "database");
+    const sqlFileName = fs.existsSync(sqlDirectory)
+      ? fs.readdirSync(sqlDirectory).find((entry) => path.extname(entry).toLowerCase() === ".sql")
+      : "";
+    if (sqlFileName) {
+      const sqlSource = fs.readFileSync(path.join(sqlDirectory, sqlFileName), "utf8");
+      const dbProfile = getEffectiveDbProfile(settings);
+      const connection = await mysql.createConnection({
+        host: dbProfile.host || "127.0.0.1",
+        port: Number(dbProfile.port || 3306),
+        user: dbProfile.user || "root",
+        password: dbProfile.password ?? "",
+        multipleStatements: true
+      });
+      try {
+        await connection.query(sqlSource);
+      } finally {
+        await connection.end();
+      }
+    }
+
+    const effectiveDbProfile = getEffectiveDbProfile(settings);
+    const siteUrl = buildSiteUrl(targetPath);
+    const siteRecord = {
+      id: metadata.site.id || `site-${Date.now()}`,
+      name: metadata.site.name,
+      path: targetPath,
+      siteUrl,
+      adminUrl: `${siteUrl.replace(/\/$/, "")}/wp-admin/`,
+      dbName: metadata.database?.name || sanitizeDbName(metadata.site.name),
+      dbHost: effectiveDbProfile.host || "127.0.0.1",
+      dbPort: String(effectiveDbProfile.port || 3306),
+      dbUser: effectiveDbProfile.user || "root",
+      dbPassword: effectiveDbProfile.password ?? "",
+      relativePath: htdocsPath ? path.relative(htdocsPath, targetPath) : metadata.site.name,
+      webServer: "XAMPP Apache",
+      phpVersion: "Detected from restore target",
+      databaseVersion: "Detected from MySQL",
+      wordpressVersion: "Restored from backup",
+      extractedCount: null,
+      multisite: {
+        enabled: false,
+        prepared: false,
+        networkConfigured: false
+      }
+    };
+
+    const existingSites = getSites().filter((site) => (
+      site.id !== siteRecord.id &&
+      path.resolve(site.path || "") !== path.resolve(targetPath)
+    ));
+    existingSites.unshift(siteRecord);
+    saveSites(existingSites);
+
+    return {
+      ok: true,
+      site: siteRecord,
+      message: `Restored ${siteRecord.name} from backup.`
+    };
+  } finally {
+    removeDirSafe(tempRoot);
+  }
+}
+
 function copyIfExists(sourcePath, destinationPath) {
   if (!sourcePath || !fs.existsSync(sourcePath)) {
     return false;
@@ -2542,6 +2773,46 @@ function copyIfExists(sourcePath, destinationPath) {
   ensureDir(path.dirname(destinationPath));
   fs.cpSync(sourcePath, destinationPath, { recursive: true, force: true });
   return true;
+}
+
+function copyDirectoryContentsIfExists(sourcePath, destinationPath, options = {}) {
+  if (!sourcePath || !fs.existsSync(sourcePath)) {
+    return false;
+  }
+
+  const filter = typeof options.filter === "function" ? options.filter : null;
+  ensureDir(destinationPath);
+
+  for (const entry of fs.readdirSync(sourcePath, { withFileTypes: true })) {
+    const entrySourcePath = path.join(sourcePath, entry.name);
+    const entryDestinationPath = path.join(destinationPath, entry.name);
+
+    if (filter && !filter(entrySourcePath, entryDestinationPath)) {
+      continue;
+    }
+
+    fs.cpSync(entrySourcePath, entryDestinationPath, {
+      recursive: true,
+      force: true,
+      filter: filter || undefined
+    });
+  }
+
+  return true;
+}
+
+function createBackupSnapshotFilter(excludedPaths = []) {
+  const resolvedExcludedPaths = excludedPaths
+    .filter(Boolean)
+    .map((candidatePath) => path.resolve(candidatePath));
+
+  return (sourcePath) => {
+    const resolvedSourcePath = path.resolve(sourcePath);
+    return !resolvedExcludedPaths.some((excludedPath) => (
+      resolvedSourcePath === excludedPath ||
+      resolvedSourcePath.startsWith(`${excludedPath}${path.sep}`)
+    ));
+  };
 }
 
 async function createSqlDump({ connection, dbName }) {
@@ -2626,11 +2897,13 @@ async function backupSiteResources(payload) {
   const packageRoot = path.join(tempRoot, `${site.name || path.basename(resolvedSitePath)}-backup`);
   const sqlPath = path.join(tempRoot, `${site.name || "site"}-database.sql`);
   const metadataPath = path.join(tempRoot, "backup.json");
+  const fullSitePath = path.join(packageRoot, "site-full");
 
   try {
     ensureDir(packageRoot);
     ensureDir(path.join(packageRoot, "database"));
     ensureDir(path.join(packageRoot, "site-content"));
+    ensureDir(fullSitePath);
 
     const connection = await mysql.createConnection({
       host: databaseProfile.host,
@@ -2660,13 +2933,20 @@ async function backupSiteResources(payload) {
         user: databaseProfile.user
       },
       backup: {
-        includes: ["wp-content/plugins", "wp-content/themes", "wp-content/uploads", "wp-config.php"]
+        format: "full-site-v2",
+        selfContained: true,
+        includes: ["site-full", "database"]
       },
       createdAt: new Date().toISOString()
     };
     fs.writeFileSync(metadataPath, JSON.stringify(metadata, null, 2), "utf8");
 
     const wpContentPath = path.join(resolvedSitePath, "wp-content");
+    const backupFilter = createBackupSnapshotFilter([
+      getSiteBackupDirectory(resolvedSitePath),
+      path.join(resolvedSitePath, "backups")
+    ]);
+    copyDirectoryContentsIfExists(resolvedSitePath, fullSitePath, { filter: backupFilter });
     copyIfExists(path.join(wpContentPath, "plugins"), path.join(packageRoot, "site-content", "plugins"));
     copyIfExists(path.join(wpContentPath, "themes"), path.join(packageRoot, "site-content", "themes"));
     copyIfExists(path.join(wpContentPath, "uploads"), path.join(packageRoot, "site-content", "uploads"));
@@ -2700,23 +2980,22 @@ async function deleteSiteResources(payload) {
   const resolvedSitePath = path.resolve(site.path);
   const htdocsPath = getResolvedHtdocsPath(settings);
   const resolvedHtdocsPath = htdocsPath ? path.resolve(htdocsPath) : "";
+  const siteFolderExists = fs.existsSync(resolvedSitePath);
 
-  if (!fs.existsSync(resolvedSitePath)) {
-    throw new Error("The site folder no longer exists.");
-  }
-
-  if (resolvedHtdocsPath && !isPathInside(resolvedHtdocsPath, resolvedSitePath)) {
+  if (siteFolderExists && resolvedHtdocsPath && !isPathInside(resolvedHtdocsPath, resolvedSitePath)) {
     throw new Error("Refusing to delete a site outside the configured htdocs folder.");
   }
 
-  const backupResult = await backupSiteResources({
-    site,
-    database: manualDatabase,
-    savePath: payload?.savePath || getBackupDefaultPath(site.name, resolvedSitePath)
-  });
+  const backupResult = siteFolderExists
+    ? await backupSiteResources({
+      site,
+      database: manualDatabase,
+      savePath: payload?.savePath || getBackupDefaultPath(site.name, resolvedSitePath)
+    })
+    : null;
 
   const installerDb = getVault().installerDb || {};
-  const wpConfig = parseWpConfig(resolvedSitePath) || {};
+  const wpConfig = siteFolderExists ? (parseWpConfig(resolvedSitePath) || {}) : {};
   const detectedDb = getEffectiveDbProfile(settings);
   const dbName = sanitizeDbName(
     wpConfig.dbName || site.dbName || site.name || path.basename(resolvedSitePath)
@@ -2804,7 +3083,9 @@ async function deleteSiteResources(payload) {
     );
   }
 
-  fs.rmSync(resolvedSitePath, { recursive: true, force: true });
+  if (siteFolderExists) {
+    fs.rmSync(resolvedSitePath, { recursive: true, force: true });
+  }
 
   const remainingSites = getSites().filter((entry) => entry.id !== site.id);
   saveSites(remainingSites);
@@ -2814,7 +3095,8 @@ async function deleteSiteResources(payload) {
     backupPath: backupResult?.savePath || null,
     deletedSiteId: site.id,
     deletedPath: resolvedSitePath,
-    deletedDatabase: dbName
+    deletedDatabase: dbName,
+    skippedMissingFolder: !siteFolderExists
   };
 }
 
@@ -6631,9 +6913,16 @@ ipcMain.handle("settings:remove-browser-extension", async (_event, extensionId) 
 });
 
 ipcMain.handle("sites:list", async () => buildSitesFromHtdocs());
+ipcMain.handle("backups:list", async () => ({
+  backups: listSiteBackups()
+}));
 
 ipcMain.handle("sites:backup", async (_event, payload) => {
   return backupSiteResources(payload);
+});
+
+ipcMain.handle("backups:restore", async (_event, payload) => {
+  return restoreBackupPackage(payload);
 });
 
 ipcMain.handle("sites:apply-multisite-config", async (event, payload) => {

@@ -15,6 +15,7 @@ const state = {
   currentVaultCredentials: null,
   bookmarkFolderTrail: [],
   sites: [],
+  backups: [],
   selectedSiteId: null,
   workspaceClients: [],
   selectedWorkspaceClientId: null,
@@ -200,6 +201,8 @@ const elements = {
   permissionsList: document.getElementById("permissions-list"),
   sitesList: document.getElementById("sites-list"),
   sitesRunningCount: document.getElementById("sites-running-count"),
+  backupsCount: document.getElementById("backups-count"),
+  backupsList: document.getElementById("backups-list"),
   htdocsPath: document.getElementById("htdocs-path"),
   pickHtdocsButton: document.getElementById("pick-htdocs-button"),
   openSidebarPhpMyAdminButton: document.getElementById("open-sidebar-phpmyadmin-button"),
@@ -3115,6 +3118,13 @@ function renderBookmarks() {
         ? (node.title || node.url).trim().charAt(0).toUpperCase() || "*"
         : (node.title || node.url);
     chip.title = node.type === "folder" ? node.title : node.url;
+    if (node.type === "folder") {
+      chip.innerHTML = `
+        <span class="bookmark-folder-glyph" aria-hidden="true">&#128193;</span>
+        <span class="bookmark-folder-title">${escapeHtml(node.title || "Folder")}</span>
+        <span class="bookmark-folder-caret" aria-hidden="true">&#9662;</span>
+      `;
+    }
 
     if (node.type === "folder") {
       chip.dataset.bookmarkId = node.id;
@@ -3906,6 +3916,76 @@ async function refreshSites() {
   }
 }
 
+async function refreshBackups() {
+  const response = await window.desktopAPI.listBackups();
+  state.backups = Array.isArray(response?.backups) ? response.backups : [];
+  renderBackupsList();
+}
+
+function renderBackupsList() {
+  if (!elements.backupsList || !elements.backupsCount) {
+    return;
+  }
+
+  elements.backupsCount.textContent = `${state.backups.length} backup${state.backups.length === 1 ? "" : "s"}`;
+  elements.backupsList.innerHTML = "";
+
+  if (!state.backups.length) {
+    const empty = document.createElement("div");
+    empty.className = "workspace-empty";
+    empty.textContent = "No backups found yet.";
+    elements.backupsList.appendChild(empty);
+    return;
+  }
+
+  state.backups.forEach((backup) => {
+    const item = document.createElement("div");
+    item.className = "backup-item";
+    item.innerHTML = `
+      <div class="backup-item-copy">
+        <strong>${escapeHtml(backup.siteName || backup.fileName || "Backup")}</strong>
+        <span>${escapeHtml(backup.createdAt ? new Date(backup.createdAt).toLocaleString() : "")}</span>
+        <span>${escapeHtml(backup.path || "")}</span>
+      </div>
+      <div class="backup-item-actions">
+        <button type="button" class="primary-button">Restore</button>
+      </div>
+    `;
+    item.querySelector("button")?.addEventListener("click", () => void restoreBackup(backup));
+    elements.backupsList.appendChild(item);
+  });
+}
+
+async function restoreBackup(backup) {
+  if (!backup?.path) {
+    setStatus("Backup path is missing.");
+    return;
+  }
+
+  const approved = window.confirm(
+    `Restore "${backup.siteName || backup.fileName || "backup"}"?\n\nThis will recreate the local site from the backup package.`
+  );
+  if (!approved) {
+    return;
+  }
+
+  showSiteTab("tools");
+  setStatus(`Restoring ${backup.siteName || backup.fileName || "backup"}...`);
+  setCreateProgress(true, "Restoring files, configuration, and database from backup...");
+
+  try {
+    const result = await window.desktopAPI.restoreBackup({ backupPath: backup.path });
+    state.selectedSiteId = result?.site?.id || state.selectedSiteId;
+    await refreshSites();
+    await refreshBackups();
+    setStatus(result?.message || `Restored ${backup.siteName || backup.fileName || "backup"}.`);
+  } catch (error) {
+    setStatus(`Restore failed: ${error.message}`);
+  } finally {
+    setCreateProgress(false);
+  }
+}
+
 function applySettingsPayload(settings) {
   state.htdocsPath = settings.htdocsPath || "";
   state.browser.downloadDirectory = settings.downloadDirectory || state.browser.downloadDirectory || "";
@@ -4228,6 +4308,7 @@ async function deleteSelectedSite() {
       state.selectedSiteId = null;
     }
     await refreshSites();
+    await refreshBackups();
     setStatus(`Deleted ${site.name}. Backup saved to ${result?.backupPath || "the backups folder"}.`);
   } catch (error) {
     setStatus(`Delete failed: ${error.message}`);
@@ -4262,6 +4343,7 @@ async function backupSelectedSite() {
         password: effectiveDbProfile.password
       }
     });
+    await refreshBackups();
     setStatus(`Backup saved to ${result.savePath}.`);
   } catch (error) {
     setStatus(`Backup failed: ${error.message}`);
@@ -4747,6 +4829,7 @@ window.desktopAPI.onBrowserMenuCommand((payload) => {
 
 window.desktopAPI.onSitesChanged(() => {
   void refreshSites();
+  void refreshBackups();
 });
 
 document.addEventListener("visibilitychange", () => {
@@ -4779,6 +4862,7 @@ async function loadSavedState() {
   );
 
   await refreshSites();
+  await refreshBackups();
   renderDownloads();
   renderPermissions();
   syncBrowserLayoutSoon();

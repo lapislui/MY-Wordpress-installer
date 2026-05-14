@@ -42,6 +42,8 @@ contextBridge.exposeInMainWorld("desktopAPI", {
   testDb: (config) => ipcRenderer.invoke("db:test", config),
   installWordPress: (payload) => ipcRenderer.invoke("installer:run", payload),
   openPath: (targetPath) => ipcRenderer.invoke("shell:open-path", targetPath),
+  listBackups: () => ipcRenderer.invoke("backups:list"),
+  restoreBackup: (payload) => ipcRenderer.invoke("backups:restore", payload),
   copyWorkspaceMedia: (targetPath) => ipcRenderer.invoke("workspace:copy-media", targetPath),
   openWorkspaceMediaWith: (targetPath) => ipcRenderer.invoke("workspace:open-with", targetPath),
   listSites: () => ipcRenderer.invoke("sites:list"),
