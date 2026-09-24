@@ -7624,6 +7624,19 @@ ipcMain.handle("browser:toggle-fullscreen", (event) => {
   return win.isFullScreen();
 });
 
+ipcMain.handle("meeting:get-sources", async () => {
+  const sources = await desktopCapturer.getSources({
+    types: ["screen", "window"],
+    thumbnailSize: { width: 320, height: 180 }
+  });
+  return sources.map((source) => ({
+    id: source.id,
+    name: source.name,
+    displayId: source.display_id || "",
+    thumbnail: source.thumbnail.isEmpty() ? "" : source.thumbnail.toDataURL()
+  }));
+});
+
 ipcMain.handle("sync:get-status", () => getSyncManager().getAuthStatus());
 
 ipcMain.handle("sync:auth-google", (event) =>
