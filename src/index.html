@@ -2155,29 +2155,42 @@
             <div>
               <span class="eyebrow">DevOps</span>
               <h1>Deployment Manager</h1>
-              <p>Sync files and database schemas to production server targets using SFTP settings.</p>
+              <p>Push the selected site to its SFTP server: compare files, upload only what changed, and push the database with a remote backup taken first.</p>
             </div>
           </header>
           <div class="settings-grid">
             <div class="settings-card">
-              <div class="card-header"><h3>Target Connection</h3></div>
+              <div class="card-header"><h3>Target</h3></div>
               <div class="settings-list">
-                <div class="settings-item"><div class="settings-item-copy"><strong>Deployment Host</strong><span id="deploy-target-host">Not configured (Set SFTP profile)</span></div></div>
-                <div class="settings-item"><div class="settings-item-copy"><strong>Remote Path</strong><span id="deploy-target-path">/</span></div></div>
+                <div class="settings-item"><div class="settings-item-copy"><strong>Site</strong><span id="deploy-site-name">No site selected</span></div></div>
+                <div class="settings-item"><div class="settings-item-copy"><strong>Server</strong><span id="deploy-target">–</span></div></div>
               </div>
-              <div class="button-row compact" style="margin-top:15px; display:grid; gap:8px; grid-template-columns:1fr 1fr;">
-                <button id="deploy-dryrun-btn" type="button" class="primary-button">Dry Run</button>
-                <button id="deploy-db-btn" type="button">Push Database</button>
-                <button id="deploy-files-btn" type="button">Push Files</button>
-                <button id="deploy-sync-btn" type="button" class="danger-button">Complete Sync</button>
+              <p id="deploy-no-sftp" class="settings-note hidden">This site has no SFTP server yet. Add one on the SFTP screen, then come back.</p>
+              <div class="button-row compact">
+                <button id="deploy-plan-btn" type="button" class="primary-button">Compare files</button>
+                <button id="deploy-files-btn" type="button" disabled>Upload changed files</button>
+                <button id="deploy-cancel-btn" type="button" class="hidden">Stop</button>
               </div>
             </div>
-            <div class="settings-card wide">
-              <div class="card-header"><h3>Sync Logs & Progress</h3></div>
-              <div class="flat-progress-track" style="margin-bottom:10px;"><div id="deploy-progress-bar" class="flat-progress-bar" style="width:0%;"></div></div>
-              <div id="deploy-output" class="log-list" style="height:280px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px; overflow-y:auto;">
-                <div style="color:var(--muted);">Ready to deploy. Verify remote host details first.</div>
+            <div class="settings-card">
+              <div class="card-header"><h3>Remote database</h3></div>
+              <div class="form-grid four-up">
+                <label class="field"><span>Host</span><input id="deploy-db-host" type="text" placeholder="localhost"></label>
+                <label class="field"><span>Database</span><input id="deploy-db-name" type="text"></label>
+                <label class="field"><span>User</span><input id="deploy-db-user" type="text"></label>
+                <label class="field"><span>Password</span><input id="deploy-db-pass" type="password" placeholder="unchanged"></label>
+                <label class="field field-span-2"><span>Live site URL (replaces the local URL after import)</span><input id="deploy-remote-url" type="text" placeholder="https://example.com"></label>
               </div>
+              <div class="button-row compact">
+                <button id="deploy-db-save-btn" type="button">Save</button>
+                <button id="deploy-db-btn" type="button" class="danger-button">Push database…</button>
+              </div>
+            </div>
+            <div class="settings-card settings-card-wide">
+              <div class="card-header"><h3 id="deploy-plan-title">Changes</h3><span id="deploy-plan-summary" class="beta-muted"></span></div>
+              <div class="beta-progress"><div id="deploy-progress-bar"></div></div>
+              <div id="deploy-plan-list" class="beta-file-list"><p class="beta-muted">Click Compare files to see what differs between this computer and the server.</p></div>
+              <pre id="deploy-output" class="beta-console"></pre>
             </div>
           </div>
         </div>
@@ -2190,29 +2203,47 @@
             <div>
               <span class="eyebrow">Collaboration</span>
               <h1>AI Assistant</h1>
-              <p>Generate shortcodes, custom hooks, and fix environment errors right within your developer workspace.</p>
+              <p>Ask about PHP, WordPress, SQL or your local setup. Knows which site you have selected.</p>
+            </div>
+            <div class="button-row compact">
+              <button id="ai-clear-btn" type="button">New chat</button>
+              <button id="ai-settings-btn" type="button">Settings</button>
             </div>
           </header>
-          <div class="settings-grid">
-            <div class="settings-card">
-              <div class="card-header"><h3>WordPress Prompts</h3></div>
-              <div class="settings-list">
-                <button type="button" class="ai-prompt-btn primary-button" data-prompt="Write custom plugin header boilerplate" style="width:100%; margin-bottom:6px; font-size:0.8rem; text-align:left;">Plugin Boilerplate</button>
-                <button type="button" class="ai-prompt-btn primary-button" data-prompt="Create WordPress shortcode showing recent posts" style="width:100%; margin-bottom:6px; font-size:0.8rem; text-align:left;">Recent Posts Shortcode</button>
-                <button type="button" class="ai-prompt-btn primary-button" data-prompt="Write Docker Compose template for Nginx and PHP" style="width:100%; margin-bottom:6px; font-size:0.8rem; text-align:left;">Docker Compose template</button>
-                <button type="button" class="ai-prompt-btn primary-button" data-prompt="Fix Apache port 80 collision error" style="width:100%; font-size:0.8rem; text-align:left;">Port Collision help</button>
+          <div id="ai-settings-panel" class="settings-card hidden">
+            <div class="card-header"><h3>Assistant settings</h3></div>
+            <div class="form-grid four-up">
+              <label class="field"><span>Provider</span>
+                <select id="ai-provider"><option value="claude">Claude (Anthropic API)</option><option value="ollama">Ollama (local)</option></select>
+              </label>
+              <label class="field ai-claude-only"><span>Claude model</span><select id="ai-claude-model"></select></label>
+              <label class="field field-span-2 ai-claude-only"><span>Anthropic API key</span><input id="ai-api-key" type="password" placeholder="sk-ant-…" autocomplete="off"></label>
+              <label class="field ai-ollama-only"><span>Ollama address</span><input id="ai-ollama-url" type="text"></label>
+              <label class="field ai-ollama-only"><span>Ollama model</span><select id="ai-ollama-model"></select></label>
+            </div>
+            <p id="ai-settings-note" class="settings-note"></p>
+            <div class="button-row compact">
+              <button id="ai-save-settings-btn" type="button" class="primary-button">Save</button>
+              <button id="ai-refresh-ollama-btn" type="button" class="ai-ollama-only">Refresh models</button>
+            </div>
+          </div>
+          <div class="settings-card settings-card-wide ai-chat-card">
+            <div id="ai-chat-output" class="ai-chat-output">
+              <div class="ai-empty">
+                <p>Try one of these:</p>
+                <div class="button-row compact">
+                  <button type="button" class="ai-prompt-btn" data-prompt="Write a WordPress plugin boilerplate with a settings page.">Plugin boilerplate</button>
+                  <button type="button" class="ai-prompt-btn" data-prompt="Write a shortcode that lists the 5 most recent posts.">Recent posts shortcode</button>
+                  <button type="button" class="ai-prompt-btn" data-prompt="Apache won't start in XAMPP because port 80 is in use. How do I fix it on Windows?">Port 80 in use</button>
+                  <button type="button" class="ai-prompt-btn" data-prompt="Write a docker-compose.yml for WordPress with MySQL and phpMyAdmin.">Docker Compose stack</button>
+                </div>
               </div>
             </div>
-            <div class="settings-card wide">
-              <div class="card-header"><h3>Chat Area</h3></div>
-              <div id="ai-chat-output" class="log-list" style="height:320px; background:var(--surface-3); padding:12px; border-radius:8px; overflow-y:auto; margin-bottom:10px; display:flex; flex-direction:column; gap:8px;">
-                <div style="background:var(--surface-2); padding:8px; border-radius:8px; align-self:flex-start; max-width:85%;"><strong>Assistant:</strong> Hello! Ask me code snippets, docker compose structures, or server setups!</div>
-              </div>
-              <form id="ai-form" style="display:flex; gap:8px;">
-                <input type="text" id="ai-input" placeholder="Type a prompt for the assistant..." autocomplete="off" style="flex:1; height:32px; border:1px solid var(--input-border); border-radius:6px; background:var(--input-bg); color:var(--text); padding:0 8px;">
-                <button id="ai-send-btn" type="submit" class="primary-button">Send</button>
-              </form>
-            </div>
+            <form id="ai-form" class="ai-form">
+              <textarea id="ai-input" rows="2" placeholder="Ask anything… (Enter to send, Shift+Enter for a new line)"></textarea>
+              <button id="ai-send-btn" type="submit" class="primary-button">Send</button>
+              <button id="ai-stop-btn" type="button" class="hidden">Stop</button>
+            </form>
           </div>
         </div>
       </section>
@@ -2222,28 +2253,12 @@
         <div class="settings-shell">
           <header class="settings-hero">
             <div>
-              <span class="eyebrow">Advanced MCP</span>
-              <h1>Filesystem MCP</h1>
-              <p>Interact with local directory permissions and read/write file triggers.</p>
+              <span class="eyebrow">MCP connector</span>
+              <h1>Filesystem</h1>
+              <p>Let MCP clients browse, search and (optionally) edit files in folders you choose.</p>
             </div>
           </header>
-          <div class="settings-grid">
-            <div class="settings-card">
-              <div class="card-header"><h3>Tool Registry</h3></div>
-              <div class="settings-list">
-                <div class="settings-item"><span>read_file</span></div>
-                <div class="settings-item"><span>write_file</span></div>
-                <div class="settings-item"><span>list_dir</span></div>
-              </div>
-            </div>
-            <div class="settings-card wide">
-              <div class="card-header"><h3>Filesystem Log</h3></div>
-              <div class="log-list" style="height:280px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px;">
-                <div>[MCP] Filesystem server listening on stdio.</div>
-                <div>[MCP] Directory registry root set to workspace htdocs.</div>
-              </div>
-            </div>
-          </div>
+          <div class="connector-panel" data-connector="mcp_filesystem"></div>
         </div>
       </section>
 
@@ -2252,24 +2267,12 @@
         <div class="settings-shell">
           <header class="settings-hero">
             <div>
-              <span class="eyebrow">Advanced MCP</span>
-              <h1>GitHub MCP</h1>
-              <p>Integrate GitHub repositories issues, branch checks, and push logs.</p>
+              <span class="eyebrow">MCP connector</span>
+              <h1>GitHub</h1>
+              <p>Repositories, issues, pull requests and files through a personal access token.</p>
             </div>
           </header>
-          <div class="settings-grid">
-            <div class="settings-card">
-              <div class="card-header"><h3>Credentials</h3></div>
-              <label class="field"><span>Token</span><input type="password" value="ghp_****************" readonly style="width:100%; height:32px;"></label>
-            </div>
-            <div class="settings-card wide">
-              <div class="card-header"><h3>API Registry Logs</h3></div>
-              <div class="log-list" style="height:280px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px;">
-                <div>[GitHub MCP] Initialized successfully.</div>
-                <div>[GitHub MCP] Listening to repository webhook web events.</div>
-              </div>
-            </div>
-          </div>
+          <div class="connector-panel" data-connector="mcp_github"></div>
         </div>
       </section>
 
@@ -2278,26 +2281,12 @@
         <div class="settings-shell">
           <header class="settings-hero">
             <div>
-              <span class="eyebrow">Advanced MCP</span>
-              <h1>PostgreSQL MCP</h1>
-              <p>Run query bridges and inspect schemas on local Postgres servers.</p>
+              <span class="eyebrow">MCP connector</span>
+              <h1>PostgreSQL</h1>
+              <p>Read-only SQL access to a PostgreSQL database.</p>
             </div>
           </header>
-          <div class="settings-grid">
-            <div class="settings-card">
-              <div class="card-header"><h3>Exposed Tools</h3></div>
-              <div class="settings-list">
-                <div class="settings-item"><span>pg_list_tables</span></div>
-                <div class="settings-item"><span>pg_query_raw</span></div>
-              </div>
-            </div>
-            <div class="settings-card wide">
-              <div class="card-header"><h3>PostgreSQL Logs</h3></div>
-              <div class="log-list" style="height:280px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px;">
-                <div>[Pg MCP] Loaded postgres adapter successfully.</div>
-              </div>
-            </div>
-          </div>
+          <div class="connector-panel" data-connector="mcp_postgres"></div>
         </div>
       </section>
 
@@ -2306,26 +2295,12 @@
         <div class="settings-shell">
           <header class="settings-hero">
             <div>
-              <span class="eyebrow">Advanced MCP</span>
-              <h1>MySQL MCP</h1>
-              <p>Check MySQL server connections, optimize columns, and index tables.</p>
+              <span class="eyebrow">MCP connector</span>
+              <h1>MySQL</h1>
+              <p>Read-only SQL access to a MySQL or MariaDB database, such as a local WordPress database.</p>
             </div>
           </header>
-          <div class="settings-grid">
-            <div class="settings-card">
-              <div class="card-header"><h3>Exposed Tools</h3></div>
-              <div class="settings-list">
-                <div class="settings-item"><span>mysql_list_tables</span></div>
-                <div class="settings-item"><span>mysql_query_raw</span></div>
-              </div>
-            </div>
-            <div class="settings-card wide">
-              <div class="card-header"><h3>MySQL MCP Logs</h3></div>
-              <div class="log-list" style="height:280px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px;">
-                <div>[MySQL MCP] Adapter is running. Connected to port 3306.</div>
-              </div>
-            </div>
-          </div>
+          <div class="connector-panel" data-connector="mcp_mysql"></div>
         </div>
       </section>
 
@@ -2334,27 +2309,12 @@
         <div class="settings-shell">
           <header class="settings-hero">
             <div>
-              <span class="eyebrow">Advanced MCP</span>
-              <h1>Browser Automation MCP</h1>
-              <p>Run Playwright and Puppeteer test runners to automate dashboard actions.</p>
+              <span class="eyebrow">MCP connector</span>
+              <h1>Browser automation</h1>
+              <p>WP Desktop's built-in browser tools: tabs, navigation, clicks, form filling, console logs and screenshots.</p>
             </div>
           </header>
-          <div class="settings-grid">
-            <div class="settings-card">
-              <div class="card-header"><h3>Playwright Tools</h3></div>
-              <div class="settings-list">
-                <div class="settings-item"><span>browser_click</span></div>
-                <div class="settings-item"><span>browser_navigate</span></div>
-                <div class="settings-item"><span>browser_screenshot</span></div>
-              </div>
-            </div>
-            <div class="settings-card wide">
-              <div class="card-header"><h3>Automation Status</h3></div>
-              <div class="log-list" style="height:280px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px;">
-                <div>[Browser MCP] Headless engine loaded. Playwright instance active.</div>
-              </div>
-            </div>
-          </div>
+          <div class="connector-panel" data-connector="mcp_browser"></div>
         </div>
       </section>
 
@@ -2363,26 +2323,12 @@
         <div class="settings-shell">
           <header class="settings-hero">
             <div>
-              <span class="eyebrow">Advanced MCP</span>
-              <h1>Slack MCP</h1>
-              <p>Broadcast dev status, logs, and server stats directly to Slack team spaces.</p>
+              <span class="eyebrow">MCP connector</span>
+              <h1>Slack</h1>
+              <p>Read channels and, if you allow it, post messages with a Slack bot token.</p>
             </div>
           </header>
-          <div class="settings-grid">
-            <div class="settings-card">
-              <div class="card-header"><h3>Active Webhooks</h3></div>
-              <div class="settings-list">
-                <div class="settings-item"><span>#deployments-feed</span></div>
-                <div class="settings-item"><span>#server-alerts</span></div>
-              </div>
-            </div>
-            <div class="settings-card wide">
-              <div class="card-header"><h3>Slack API Stream</h3></div>
-              <div class="log-list" style="height:280px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px;">
-                <div>[Slack MCP] Slack token authorized. Listening to events.</div>
-              </div>
-            </div>
-          </div>
+          <div class="connector-panel" data-connector="mcp_slack"></div>
         </div>
       </section>
 
@@ -2391,25 +2337,12 @@
         <div class="settings-shell">
           <header class="settings-hero">
             <div>
-              <span class="eyebrow">Advanced MCP</span>
-              <h1>Notion MCP</h1>
-              <p>Sync tasks, projects briefs, and client requirements pages from Notion databases.</p>
+              <span class="eyebrow">MCP connector</span>
+              <h1>Notion</h1>
+              <p>Search and read pages shared with a Notion integration.</p>
             </div>
           </header>
-          <div class="settings-grid">
-            <div class="settings-card">
-              <div class="card-header"><h3>Sync Configuration</h3></div>
-              <div class="settings-list">
-                <div class="settings-item"><span>Workspace Database: Active</span></div>
-              </div>
-            </div>
-            <div class="settings-card wide">
-              <div class="card-header"><h3>Notion Pages Cache</h3></div>
-              <div class="log-list" style="height:280px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px;">
-                <div>[Notion MCP] Loaded 12 pages from Notion API. Cache valid.</div>
-              </div>
-            </div>
-          </div>
+          <div class="connector-panel" data-connector="mcp_notion"></div>
         </div>
       </section>
 
@@ -2418,25 +2351,12 @@
         <div class="settings-shell">
           <header class="settings-hero">
             <div>
-              <span class="eyebrow">Advanced MCP</span>
-              <h1>Google Drive MCP</h1>
-              <p>Browse cloud files, synchronize media folders, and manage file assets.</p>
+              <span class="eyebrow">MCP connector</span>
+              <h1>Google Drive</h1>
+              <p>Search and read files shared with a Google service account.</p>
             </div>
           </header>
-          <div class="settings-grid">
-            <div class="settings-card">
-              <div class="card-header"><h3>Google Cloud Settings</h3></div>
-              <div class="settings-list">
-                <div class="settings-item"><span>Drive Connection: Connected</span></div>
-              </div>
-            </div>
-            <div class="settings-card wide">
-              <div class="card-header"><h3>GDrive Sync Logs</h3></div>
-              <div class="log-list" style="height:280px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px;">
-                <div>[Google Drive MCP] Auto-sync active. Syncing images assets.</div>
-              </div>
-            </div>
-          </div>
+          <div class="connector-panel" data-connector="mcp_gdrive"></div>
         </div>
       </section>
 
@@ -2445,25 +2365,12 @@
         <div class="settings-shell">
           <header class="settings-hero">
             <div>
-              <span class="eyebrow">Advanced MCP</span>
-              <h1>Cloudflare MCP</h1>
-              <p>Manage DNS lists, toggle security proxies, and purge deployment caches.</p>
+              <span class="eyebrow">MCP connector</span>
+              <h1>Cloudflare</h1>
+              <p>List zones and DNS records and purge the cache with an API token.</p>
             </div>
           </header>
-          <div class="settings-grid">
-            <div class="settings-card">
-              <div class="card-header"><h3>Active Zone</h3></div>
-              <div class="settings-list">
-                <div class="settings-item"><span>domain.com (Active)</span></div>
-              </div>
-            </div>
-            <div class="settings-card wide">
-              <div class="card-header"><h3>DNS and Cache Purge Logs</h3></div>
-              <div class="log-list" style="height:280px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px;">
-                <div>[Cloudflare MCP] Zone token verified. Purge cache successful.</div>
-              </div>
-            </div>
-          </div>
+          <div class="connector-panel" data-connector="mcp_cloudflare"></div>
         </div>
       </section>
 
@@ -2561,25 +2468,35 @@
             <div>
               <span class="eyebrow">DevOps</span>
               <h1>CI/CD Runner</h1>
-              <p>Trigger actions pipelines and inspect runner log scripts in real-time.</p>
+              <p>Run the selected site's build and test steps locally: npm and Composer scripts, PHPUnit, PHPCS, or your own commands.</p>
             </div>
             <div class="button-row compact">
-              <button id="cicd-run-btn" type="button" class="primary-button">Trigger Pipeline</button>
+              <button id="cicd-run-btn" type="button" class="primary-button">Run pipeline</button>
+              <button id="cicd-cancel-btn" type="button" class="hidden">Stop</button>
             </div>
           </header>
           <div class="settings-grid">
             <div class="settings-card">
-              <div class="card-header"><h3>Pipeline Status</h3></div>
-              <div class="settings-list">
-                <div class="settings-item"><span>Last Build: Success</span></div>
-                <div class="settings-item"><span>Runner ID: local-agent-0</span></div>
+              <div class="card-header"><h3>Steps</h3><span id="cicd-source" class="beta-muted"></span></div>
+              <div id="cicd-steps" class="settings-list"></div>
+              <form id="cicd-add-form" class="beta-inline-form">
+                <input id="cicd-add-name" type="text" placeholder="Step name">
+                <input id="cicd-add-command" type="text" placeholder="Command, e.g. npm run build">
+                <input id="cicd-add-cwd" type="text" placeholder="Folder (relative)" value=".">
+                <button type="submit">Add</button>
+              </form>
+              <div class="button-row compact">
+                <button id="cicd-save-btn" type="button">Save pipeline</button>
+                <button id="cicd-detect-btn" type="button">Re-detect</button>
               </div>
             </div>
-            <div class="settings-card wide">
-              <div class="card-header"><h3>Runner Execution Logs</h3></div>
-              <div id="cicd-output" class="log-list" style="height:280px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px; overflow-y:auto;">
-                <div style="color:var(--muted);">Ready to run workflows.</div>
-              </div>
+            <div class="settings-card">
+              <div class="card-header"><h3>Recent runs</h3></div>
+              <div id="cicd-history" class="settings-list"></div>
+            </div>
+            <div class="settings-card settings-card-wide">
+              <div class="card-header"><h3>Output</h3><span id="cicd-status" class="beta-muted"></span></div>
+              <pre id="cicd-output" class="beta-console"></pre>
             </div>
           </div>
         </div>
@@ -2591,32 +2508,28 @@
           <header class="settings-hero">
             <div>
               <span class="eyebrow">DevOps</span>
-              <h1>Server Resource Monitor</h1>
-              <p>Real-time monitor of server load, memory allocation, and database connectivity ports.</p>
+              <h1>Server Monitor</h1>
+              <p>Live CPU, memory and disk usage for this computer, plus which local dev services are running.</p>
             </div>
             <div class="button-row compact">
-              <button id="monitor-refresh-btn" type="button" class="primary-button">Refresh Stats</button>
+              <label class="beta-inline-toggle"><input id="monitor-auto-refresh" type="checkbox" checked> Refresh every 5s</label>
+              <button id="monitor-refresh-btn" type="button" class="primary-button">Refresh</button>
             </div>
           </header>
+          <div class="beta-stat-row">
+            <div class="beta-stat"><span>CPU</span><strong id="monitor-cpu-value">–</strong><div class="beta-meter"><div id="monitor-cpu-bar"></div></div><small id="monitor-cpu-model"></small></div>
+            <div class="beta-stat"><span>Memory</span><strong id="monitor-ram-value">–</strong><div class="beta-meter"><div id="monitor-ram-bar"></div></div><small id="monitor-ram-detail"></small></div>
+            <div class="beta-stat"><span>Selected site</span><strong id="monitor-latency">–</strong><small id="monitor-site-detail">Select a site to measure its response time.</small></div>
+            <div class="beta-stat"><span>Uptime</span><strong id="monitor-uptime">–</strong><small id="monitor-host"></small></div>
+          </div>
           <div class="settings-grid">
             <div class="settings-card">
-              <div class="card-header"><h3>Hardware Loads</h3></div>
-              <div style="margin-bottom:12px;">
-                <span>CPU Usage</span>
-                <div class="flat-progress-track" style="margin-top:4px;"><div id="monitor-cpu-bar" class="flat-progress-bar" style="width:25%;"></div></div>
-              </div>
-              <div>
-                <span>RAM Usage</span>
-                <div class="flat-progress-track" style="margin-top:4px;"><div id="monitor-ram-bar" class="flat-progress-bar" style="width:40%;"></div></div>
-              </div>
+              <div class="card-header"><h3>Local services</h3></div>
+              <div id="monitor-services" class="settings-list"></div>
             </div>
-            <div class="settings-card wide">
-              <div class="card-header"><h3>Server Health</h3></div>
-              <div class="settings-list">
-                <div class="settings-item"><span>Apache Stack: Active</span></div>
-                <div class="settings-item"><span>MySQL Database: Active</span></div>
-                <div class="settings-item"><span>Localhost Response Time: <strong id="monitor-latency">12ms</strong></span></div>
-              </div>
+            <div class="settings-card">
+              <div class="card-header"><h3>Disks</h3></div>
+              <div id="monitor-disks" class="settings-list"></div>
             </div>
           </div>
         </div>
@@ -2756,24 +2669,30 @@
             <div>
               <span class="eyebrow">Productivity</span>
               <h1>Password Vault</h1>
-              <p>Locally encrypted credentials vault for server logins, databases, and admin accounts.</p>
+              <p>Logins for hosting panels, databases and client sites, encrypted with Windows data protection.</p>
             </div>
           </header>
           <div class="settings-grid">
             <div class="settings-card">
-              <div class="card-header"><h3>Add Entry</h3></div>
-              <form id="vault-entry-form">
-                <label class="field"><span>Label</span><input id="vault-entry-label" type="text" placeholder="Staging Server SSH" style="width:100%; height:32px;"></label>
-                <label class="field"><span>Username</span><input id="vault-entry-user" type="text" placeholder="admin" style="width:100%; height:32px;"></label>
-                <label class="field"><span>Password</span><input id="vault-entry-pass" type="password" placeholder="••••••••" style="width:100%; height:32px;"></label>
-                <button type="submit" class="primary-button" style="width:100%; margin-top:10px;">Save Entry</button>
+              <div class="card-header"><h3 id="vault-form-title">Add entry</h3></div>
+              <form id="vault-entry-form" class="form-grid">
+                <input id="vault-entry-id" type="hidden">
+                <label class="field"><span>Name</span><input id="vault-entry-label" type="text" placeholder="Client hosting (cPanel)" required></label>
+                <label class="field"><span>Username</span><input id="vault-entry-user" type="text" autocomplete="off"></label>
+                <label class="field"><span>Password</span>
+                  <div class="beta-inline-form"><input id="vault-entry-pass" type="password" autocomplete="new-password" placeholder="leave empty to keep"><button id="vault-generate-btn" type="button">Generate</button></div>
+                </label>
+                <label class="field"><span>URL</span><input id="vault-entry-url" type="text" placeholder="https://"></label>
+                <label class="field"><span>Notes</span><textarea id="vault-entry-notes" rows="2"></textarea></label>
+                <div class="button-row compact">
+                  <button type="submit" class="primary-button">Save</button>
+                  <button id="vault-cancel-edit-btn" type="button" class="hidden">Cancel</button>
+                </div>
               </form>
             </div>
-            <div class="settings-card wide">
-              <div class="card-header"><h3>Saved Entries</h3></div>
-              <div class="settings-list" id="vault-entries-list">
-                <div class="settings-item"><span>No vault entries. Save credentials using the form.</span></div>
-              </div>
+            <div class="settings-card">
+              <div class="card-header"><h3>Entries</h3><input id="vault-search" class="beta-search" type="search" placeholder="Search"></div>
+              <div id="vault-entries-list" class="settings-list"></div>
             </div>
           </div>
         </div>
@@ -2815,28 +2734,17 @@
             <div>
               <span class="eyebrow">Collaboration</span>
               <h1>Team Chat</h1>
-              <p>Connect with workspace developers and broadcast notifications.</p>
+              <p>Chat with teammates in the same team room. Messages go directly between WP Desktop apps and aren't stored on a server.</p>
             </div>
           </header>
-          <div class="settings-grid">
-            <div class="settings-card">
-              <div class="card-header"><h3>Channels</h3></div>
-              <div class="settings-list">
-                <button class="ts-tab-btn active" style="width:100%; margin-bottom:4px; text-align:left;">#general</button>
-                <button class="ts-tab-btn" style="width:100%; margin-bottom:4px; text-align:left;">#deployments</button>
-                <button class="ts-tab-btn" style="width:100%; text-align:left;">#devops-monitoring</button>
-              </div>
-            </div>
-            <div class="settings-card wide">
-              <div class="card-header"><h3>Chat Stream</h3></div>
-              <div id="collab-chat-stream" class="log-list" style="height:280px; background:var(--surface-3); padding:12px; border-radius:8px; overflow-y:auto; display:flex; flex-direction:column; gap:8px;">
-                <div style="background:var(--surface-2); padding:8px; border-radius:8px; align-self:flex-start; max-width:85%;"><strong>Teammate (John):</strong> Hey Keval! Did you deploy the PostgreSQL server updates?</div>
-              </div>
-              <form id="collab-chat-form" style="display:flex; gap:8px; margin-top:10px;">
-                <input type="text" id="collab-chat-input" placeholder="Type a message to the team..." autocomplete="off" style="flex:1; height:32px; border:1px solid var(--input-border); border-radius:6px; background:var(--input-bg); color:var(--text); padding:0 8px;">
-                <button type="submit" class="primary-button">Send</button>
-              </form>
-            </div>
+          <div class="team-room-slot"></div>
+          <div class="settings-card settings-card-wide">
+            <div class="card-header"><h3>Messages</h3><span class="team-room-status beta-muted"></span></div>
+            <div id="collab-chat-stream" class="team-chat-stream"></div>
+            <form id="collab-chat-form" class="ai-form">
+              <input type="text" id="collab-chat-input" placeholder="Message the team…" autocomplete="off">
+              <button type="submit" class="primary-button">Send</button>
+            </form>
           </div>
         </div>
       </section>
@@ -2848,23 +2756,13 @@
             <div>
               <span class="eyebrow">Collaboration</span>
               <h1>Shared Workspace</h1>
-              <p>Inspect active project developers presence and connection details.</p>
+              <p>See who's online in your team room and which site they're working on.</p>
             </div>
           </header>
-          <div class="settings-grid">
-            <div class="settings-card">
-              <div class="card-header"><h3>Your Identity</h3></div>
-              <div class="settings-list">
-                <div class="settings-item"><div class="settings-item-copy"><strong>User</strong><span>Keval (Online)</span></div></div>
-              </div>
-            </div>
-            <div class="settings-card wide">
-              <div class="card-header"><h3>Active Teammates Presence</h3></div>
-              <div class="settings-list">
-                <div class="settings-item"><div class="settings-item-copy"><strong>John Doe</strong><span style="color:green;">● Active (Docker stack config)</span></div></div>
-                <div class="settings-item"><div class="settings-item-copy"><strong>Jane Smith</strong><span style="color:var(--muted);">○ Offline (2 hours ago)</span></div></div>
-              </div>
-            </div>
+          <div class="team-room-slot"></div>
+          <div class="settings-card settings-card-wide">
+            <div class="card-header"><h3>Teammates</h3><span class="team-room-status beta-muted"></span></div>
+            <div id="team-presence-list" class="settings-list"></div>
           </div>
         </div>
       </section>
@@ -2875,19 +2773,17 @@
           <header class="settings-hero">
             <div>
               <span class="eyebrow">Collaboration</span>
-              <h1>Workspace Activity Feed</h1>
-              <p>Unified real-time log of workspace actions, server restarts, and git triggers.</p>
+              <h1>Activity Feed</h1>
+              <p>What you and your teammates did: deploys, pipeline runs, backups and site changes.</p>
+            </div>
+            <div class="button-row compact">
+              <button id="collab-feed-clear" type="button">Clear</button>
             </div>
           </header>
-          <div class="settings-grid">
-            <div class="settings-card wide" style="grid-column: span 2;">
-              <div class="card-header"><h3>Activity Logs</h3></div>
-              <ul id="collab-activity-list" class="log-list" style="height:320px; overflow-y:auto;">
-                <li style="border-bottom:1px solid var(--line-soft); padding:8px 0;"><span style="color:var(--muted); font-size:0.75rem;">12:04:12</span> Connected local MySQL database adapter successfully.</li>
-                <li style="border-bottom:1px solid var(--line-soft); padding:8px 0;"><span style="color:var(--muted); font-size:0.75rem;">11:58:33</span> Git status checks completed inside project folder.</li>
-                <li style="border-bottom:1px solid var(--line-soft); padding:8px 0;"><span style="color:var(--muted); font-size:0.75rem;">11:42:01</span> Docker container web-proxy successfully started.</li>
-              </ul>
-            </div>
+          <div class="team-room-slot"></div>
+          <div class="settings-card settings-card-wide">
+            <div class="card-header"><h3>Activity</h3><span class="team-room-status beta-muted"></span></div>
+            <ul id="collab-activity-list" class="team-activity-list"></ul>
           </div>
         </div>
       </section>
@@ -2898,27 +2794,28 @@
           <header class="settings-hero">
             <div>
               <span class="eyebrow">Collaboration</span>
-              <h1>Site Permissions Manager</h1>
-              <p>Manage application device permissions (camera, microphone, storage read/write).</p>
+              <h1>Site Permissions</h1>
+              <p>Choose what websites in the browser may use by default, and set exceptions for specific sites.</p>
             </div>
           </header>
           <div class="settings-grid">
-            <div class="settings-card wide" style="grid-column: span 2;">
-              <div class="card-header"><h3>Device Rules</h3></div>
-              <div class="settings-list">
-                <div class="settings-item" style="display:flex; justify-content:space-between; align-items:center;">
-                  <div class="settings-item-copy"><strong>Microphone</strong><span>Allow local audio calls for Meet</span></div>
-                  <input type="checkbox" checked style="width:20px; height:20px; cursor:pointer;">
-                </div>
-                <div class="settings-item" style="display:flex; justify-content:space-between; align-items:center;">
-                  <div class="settings-item-copy"><strong>Camera</strong><span>Allow video streams for Meet</span></div>
-                  <input type="checkbox" checked style="width:20px; height:20px; cursor:pointer;">
-                </div>
-                <div class="settings-item" style="display:flex; justify-content:space-between; align-items:center;">
-                  <div class="settings-item-copy"><strong>Local Storage Access</strong><span>Allow sandbox paths read/write</span></div>
-                  <input type="checkbox" checked style="width:20px; height:20px; cursor:pointer;">
-                </div>
-              </div>
+            <div class="settings-card">
+              <div class="card-header"><h3>Defaults for all sites</h3></div>
+              <div id="permissions-defaults" class="settings-list"></div>
+            </div>
+            <div class="settings-card">
+              <div class="card-header"><h3>Site exceptions</h3></div>
+              <form id="permissions-exception-form" class="beta-inline-form">
+                <input id="permissions-exception-origin" type="text" placeholder="https://example.com">
+                <select id="permissions-exception-type"></select>
+                <select id="permissions-exception-decision"><option value="allow">Allow</option><option value="block">Block</option></select>
+                <button type="submit">Add</button>
+              </form>
+              <div id="permissions-exceptions" class="settings-list"></div>
+            </div>
+            <div class="settings-card settings-card-wide">
+              <div class="card-header"><h3>Recent requests</h3><button id="permissions-refresh" type="button">Refresh</button></div>
+              <div id="permissions-recent" class="settings-list"></div>
             </div>
           </div>
         </div>
@@ -3085,8 +2982,9 @@
     </div>
   </div>
 
-  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script src="../node_modules/peerjs/dist/peerjs.min.js"></script>
   <script src="./renderer.js"></script>
+  <script src="./beta-tools.js"></script>
   <script>
     (function () {
       const STORAGE_KEY = "wpdesktop.theme";

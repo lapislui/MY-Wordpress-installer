@@ -14,11 +14,14 @@
     "setup:win": "npm run pack:win"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "adm-zip": "^0.5.16",
     "better-sqlite3": "^12.10.0",
     "monaco-editor": "^0.49.0",
     "mysql2": "^3.11.3",
+    "peerjs": "^1.5.4",
+    "pg": "^8.23.0",
     "playwright": "^1.60.0",
     "ssh2": "^1.17.0",
     "webextension-polyfill": "^0.12.0",
@@ -45,7 +48,7 @@
       "main.js",
       "preload.js",
       "dialog-preload.js",
-    "lib/**/*",
+      "lib/**/*",
       "scripts/**/*",
       "src/**/*",
       "!src/**/*.backup",

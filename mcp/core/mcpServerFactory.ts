@@ -23,6 +23,21 @@ export type WpDesktopMcpDeps = {
   getNetworkRequests?: (tabId: string) => Promise<any[]>;
   getPerformanceMetrics?: (tabId: string) => Promise<any>;
   takeTabScreenshot?: (tabId: string) => Promise<string>;
+  connectorTools?: () => ConnectorTool[];
+};
+
+export type ConnectorToolParam = {
+  type: "string" | "number" | "boolean" | "array";
+  description: string;
+  optional?: boolean;
+};
+
+export type ConnectorTool = {
+  name: string;
+  title: string;
+  description: string;
+  params: Record<string, ConnectorToolParam>;
+  handler: (args: Record<string, unknown>) => Promise<unknown>;
 };
 
 export function createWpDesktopMcpServer(deps: WpDesktopMcpDeps): McpServer {
@@ -433,6 +448,33 @@ export function createWpDesktopMcpServer(deps: WpDesktopMcpDeps): McpServer {
       });
     }
   );
+
+  // Tools from the connectors enabled on the MCP screens (GitHub, Slack, …).
+  for (const tool of deps.connectorTools?.() ?? []) {
+    const shape: Record<string, z.ZodTypeAny> = {};
+    for (const [key, spec] of Object.entries(tool.params)) {
+      const base = spec.type === "number"
+        ? z.number()
+        : spec.type === "boolean"
+          ? z.boolean()
+          : spec.type === "array"
+            ? z.array(z.string())
+            : z.string();
+      const described = base.describe(spec.description);
+      shape[key] = spec.optional ? described.optional() : described;
+    }
+    server.registerTool(
+      tool.name,
+      { title: tool.title, description: tool.description, inputSchema: shape },
+      async (args: Record<string, unknown>) => {
+        try {
+          return jsonContent(await tool.handler(args));
+        } catch (error) {
+          return jsonContent({ error: error instanceof Error ? error.message : String(error) }, true);
+        }
+      }
+    );
+  }
 
   return server;
 }

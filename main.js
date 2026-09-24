@@ -23,6 +23,10 @@ const mysql = require("mysql2/promise");
 const AdmZip = require("adm-zip");
 const extensionStore = require("./lib/extension-store");
 const extensionShims = require("./lib/extension-shims");
+const { createSecureStore } = require("./lib/secure-store");
+const { createAiAssistant } = require("./lib/ai-assistant");
+const { createMcpConnectors } = require("./lib/mcp-connectors");
+const { registerBetaIpc } = require("./lib/beta-ipc");
 const { Client: SshClient, Server: SshServer, utils: ssh2Utils } = require("ssh2");
 const { OPEN_MODE, STATUS_CODE } = ssh2Utils.sftp;
 
@@ -72,15 +76,41 @@ function getOriginFromUrl(value) {
   }
 }
 
+// Permission types shown on the Site Permissions screen.
+const MANAGED_BROWSER_PERMISSIONS = {
+  media: "Camera and microphone",
+  "display-capture": "Screen sharing",
+  notifications: "Notifications",
+  geolocation: "Location",
+  "clipboard-read": "Read clipboard",
+  midi: "MIDI devices",
+  hid: "HID devices",
+  usb: "USB devices",
+  serial: "Serial ports"
+};
+
+// Recent permission requests (not persisted), newest first.
+const recentPermissionRequests = [];
+
+function getPermissionDefault(permission) {
+  const configured = getSettings().permissionDefaults?.[permission];
+  if (configured === "allow" || configured === "block") {
+    return configured;
+  }
+  return AUTO_ALLOWED_BROWSER_PERMISSIONS.has(permission) ? "allow" : "block";
+}
+
+function recordPermissionRequest(origin, permission, allowed) {
+  recentPermissionRequests.unshift({ origin, permission, allowed, at: new Date().toISOString() });
+  recentPermissionRequests.length = Math.min(recentPermissionRequests.length, 100);
+}
+
 function shouldAutoAllowBrowserPermission(origin, permission) {
   if (!origin || !permission) {
     return false;
   }
 
-  if (AUTO_ALLOWED_BROWSER_PERMISSIONS.has(permission)) {
-    return true;
-  }
-
+  // A decision saved for this site always wins over the default.
   const stored = getStoredPermissionDecision(origin, permission);
   if (stored === "allow") {
     return true;
@@ -92,10 +122,14 @@ function shouldAutoAllowBrowserPermission(origin, permission) {
   try {
     const hostname = new URL(origin).hostname;
     const googleOrigin = hostname === "accounts.google.com" || hostname.endsWith(".google.com");
-    return googleOrigin && ["hid", "usb", "serial"].includes(permission);
+    if (googleOrigin && ["hid", "usb", "serial"].includes(permission)) {
+      return true;
+    }
   } catch (_) {
     return false;
   }
+
+  return getPermissionDefault(permission) === "allow";
 }
 
 function ignoreBrokenPipe(error) {
@@ -424,6 +458,7 @@ async function startEmbeddedMcpServer(settings = getSettings()) {
           const mcpServer = McpServerFactory({
             store,
             inspector,
+            connectorTools: () => mcpConnectors.listTools(),
             listTabs: () => {
               const allTabs = [];
               for (const win of BrowserWindow.getAllWindows()) {
@@ -880,6 +915,15 @@ function getSites() {
   } catch (_) {
     return [];
   }
+}
+
+// Sites the UI shows come from scanning htdocs; the saved file only holds
+// sites with extra settings. Look in both.
+async function findSiteById(siteId) {
+  const scanned = await buildSitesFromHtdocs();
+  return (scanned.sites || []).find((site) => site.id === siteId)
+    || getSites().find((site) => site.id === siteId)
+    || null;
 }
 
 function saveSites(sites) {
@@ -1351,6 +1395,10 @@ function normalizeSettings(input = {}) {
     savedTabSessions,
     downloadDirectory: input.downloadDirectory || app.getPath("downloads"),
     browserPermissions: permissions,
+    permissionDefaults: Object.fromEntries(
+      Object.entries(input.permissionDefaults && typeof input.permissionDefaults === "object" ? input.permissionDefaults : {})
+        .filter(([permission, decision]) => permission in MANAGED_BROWSER_PERMISSIONS && (decision === "allow" || decision === "block"))
+    ),
     browserBookmarks: bookmarks,
     browserShowBookmarksBar: input.browserShowBookmarksBar !== false,
     browserExtensions: extensions,
@@ -2747,15 +2795,20 @@ function configureBrowserSession(win, partition) {
     const origin = getOriginFromUrl(details?.requestingUrl) || getOriginFromUrl(details?.embeddingOrigin) || "";
     const allowed = shouldAutoAllowBrowserPermission(origin, permission);
     if (origin) {
-      savePermissionDecision(origin, permission, allowed ? "allow" : "block");
+      recordPermissionRequest(origin, permission, allowed);
     }
     callback(allowed);
   });
 
   browserSession.setDisplayMediaRequestHandler(async (request, callback) => {
     const origin = getOriginFromUrl(request?.securityOrigin);
+    const allowed = shouldAutoAllowBrowserPermission(origin, "display-capture");
     if (origin) {
-      savePermissionDecision(origin, "display-capture", "allow");
+      recordPermissionRequest(origin, "display-capture", allowed);
+    }
+    if (!allowed) {
+      callback({});
+      return;
     }
     try {
       const sources = await desktopCapturer.getSources({
@@ -2781,12 +2834,12 @@ function configureBrowserSession(win, partition) {
       const origin = getOriginFromUrl(details?.origin) || details?.origin || "";
       if (shouldAutoAllowBrowserPermission(origin, details.deviceType)) {
         if (origin) {
-          savePermissionDecision(origin, details.deviceType, "allow");
+          recordPermissionRequest(origin, details.deviceType, true);
         }
         return true;
       }
       if (origin) {
-        savePermissionDecision(origin, details.deviceType, "block");
+        recordPermissionRequest(origin, details.deviceType, false);
       }
       return false;
     } catch (_) {
@@ -2989,6 +3042,7 @@ async function buildSitesFromHtdocs() {
       return {
         id,
         name: siteName,
+        sftp: saved.sftp || null,
         domain: `${siteName}.site`,
         path: folderPath,
         relativePath,
@@ -8752,9 +8806,15 @@ ipcMain.handle("file:write", async (_event, { filePath, content }) => {
 
 ipcMain.handle("sftp:save-config", async (_event, { siteId, config }) => {
   const sites = getSites();
-  const index = sites.findIndex(site => site.id === siteId);
+  let index = sites.findIndex(site => site.id === siteId);
   if (index === -1) {
-    throw new Error("Site not found: " + siteId);
+    // A site found by scanning htdocs gets a saved record on first save.
+    const scanned = await findSiteById(siteId);
+    if (!scanned) {
+      throw new Error("Site not found: " + siteId);
+    }
+    sites.push({ id: scanned.id, name: scanned.name, path: scanned.path });
+    index = sites.length - 1;
   }
 
   sites[index].sftp = {
@@ -8899,8 +8959,7 @@ ipcMain.handle("sftp:close-connection", (_event, connectionId) => {
 ipcMain.handle("sftp:transfer", async (event, payload) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   const { siteId, direction, subpath } = payload;
-  const sites = getSites();
-  const site = sites.find(s => s.id === siteId);
+  const site = await findSiteById(siteId);
   if (!site) {
     throw new Error("Site not found: " + siteId);
   }
@@ -9515,6 +9574,71 @@ ipcMain.handle("tailscale:stop-monitor", () => {
   return { ok: true };
 });
 
+// ─── Beta tools: secure store, AI, MCP connectors, deploy, CI/CD, monitor ──
+function listAllBrowserTabs() {
+  const tabs = [];
+  for (const win of BrowserWindow.getAllWindows()) {
+    const state = browserWindows.get(win.id);
+    for (const tab of state?.tabs || []) {
+      tabs.push({ id: tab.id, title: tab.title, url: tab.url });
+    }
+  }
+  return tabs;
+}
+
+const secureStore = createSecureStore({ app, safeStorage });
+const aiAssistant = createAiAssistant({ secureStore });
+const mcpConnectors = createMcpConnectors({ secureStore, deps: { listTabs: listAllBrowserTabs } });
+
+registerBetaIpc({
+  ipcMain,
+  app,
+  secureStore,
+  aiAssistant,
+  mcpConnectors,
+  findSite: findSiteById,
+  getSshConnection,
+  createSqlDump,
+  getLocalDbProfile: (site) => {
+    const detected = getEffectiveDbProfile();
+    return {
+      host: site.dbHost || detected.host,
+      port: site.dbPort || detected.port,
+      user: site.dbUser || detected.user,
+      password: site.dbPassword ?? detected.password
+    };
+  }
+});
+
+ipcMain.handle("permissions:get-overview", () => ({
+  types: Object.entries(MANAGED_BROWSER_PERMISSIONS).map(([id, label]) => ({ id, label, default: getPermissionDefault(id) })),
+  exceptions: getSavedPermissionsList(),
+  recent: recentPermissionRequests.slice(0, 50)
+}));
+
+ipcMain.handle("permissions:set-default", (_event, { permission, decision }) => {
+  if (!(permission in MANAGED_BROWSER_PERMISSIONS) || !["allow", "block"].includes(decision)) {
+    throw new Error("Unknown permission setting.");
+  }
+  const settings = getSettings();
+  settings.permissionDefaults = { ...(settings.permissionDefaults || {}), [permission]: decision };
+  saveSettings(settings);
+  return true;
+});
+
+ipcMain.handle("permissions:set-site", (_event, { origin, permission, decision }) => {
+  const normalizedOrigin = getOriginFromUrl(origin);
+  if (!normalizedOrigin || !permission) {
+    throw new Error("Enter a site address such as https://example.com.");
+  }
+  if (decision === "allow" || decision === "block") {
+    savePermissionDecision(normalizedOrigin, permission, decision);
+  } else {
+    clearPermissionDecision(normalizedOrigin, permission);
+  }
+  return getSavedPermissionsList();
+});
+
 // ─── Shell Execution & Database Queries (Integrated Tools Cockpit) ──────
 ipcMain.handle("shell:run", async (_event, { command, cwd }) => {
   return new Promise((resolve) => {
@@ -9531,49 +9655,28 @@ ipcMain.handle("shell:run", async (_event, { command, cwd }) => {
 
 ipcMain.handle("db:query", async (_event, { dbType, config, sql }) => {
   if (dbType === "postgres") {
+    const { Client } = require("pg");
+    const pgClient = new Client({
+      host: config.host || "127.0.0.1",
+      port: Number(config.port) || 5432,
+      user: config.user || "postgres",
+      password: config.password || "",
+      database: config.database || "postgres",
+      connectionTimeoutMillis: 5000
+    });
     try {
-      let pgClient;
-      try {
-        const { Client } = require("pg");
-        pgClient = new Client({
-          host: config.host || "127.0.0.1",
-          port: Number(config.port) || 5432,
-          user: config.user || "postgres",
-          password: config.password || "",
-          database: config.database || "postgres",
-          connectionTimeoutMillis: 5000
-        });
-        await pgClient.connect();
-        const res = await pgClient.query(sql);
-        await pgClient.end();
-        return {
-          ok: true,
-          rows: res.rows || [],
-          rowCount: res.rowCount,
-          fields: res.fields?.map(f => f.name) || []
-        };
-      } catch (err) {
-        // Fallback to command line psql if pg npm module isn't installed
-        const { execSync } = require("child_process");
-        const passEnv = config.password ? `set PGPASSWORD=${config.password}&& ` : "";
-        const cmd = `${passEnv}psql -h ${config.host || "127.0.0.1"} -p ${config.port || 5432} -U ${config.user || "postgres"} -d ${config.database || "postgres"} -t -A -c "${sql.replace(/"/g, '\\"')}"`;
-        const output = execSync(cmd, { encoding: "utf8", timeout: 8000 });
-        const lines = output.trim().split("\n").filter(Boolean);
-        const rows = lines.map(line => {
-          const vals = line.split("|");
-          return vals.reduce((acc, v, idx) => {
-            acc[`col_${idx}`] = v;
-            return acc;
-          }, {});
-        });
-        return {
-          ok: true,
-          rows,
-          fields: rows[0] ? Object.keys(rows[0]) : ["result"]
-        };
-      }
+      await pgClient.connect();
+      const res = await pgClient.query(sql);
+      return {
+        ok: true,
+        rows: res.rows || [],
+        rowCount: res.rowCount,
+        fields: res.fields?.map(f => f.name) || []
+      };
     } catch (error) {
       return { ok: false, error: error.message };
+    } finally {
+      await pgClient.end().catch(() => {});
     }
   } else {
     // MySQL

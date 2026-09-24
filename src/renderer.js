@@ -3798,15 +3798,31 @@ function formatWorkspaceTimestamp(value) {
   return `Created ${new Date(value).toLocaleString()}`;
 }
 
+// The app renderer has desktopAPI access, so markdown links and images must
+// never carry script URLs. `value` arrives already HTML-escaped.
+function isSafeMarkdownUrl(value, { image = false } = {}) {
+  const url = String(value || "").replace(/&amp;/g, "&").trim().toLowerCase();
+  if (/^(https?:|mailto:|#|\/|\.\/|\.\.\/)/.test(url)) {
+    return true;
+  }
+  return image && /^data:image\/(png|jpe?g|gif|webp);/.test(url);
+}
+
 function applyWorkspaceMarkdownInline(text) {
   return String(text || "")
-    .replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"([^"]+)")?\)/g, (_, alt, src, title) => {
+    .replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"([^"]+)")?\)/g, (match, alt, src, title) => {
+      if (!isSafeMarkdownUrl(src, { image: true })) {
+        return escapeHtml(alt);
+      }
       const safeSrc = escapeHtml(src);
       const safeAlt = escapeHtml(alt);
       const safeTitle = title ? ` title="${escapeHtml(title)}"` : "";
       return `<img src="${safeSrc}" alt="${safeAlt}"${safeTitle}>`;
     })
     .replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+"([^"]+)")?\)/g, (_, label, href, title) => {
+      if (!isSafeMarkdownUrl(href)) {
+        return label;
+      }
       const safeHref = escapeHtml(href);
       const safeTitle = title ? ` title="${escapeHtml(title)}"` : "";
       return `<a href="${safeHref}" target="_blank" rel="noreferrer noopener"${safeTitle}>${label}</a>`;
@@ -9316,7 +9332,10 @@ async function tsRefreshAll() {
         else if (screen === "prod_vault") initPasswordVaultScreen();
         else if (screen === "prod_secrets") initSecretsManagerScreen();
         else if (screen === "collab_chat") initTeamChatScreen();
-        else if (screen.startsWith("mcp_")) initMcpAdapterScreen(screen);
+        else if (screen === "collab_workspace") initTeamPresenceScreen();
+        else if (screen === "collab_feed") initActivityFeedScreen();
+        else if (screen === "collab_permissions") initSitePermissionsScreen();
+        else if (screen.startsWith("mcp_") && screen !== "mcp") initConnectorScreen(screen);
       }, 50);
     }
   });
@@ -9624,8 +9643,11 @@ async function gitCommit() {
     alert("Please enter a commit message.");
     return;
   }
-  const result = await window.desktopAPI.shellRun({ command: `git commit -m "${msgEl.value.replace(/"/g, '\\"')}"`, cwd: site.path });
+  const messageFile = `${site.path}/.git/WPDESKTOP_COMMIT_MSG`;
+  await window.desktopAPI.writeFile({ filePath: messageFile, content: msgEl.value });
+  const result = await window.desktopAPI.shellRun({ command: "git commit -F .git/WPDESKTOP_COMMIT_MSG", cwd: site.path });
   alert(result.code === 0 ? "Committed successfully!" : `Commit failed: ${result.stderr}`);
+  if (result.code === 0) window.logTeamActivity?.(`committed to ${site.name}: ${msgEl.value.split(/\r?\n/)[0]}`);
   msgEl.value = "";
   refreshGitStatus();
 }
@@ -9642,6 +9664,7 @@ async function gitPush() {
   const site = getSelectedSite();
   if (!site) return;
   const result = await window.desktopAPI.shellRun({ command: "git push", cwd: site.path });
+  if (result.code === 0) window.logTeamActivity?.(`pushed ${site.name} to its Git remote`);
   alert(result.stdout || result.stderr || "Push completed.");
   refreshGitStatus();
 }
@@ -9728,6 +9751,7 @@ async function backupSelectedSite_custom() {
       }
     });
     alert(`Backup saved to ${result.savePath}.`);
+    window.logTeamActivity?.(`backed up ${site.name}`);
     await refreshBackupsCustom();
   } catch (error) {
     alert(`Backup failed: ${error.message}`);
@@ -9766,6 +9790,7 @@ async function refreshBackupsCustom() {
         try {
           await window.desktopAPI.restoreBackup({ backupPath: backup.path });
           alert("Backup restored successfully.");
+          window.logTeamActivity?.(`restored a backup of ${backup.siteName || backup.fileName || "a site"}`);
         } catch (err) {
           alert(`Restore failed: ${err.message}`);
         }
@@ -9776,185 +9801,9 @@ async function refreshBackupsCustom() {
 }
 
 // ─── Deployment Manager Screen ──────────────────────────────────────
-let deployInitialized = false;
-function initDeployScreen() {
-  const hostEl = document.getElementById("deploy-target-host");
-  const pathEl = document.getElementById("deploy-target-path");
-  const site = getSelectedSite();
-  if (site) {
-    hostEl.textContent = site.name + " (production server)";
-    pathEl.textContent = `/var/www/${site.name}/public_html`;
-  } else {
-    hostEl.textContent = "No site selected";
-    pathEl.textContent = "-";
-  }
 
-  if (deployInitialized) return;
-  deployInitialized = true;
-
-  document.getElementById("deploy-dryrun-btn")?.addEventListener("click", () => triggerDeploySimulation("dryrun"));
-  document.getElementById("deploy-db-btn")?.addEventListener("click", () => triggerDeploySimulation("db"));
-  document.getElementById("deploy-files-btn")?.addEventListener("click", () => triggerDeploySimulation("files"));
-  document.getElementById("deploy-sync-btn")?.addEventListener("click", () => triggerDeploySimulation("full"));
-}
-
-function triggerDeploySimulation(type) {
-  const output = document.getElementById("deploy-output");
-  const progress = document.getElementById("deploy-progress-bar");
-  if (!output || !progress) return;
-
-  output.innerHTML = "";
-  progress.style.width = "0%";
-
-  const logLines = [];
-  if (type === "dryrun") {
-    logLines.push(
-      "[Sync] Comparing local files structure with production target...",
-      "[Sync] Found 5 files requiring modifications.",
-      "[Sync] Checking remote database configuration...",
-      "[Sync] Dry run complete. 5 files would be synced, database is up-to-date."
-    );
-  } else if (type === "db") {
-    logLines.push(
-      "[Database Sync] Connecting to local MySQL...",
-      "[Database Sync] Dumping database...",
-      "[Database Sync] Connecting to remote host...",
-      "[Database Sync] Executing remote migrations...",
-      "[Database Sync] Success! Production database synchronized."
-    );
-  } else if (type === "files") {
-    logLines.push(
-      "[File Sync] Connecting to SFTP server...",
-      "[File Sync] Syncing directory: wp-content/uploads/...",
-      "[File Sync] Syncing directory: wp-content/themes/...",
-      "[File Sync] Updating checksums...",
-      "[File Sync] Success! 12 files uploaded."
-    );
-  } else {
-    logLines.push(
-      "[Full Sync] Starting complete synchronization sequence...",
-      "[Full Sync] Step 1: Backing up remote site assets...",
-      "[Full Sync] Step 2: Dumping and migrating MySQL database fields...",
-      "[Full Sync] Step 3: Compressing and uploading static assets via SFTP...",
-      "[Full Sync] Step 4: Invalidating CDN caches (Cloudflare Purge)...",
-      "[Full Sync] Integration completed. Live site refreshed."
-    );
-  }
-
-  let idx = 0;
-  function printNext() {
-    if (idx >= logLines.length) {
-      progress.style.width = "100%";
-      return;
-    }
-    const div = document.createElement("div");
-    div.textContent = logLines[idx];
-    output.appendChild(div);
-    output.scrollTop = output.scrollHeight;
-    
-    idx++;
-    progress.style.width = `${Math.floor((idx / logLines.length) * 100)}%`;
-    setTimeout(printNext, 400);
-  }
-  printNext();
-}
 
 // ─── AI Assistant Screen ────────────────────────────────────────────
-let aiInitialized = false;
-function initAiScreen() {
-  if (aiInitialized) return;
-  aiInitialized = true;
-
-  const chatOutput = document.getElementById("ai-chat-output");
-  const aiForm = document.getElementById("ai-form");
-  const aiInput = document.getElementById("ai-input");
-
-  function appendChat(speaker, text) {
-    if (!chatOutput) return;
-    const isUser = speaker === "You";
-    const balloon = document.createElement("div");
-    balloon.style.background = isUser ? "var(--surface-2)" : "var(--surface-3)";
-    balloon.style.padding = "8px";
-    balloon.style.borderRadius = "8px";
-    balloon.style.alignSelf = isUser ? "flex-end" : "flex-start";
-    balloon.style.maxWidth = "85%";
-    
-    balloon.innerHTML = `<strong>${speaker}:</strong> ${text}`;
-    chatOutput.appendChild(balloon);
-    chatOutput.scrollTop = chatOutput.scrollHeight;
-  }
-
-  async function handleAiSubmit(msg) {
-    if (!msg.trim()) return;
-    appendChat("You", escapeHtml(msg));
-    
-    setTimeout(() => {
-      let reply = "";
-      const query = msg.toLowerCase();
-      if (query.includes("boilerplate") || query.includes("plugin")) {
-        reply = `Here is a WordPress plugin boilerplate header:
-<pre><code class="language-php">&lt;?php
-/**
- * Plugin Name: Custom Developer Tool
- * Description: AI-Generated Cockpit extension.
- * Version: 1.0.0
- * Author: Antigravity AI
- */
-if ( ! defined( 'ABSPATH' ) ) {
-    exit; // Exit if accessed directly.
-}</code></pre>`;
-      } else if (query.includes("shortcode")) {
-        reply = `Here is a custom shortcode registration:
-<pre><code class="language-php">add_shortcode('recent_posts_list', function($atts) {
-    $q = new WP_Query(['posts_per_page' => 5, 'post_status' => 'publish']);
-    $out = '&lt;ul&gt;';
-    while ($q->have_posts()) {
-        $q->the_post();
-        $out .= '&lt;li&gt;&lt;a href="'.get_permalink().'"&gt;'.get_title().'&lt;/a&gt;&lt;/li&gt;';
-    }
-    wp_reset_postdata();
-    return $out . '&lt;/ul&gt;';
-});</code></pre>`;
-      } else if (query.includes("compose") || query.includes("docker")) {
-        reply = `Here is a standard Docker Compose stack compose.yml file:
-<pre><code class="language-yaml">version: '3.8'
-services:
-  wordpress:
-    image: wordpress:latest
-    ports:
-      - "8080:80"
-    environment:
-      WORDPRESS_DB_HOST: db
-      WORDPRESS_DB_PASSWORD: root
-    depends_on:
-      - db
-  db:
-    image: mysql:5.7
-    environment:
-      MYSQL_ROOT_PASSWORD: root</code></pre>`;
-      } else if (query.includes("port") || query.includes("collision")) {
-        reply = `To fix port 80 collision errors, you can edit your <code>httpd.conf</code> configuration file inside XAMPP and replace <code>Listen 80</code> with a custom port like <code>Listen 8080</code>.`;
-      } else {
-        reply = `I've analyzed your project workspaces. How can I assist you in writing PHP functions, optimizing SQL schemas, or resolving DevOps pipelines?`;
-      }
-      appendChat("Assistant", reply);
-    }, 600);
-  }
-
-  aiForm?.addEventListener("submit", (e) => {
-    e.preventDefault();
-    const msg = aiInput.value;
-    aiInput.value = "";
-    handleAiSubmit(msg);
-  });
-
-  document.querySelectorAll("#ai-screen .ai-prompt-btn").forEach(btn => {
-    btn.addEventListener("click", () => {
-      const prompt = btn.getAttribute("data-prompt");
-      handleAiSubmit(prompt);
-    });
-  });
-}
 
 // ─── Docker Manager Screen ──────────────────────────────────────────
 let dockerInitialized = false;
@@ -10003,7 +9852,7 @@ async function refreshDockerStatus() {
             <strong>${escapeHtml(name)}</strong> (${escapeHtml(image)})<br/>
             <span style="font-size:0.75rem; color:var(--muted);">ID: ${escapeHtml(id)} · Status: ${escapeHtml(status)}</span>
           </div>
-          <button class="danger-button compact" onclick="stopDockerContainer('${id}')">Stop</button>
+          <button class="danger-button compact" onclick="stopDockerContainer('${escapeHtml(id)}')">Stop</button>
         </div>
       `;
     }).join("");
@@ -10016,6 +9865,7 @@ async function refreshDockerStatus() {
 }
 
 window.stopDockerContainer = async function(id) {
+  if (!/^[a-zA-Z0-9_.-]+$/.test(String(id))) return;
   const confirmStop = confirm(`Are you sure you want to stop container ${id}?`);
   if (!confirmStop) return;
   await window.desktopAPI.shellRun({ command: `docker stop ${id}` });
@@ -10090,7 +9940,7 @@ async function refreshPodsList() {
   const listEl = document.getElementById("k8s-pods-list");
   if (!nsEl || !listEl) return;
 
-  const ns = nsEl.value || "default";
+  const ns = /^[a-z0-9-]{1,63}$/.test(nsEl.value) ? nsEl.value : "default";
   listEl.innerHTML = '<div class="settings-item"><span style="color:var(--muted);">Scanning pods...</span></div>';
 
   try {
@@ -10119,7 +9969,7 @@ async function refreshPodsList() {
             <strong>${escapeHtml(name)}</strong><br/>
             <span style="font-size:0.75rem; color:var(--muted);">Ready: ${escapeHtml(ready)} · Status: <span style="color:${statusColor}; font-weight:bold;">${escapeHtml(status)}</span></span>
           </div>
-          <button class="primary-button compact" onclick="kubectlLogs('${name}', '${ns}')">Logs</button>
+          <button class="primary-button compact" onclick="kubectlLogs('${escapeHtml(name)}', '${escapeHtml(ns)}')">Logs</button>
         </div>
       `;
     }).join("");
@@ -10129,93 +9979,15 @@ async function refreshPodsList() {
 }
 
 window.kubectlLogs = async function(pod, ns) {
+  if (!/^[a-z0-9.-]+$/.test(String(pod)) || !/^[a-z0-9-]+$/.test(String(ns))) return;
   const result = await window.desktopAPI.shellRun({ command: `kubectl logs ${pod} -n ${ns} --tail=50` });
   alert(result.stdout || result.stderr || "No logs available.");
 };
 
 // ─── CI/CD Runner Screen ────────────────────────────────────────────
-let cicdInitialized = false;
-function initCicdRunnerScreen() {
-  if (cicdInitialized) return;
-  cicdInitialized = true;
-
-  const outputEl = document.getElementById("cicd-output");
-  const triggerBtn = document.getElementById("cicd-run-btn");
-
-  triggerBtn?.addEventListener("click", () => {
-    if (!outputEl) return;
-    outputEl.innerHTML = "";
-    const lines = [
-      "[Runner] Checking workspace repositories triggers...",
-      "[Runner] Pulling runner configuration...",
-      "[Runner] Found pipeline: dev-pipeline.yml",
-      "[Runner] Installing project dependencies (npm install)...",
-      "[Runner] Compiling assets (webpack/vite build)...",
-      "[Runner] Running style linter (eslint)...",
-      "[Runner] Running suite tests (jest)...",
-      "[Runner] Build successfully compiled! Output size: 450KB.",
-      "[Runner] Deploying static pages artifact..."
-    ];
-
-    let idx = 0;
-    function printNext() {
-      if (idx >= lines.length) return;
-      const div = document.createElement("div");
-      div.textContent = lines[idx];
-      outputEl.appendChild(div);
-      outputEl.scrollTop = outputEl.scrollHeight;
-      idx++;
-      setTimeout(printNext, 300);
-    }
-    printNext();
-  });
-}
 
 // ─── Server Monitor Screen ──────────────────────────────────────────
-let monitorInitialized = false;
-let monitorInterval = null;
-function initServerMonitorScreen() {
-  refreshMonitorStats();
 
-  if (monitorInitialized) return;
-  monitorInitialized = true;
-
-  document.getElementById("monitor-refresh-btn")?.addEventListener("click", refreshMonitorStats);
-
-  if (monitorInterval) clearInterval(monitorInterval);
-  monitorInterval = setInterval(() => {
-    const screen = document.getElementById("devops_monitor-screen");
-    if (screen && screen.classList.contains("active")) {
-      refreshMonitorStats();
-    }
-  }, 5000);
-}
-
-async function refreshMonitorStats() {
-  const cpuBar = document.getElementById("monitor-cpu-bar");
-  const ramBar = document.getElementById("monitor-ram-bar");
-  const latencyEl = document.getElementById("monitor-latency");
-  if (!cpuBar || !ramBar || !latencyEl) return;
-
-  try {
-    const res = await window.desktopAPI.shellRun({ command: "wmic cpu get loadpercentage" });
-    if (res.code === 0) {
-      const percentage = parseInt(res.stdout.replace("LoadPercentage", "").trim(), 10);
-      if (!isNaN(percentage)) {
-        cpuBar.style.width = `${percentage}%`;
-      } else {
-        cpuBar.style.width = `${Math.floor(10 + Math.random() * 30)}%`;
-      }
-    } else {
-      cpuBar.style.width = `${Math.floor(10 + Math.random() * 30)}%`;
-    }
-  } catch (_) {
-    cpuBar.style.width = `${Math.floor(10 + Math.random() * 30)}%`;
-  }
-
-  ramBar.style.width = `${Math.floor(40 + Math.random() * 20)}%`;
-  latencyEl.textContent = `${Math.floor(8 + Math.random() * 10)}ms`;
-}
 
 // ─── Notes Workspace Screen ─────────────────────────────────────────
 let notesInitialized = false;
@@ -10536,106 +10308,11 @@ function initDocumentationViewerScreen() {
 }
 
 // ─── Password Vault Screen ──────────────────────────────────────────
-let vaultInitialized = false;
-const DEFAULT_VAULT_ENTRIES = [
-  { id: 1, label: "XAMPP PhpMyAdmin", user: "root", pass: "password" },
-  { id: 2, label: "WordPress Administrator", user: "admin", pass: "dev-wp-password" }
-];
 
-function initPasswordVaultScreen() {
-  renderVaultEntries();
 
-  if (vaultInitialized) return;
-  vaultInitialized = true;
 
-  const form = document.getElementById("vault-entry-form");
-  form?.addEventListener("submit", (e) => {
-    e.preventDefault();
-    const labelInput = document.getElementById("vault-entry-label");
-    const userInput = document.getElementById("vault-entry-user");
-    const passInput = document.getElementById("vault-entry-pass");
 
-    const label = labelInput.value.trim();
-    const user = userInput.value.trim();
-    const pass = passInput.value.trim();
-    if (!label || !user || !pass) return;
 
-    const entries = getVaultEntries();
-    entries.push({ id: Date.now(), label, user, pass });
-    saveVaultEntries(entries);
-
-    labelInput.value = "";
-    userInput.value = "";
-    passInput.value = "";
-    renderVaultEntries();
-  });
-}
-
-function getVaultEntries() {
-  try {
-    const saved = localStorage.getItem("wpdesktop.vault-entries");
-    if (saved) return JSON.parse(saved);
-  } catch (_) {}
-  return [...DEFAULT_VAULT_ENTRIES];
-}
-
-function saveVaultEntries(entries) {
-  localStorage.setItem("wpdesktop.vault-entries", JSON.stringify(entries));
-}
-
-function renderVaultEntries() {
-  const entries = getVaultEntries();
-  const listEl = document.getElementById("vault-entries-list");
-  if (!listEl) return;
-  listEl.innerHTML = "";
-
-  if (entries.length === 0) {
-    listEl.innerHTML = '<div class="settings-item"><span>No vault entries. Save credentials using the form.</span></div>';
-    return;
-  }
-
-  entries.forEach(entry => {
-    const div = document.createElement("div");
-    div.className = "settings-item";
-    div.style.display = "flex";
-    div.style.justifyContent = "space-between";
-    div.style.alignItems = "center";
-    div.style.marginBottom = "8px";
-    
-    const masked = "*".repeat(entry.pass.length);
-
-    div.innerHTML = `
-      <div>
-        <strong>${escapeHtml(entry.label)}</strong><br/>
-        <span style="font-size:0.75rem; color:var(--muted);">User: ${escapeHtml(entry.user)} · Pass: <span class="vault-pass-display" data-real-pass="${escapeHtml(entry.pass)}" style="font-family:monospace;">${masked}</span></span>
-      </div>
-      <div style="display:flex; gap:6px;">
-        <button class="primary-button compact toggle-pass-btn">Show</button>
-        <button class="danger-button compact" onclick="deleteVaultEntry(${entry.id})">Delete</button>
-      </div>
-    `;
-
-    div.querySelector(".toggle-pass-btn").addEventListener("click", (e) => {
-      const display = div.querySelector(".vault-pass-display");
-      const btn = e.target;
-      if (btn.textContent === "Show") {
-        display.textContent = display.getAttribute("data-real-pass");
-        btn.textContent = "Hide";
-      } else {
-        display.textContent = "*".repeat(display.getAttribute("data-real-pass").length);
-        btn.textContent = "Show";
-      }
-    });
-
-    listEl.appendChild(div);
-  });
-}
-
-window.deleteVaultEntry = function(id) {
-  const entries = getVaultEntries().filter(entry => entry.id !== id);
-  saveVaultEntries(entries);
-  renderVaultEntries();
-};
 
 // ─── Secrets Manager Screen ─────────────────────────────────────────
 let secretsInitialized = false;
@@ -10657,15 +10334,16 @@ async function loadSecretsVariables() {
   const site = getSelectedSite();
   const filePath = site ? `${site.path}/.env` : null;
 
+  if (!filePath) {
+    listEl.innerHTML = "<span>Select a site to edit its .env file.</span>";
+    return;
+  }
   let content = "";
-  if (filePath) {
-    try {
-      content = await window.desktopAPI.readExtensionFile(filePath);
-    } catch (_) {
-      content = "DB_HOST=127.0.0.1\nDB_USER=root\nDB_PASSWORD=\nDB_NAME=wp_local\nWP_ENV=development";
-    }
-  } else {
-    content = "DB_HOST=127.0.0.1\nDB_USER=root\nDB_PASSWORD=\nDB_NAME=wp_local\nWP_ENV=development";
+  try {
+    content = await window.desktopAPI.readExtensionFile(filePath);
+  } catch (_) {
+    listEl.innerHTML = `<span>No .env file found in ${escapeHtml(site.path)}.</span>`;
+    return;
   }
 
   const lines = content.split("\n").filter(Boolean);
@@ -10710,46 +10388,8 @@ async function saveSecretsVariables() {
 }
 
 // ─── Team Chat Screen ───────────────────────────────────────────────
-let chatInitialized = false;
-function initTeamChatScreen() {
-  if (chatInitialized) return;
-  chatInitialized = true;
-
-  const stream = document.getElementById("collab-chat-stream");
-  const form = document.getElementById("collab-chat-form");
-  const input = document.getElementById("collab-chat-input");
-
-  function appendMsg(speaker, text) {
-    if (!stream) return;
-    const isUser = speaker === "You";
-    const div = document.createElement("div");
-    div.style.background = isUser ? "var(--surface-2)" : "var(--surface-3)";
-    div.style.padding = "8px";
-    div.style.borderRadius = "8px";
-    div.style.alignSelf = isUser ? "flex-end" : "flex-start";
-    div.style.maxWidth = "85%";
-    div.innerHTML = `<strong>${speaker}:</strong> ${escapeHtml(text)}`;
-    stream.appendChild(div);
-    stream.scrollTop = stream.scrollHeight;
-  }
-
-  form?.addEventListener("submit", (e) => {
-    e.preventDefault();
-    const text = input.value.trim();
-    if (!text) return;
-    input.value = "";
-    appendMsg("You", text);
-
-    setTimeout(() => {
-      appendMsg("Teammate (John)", "Thanks for the update! Checking git branches now.");
-    }, 1200);
-  });
-}
 
 // ─── MCP Adapter Screen ─────────────────────────────────────────────
-function initMcpAdapterScreen(screen) {
-  console.log(`[MCP] Switched to adapter view: ${screen}`);
-}
 
 window.tsOpenDeviceModal  = tsOpenDeviceModal;
 window.tsPingDevice       = tsPingDevice;
