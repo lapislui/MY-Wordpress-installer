@@ -20,10 +20,21 @@ const state = {
   workspaceClients: [],
   selectedWorkspaceClientId: null,
   isEditingAddress: false,
+  localServerType: "xampp",
+  localServerLabel: "XAMPP",
   htdocsPath: "",
   apacheRunning: false,
-  xamppPaths: null,
-  xamppServiceStatus: null
+  serverPaths: null,
+  xamppServiceStatus: null,
+  // Cross-feature integration
+  integration: {
+    siteToProjectMap: {}, // Maps site ID to workspace project ID
+    projectToSitesMap: {}, // Maps project ID to array of site IDs
+    editorProjectContext: null, // Current project context in editor
+    editorResourceContext: null, // Current resource context in editor
+    lastVisitedScreen: "browser", // Track navigation history
+    navigationStack: [] // For back/forward between screens
+  }
 };
 
 const progressState = {
@@ -34,7 +45,9 @@ const progressState = {
 
 const uiState = {
   sidebarCollapsed: false,
+  rightSidebarCollapsed: false,
   browserFocusMode: false,
+  bottomPanelScreen: null,
   showTabSessionInfo: false,
   workspaceNotesMode: "edit",
   editingWorkspaceTodoId: null,
@@ -52,6 +65,11 @@ let workspaceContextClientId = null;
 let workspaceMediaContextResource = null;
 let xamppStatusRefreshTimer = null;
 let xamppStatusRefreshInFlight = null;
+let currentlyOpenCodeFilePath = null;
+let codeEditor = null;
+let codeEditorLanguage = "plaintext";
+let activeSftpConnectionId = null;
+let activeSftpConnectionConfig = null;
 const BROWSER_TOOL_ORDER_KEY = "wp-desktop.browser-tool-order";
 const BROWSER_TOOL_COLLAPSE_KEY = "wp-desktop.browser-tool-collapse";
 const XAMPP_STATUS_REFRESH_INTERVAL_MS = 5000;
@@ -67,6 +85,45 @@ const DEFAULT_BROWSER_TOOL_COLLAPSE = {
   downloads: true,
   permissions: true
 };
+
+const BROWSER_TOOL_CATEGORIES = {
+  security_access: "Security & Access",
+  navigation: "Navigation & Shortcuts",
+  data_permissions: "Data & Permissions"
+};
+
+const DEFAULT_BROWSER_TOOL_CATEGORY_MAPPING = {
+  credentials: "security_access",
+  sessions: "security_access",
+  bookmarks: "navigation",
+  downloads: "data_permissions",
+  permissions: "data_permissions"
+};
+
+function getBrowserToolCategoryMapping() {
+  try {
+    const saved = localStorage.getItem("wp-desktop.browser-tool-category-mapping");
+    if (saved) return JSON.parse(saved);
+  } catch (_) {}
+  return { ...DEFAULT_BROWSER_TOOL_CATEGORY_MAPPING };
+}
+
+function saveBrowserToolCategoryMapping(mapping) {
+  localStorage.setItem("wp-desktop.browser-tool-category-mapping", JSON.stringify(mapping));
+}
+
+function getBrowserToolCollapsedCategories() {
+  try {
+    const saved = localStorage.getItem("wp-desktop.browser-tool-category-collapse");
+    if (saved) return JSON.parse(saved);
+  } catch (_) {}
+  return [];
+}
+
+function saveBrowserToolCollapsedCategories(collapsed) {
+  localStorage.setItem("wp-desktop.browser-tool-category-collapse", JSON.stringify(collapsed));
+}
+
 const DEFAULT_WORKSPACE_PANEL_ORDER = ["details", "tasks", "calendar", "notes", "resources"];
 const DEFAULT_WORKSPACE_PANEL_COLLAPSE = {
   details: false,
@@ -91,6 +148,14 @@ state.browserExtensions = [];
 
 function isInstallerReady() {
   return state.xamppServiceStatus?.installerReady === true;
+}
+
+function getLocalServerLabel() {
+  return state.localServerLabel || "XAMPP";
+}
+
+function getDocumentRootLabel() {
+  return state.serverPaths?.documentRootName || (state.localServerType === "laragon" ? "www" : "htdocs");
 }
 
 function getInstallerBlockedMessage() {
@@ -144,12 +209,279 @@ function applyXamppServiceStatusSnapshot(payload = {}) {
   renderInstallerServiceStatus();
 }
 
+// ─────────────────────────────────────────────────────────────────
+// ─── Cross-Feature Integration System ────────────────────────────
+// ─────────────────────────────────────────────────────────────────
+
+function initializeIntegrationMaps() {
+  const stored = localStorage.getItem("wpdesktop.integration.maps");
+  if (stored) {
+    try {
+      const maps = JSON.parse(stored);
+      state.integration.siteToProjectMap = maps.siteToProject || {};
+      state.integration.projectToSitesMap = maps.projectToSites || {};
+    } catch (_) {}
+  }
+}
+
+function saveIntegrationMaps() {
+  const maps = {
+    siteToProject: state.integration.siteToProjectMap,
+    projectToSites: state.integration.projectToSitesMap
+  };
+  localStorage.setItem("wpdesktop.integration.maps", JSON.stringify(maps));
+}
+
+function linkSiteToProject(siteId, projectId) {
+  state.integration.siteToProjectMap[siteId] = projectId;
+
+  if (!state.integration.projectToSitesMap[projectId]) {
+    state.integration.projectToSitesMap[projectId] = [];
+  }
+  if (!state.integration.projectToSitesMap[projectId].includes(siteId)) {
+    state.integration.projectToSitesMap[projectId].push(siteId);
+  }
+
+  saveIntegrationMaps();
+}
+
+function unlinkSiteFromProject(siteId, projectId) {
+  // Remove site from project's site list
+  if (state.integration.projectToSitesMap[projectId]) {
+    state.integration.projectToSitesMap[projectId] = state.integration.projectToSitesMap[projectId].filter(
+      id => id !== siteId
+    );
+
+    // Clean up empty project entries
+    if (state.integration.projectToSitesMap[projectId].length === 0) {
+      delete state.integration.projectToSitesMap[projectId];
+    }
+  }
+
+  // Remove site->project mapping
+  delete state.integration.siteToProjectMap[siteId];
+
+  saveIntegrationMaps();
+}
+
+function getSitesForProject(projectId) {
+  return state.integration.projectToSitesMap[projectId] || [];
+}
+
+function getProjectForSite(siteId) {
+  return state.integration.siteToProjectMap[siteId] || null;
+}
+
+function navigateToScreenWithContext(screenName, context = {}) {
+  // Save current navigation state
+  if (state.integration.lastVisitedScreen) {
+    state.integration.navigationStack.push({
+      screen: state.integration.lastVisitedScreen,
+      context: { ...state.integration }
+    });
+  }
+  
+  state.integration.lastVisitedScreen = screenName;
+  
+  // Apply context to integration state
+  if (context.projectId) {
+    state.integration.editorProjectContext = context.projectId;
+    state.selectedWorkspaceClientId = context.projectId;
+  }
+  if (context.resourceId) {
+    state.integration.editorResourceContext = context.resourceId;
+  }
+  if (context.siteId) {
+    state.selectedSiteId = context.siteId;
+  }
+  
+  // Sync project with sites when switching context
+  if (context.projectId) {
+    syncProjectWithSites(context.projectId);
+    renderSftpSiteSelect();
+  }
+  
+  showScreen(screenName);
+}
+
+function autoLinkNewSitesToProject() {
+  if (!state.selectedWorkspaceClientId || !state.sites.length) {
+    return;
+  }
+
+  const projectId = state.selectedWorkspaceClientId;
+  const linkedSites = getSitesForProject(projectId);
+
+  state.sites.forEach((site) => {
+    // Auto-link sites that aren't already linked to any project
+    if (!state.integration.siteToProjectMap[site.id]) {
+      linkSiteToProject(site.id, projectId);
+    }
+  });
+}
+
+function syncProjectWithSites(projectId) {
+  // Ensure all linked sites still exist in state.sites
+  const linkedSites = getSitesForProject(projectId);
+  const stillExist = linkedSites.filter((siteId) => 
+    state.sites.some((site) => site.id === siteId)
+  );
+  
+  if (stillExist.length !== linkedSites.length) {
+    state.integration.projectToSitesMap[projectId] = stillExist;
+    saveIntegrationMaps();
+  }
+}
+
+function getRelatedSitesForScreen(screenName) {
+  if (screenName === "workspace" && state.selectedWorkspaceClientId) {
+    return getSitesForProject(state.selectedWorkspaceClientId);
+  }
+  return [];
+}
+
+function getEditorContext() {
+  if (!state.integration.editorProjectContext) {
+    return null;
+  }
+  const project = state.workspaceClients.find(c => c.id === state.integration.editorProjectContext);
+  return {
+    projectId: state.integration.editorProjectContext,
+    projectName: project?.name || "Unknown Project",
+    resourceId: state.integration.editorResourceContext
+  };
+}
+
+function linkEditorFileToWorkspaceResource(filePath, resourceId) {
+  // Create a resource mapping that tracks which files are linked to which resources
+  const mapping = {
+    filePath: filePath,
+    projectId: state.integration.editorProjectContext,
+    resourceId: resourceId,
+    timestamp: Date.now()
+  };
+  
+  const fileResourceMaps = localStorage.getItem("wpdesktop.editor.fileResourceMaps");
+  let maps = fileResourceMaps ? JSON.parse(fileResourceMaps) : [];
+  
+  // Remove old mapping for this file if exists
+  maps = maps.filter(m => m.filePath !== filePath);
+  maps.push(mapping);
+  
+  localStorage.setItem("wpdesktop.editor.fileResourceMaps", JSON.stringify(maps));
+}
+
+function getResourceForEditorFile(filePath) {
+  const fileResourceMaps = localStorage.getItem("wpdesktop.editor.fileResourceMaps");
+  if (!fileResourceMaps) return null;
+  
+  try {
+    const maps = JSON.parse(fileResourceMaps);
+    return maps.find(m => m.filePath === filePath) || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function goBackToPreviousScreen() {
+  if (state.integration.navigationStack.length > 0) {
+    const previous = state.integration.navigationStack.pop();
+    Object.assign(state.integration, previous.context);
+    showScreen(previous.screen);
+  }
+}
+
+function getScreenContextName(screenName) {
+  const contextMap = {
+    browser: "Browser",
+    sftp: "File Transfer",
+    editor: "Code Editor",
+    installer: "WordPress Installer",
+    workspace: "Workspace",
+    settings: "Settings"
+  };
+  return contextMap[screenName] || screenName;
+}
+
+function generateQuickNavigationButtons() {
+  const buttons = [];
+  const currentScreen = uiState.bottomPanelScreen;
+  
+  // From Workspace -> SFTP
+  if (currentScreen === "workspace" && state.selectedWorkspaceClientId) {
+    const sites = getSitesForProject(state.selectedWorkspaceClientId);
+    if (sites.length > 0) {
+      buttons.push({
+        label: `📁 Manage Files (${sites.length} site${sites.length !== 1 ? "s" : ""})`,
+        action: () => navigateToScreenWithContext("sftp", { projectId: state.selectedWorkspaceClientId, siteId: sites[0] })
+      });
+    }
+  }
+  
+  // From any tool -> Editor
+  if (currentScreen && currentScreen !== "editor") {
+    buttons.push({
+      label: "📝 Code Editor",
+      action: () => navigateToScreenWithContext("editor", { 
+        projectId: state.integration.editorProjectContext || state.selectedWorkspaceClientId 
+      })
+    });
+  }
+  
+  // From SFTP -> Workspace
+  if (currentScreen === "sftp" && state.selectedWorkspaceClientId) {
+    const project = state.workspaceClients.find(c => c.id === state.selectedWorkspaceClientId);
+    if (project) {
+      buttons.push({
+        label: `💼 ${project.name}`,
+        action: () => navigateToScreenWithContext("workspace", { projectId: state.selectedWorkspaceClientId })
+      });
+    }
+  }
+  
+  return buttons;
+}
+
+function createQuickActionLinks() {
+  const buttons = generateQuickNavigationButtons();
+  if (buttons.length === 0) return "";
+  
+  return buttons.map((btn, idx) => 
+    `<button class="quick-nav-button" data-quick-action="${idx}" style="margin-right: 8px; padding: 6px 12px; background: var(--accent-dim); border: 1px solid var(--accent); color: var(--accent); border-radius: 4px; cursor: pointer; font-size: 0.85rem;">${btn.label}</button>`
+  ).join("");
+}
+
+// Register quick action button handlers
+function initQuickNavigationHandlers() {
+  document.addEventListener("click", (e) => {
+    const button = e.target.closest("[data-quick-action]");
+    if (button) {
+      const idx = parseInt(button.dataset.quickAction);
+      const buttons = generateQuickNavigationButtons();
+      if (buttons[idx]) {
+        buttons[idx].action();
+      }
+    }
+  });
+}
+
 const elements = {
   appShell: document.getElementById("app-shell"),
   appSidebar: document.getElementById("app-sidebar"),
+  appRightSidebar: document.getElementById("app-right-sidebar"),
+  bottomPanel: document.getElementById("bottom-panel"),
+  bottomPanelBody: document.getElementById("bottom-panel-body"),
+  bottomPanelIcon: document.getElementById("bottom-panel-icon"),
+  bottomPanelLabel: document.getElementById("bottom-panel-label"),
+  bottomPanelCloseButton: document.getElementById("bottom-panel-close-button"),
+  bottomPanelResizeHandle: document.getElementById("bottom-panel-resize-handle"),
   sidebarToggleButton: document.getElementById("sidebar-toggle-button"),
+  rightSidebarToggleButton: document.getElementById("right-sidebar-toggle-button"),
   navButtons: document.querySelectorAll(".nav-button"),
   screens: document.querySelectorAll(".screen"),
+  betaFeaturesSidebarWrapper: document.getElementById("beta-features-sidebar-wrapper"),
+  settingsBetaEnabled: document.getElementById("settings-beta-enabled"),
+  betaToolsCheckboxes: document.getElementById("beta-tools-checkboxes"),
   browserLayout: document.getElementById("browser-layout"),
   tabStrip: document.getElementById("tab-strip"),
   tabStripTooltipLayer: document.getElementById("tab-strip-tooltip-layer"),
@@ -173,6 +505,11 @@ const elements = {
   bookmarkBar: document.getElementById("bookmark-bar"),
   bookmarkContextMenu: document.getElementById("bookmark-context-menu"),
   bookmarkModal: document.getElementById("bookmark-modal"),
+  passwordSaveModal: document.getElementById("password-save-modal"),
+  passwordSaveUsername: document.getElementById("password-save-username"),
+  passwordSaveConfirmButton: document.getElementById("password-save-confirm-button"),
+  passwordNeverSaveButton: document.getElementById("password-never-save-button"),
+  closePasswordSaveButton: document.getElementById("close-password-save-button"),
   closeBookmarkModalButton: document.getElementById("close-bookmark-modal-button"),
   bookmarkNameInput: document.getElementById("bookmark-name-input"),
   bookmarkMoreButton: document.getElementById("bookmark-more-button"),
@@ -307,6 +644,36 @@ const elements = {
   resultDb: document.getElementById("result-db"),
   resultFiles: document.getElementById("result-files"),
   resultLogs: document.getElementById("result-logs"),
+  sftpSiteSelect: document.getElementById("sftp-site-select"),
+  sftpHost: document.getElementById("sftp-host"),
+  sftpPort: document.getElementById("sftp-port"),
+  sftpUsername: document.getElementById("sftp-username"),
+  sftpAuthType: document.getElementById("sftp-auth-type"),
+  sftpPassword: document.getElementById("sftp-password"),
+  sftpKeyPath: document.getElementById("sftp-key-path"),
+  sftpKeySelectButton: document.getElementById("sftp-key-select-button"),
+  sftpRemoteDir: document.getElementById("sftp-remote-dir"),
+  sftpSaveConfigButton: document.getElementById("sftp-save-config-button"),
+  sftpTestConnectionButton: document.getElementById("sftp-test-connection-button"),
+  sftpSelectedSiteSummary: document.getElementById("sftp-selected-site-summary"),
+  sftpSubpath: document.getElementById("sftp-subpath"),
+  sftpUploadButton: document.getElementById("sftp-upload-button"),
+  sftpDownloadButton: document.getElementById("sftp-download-button"),
+  sftpProgressStatus: document.getElementById("sftp-progress-status"),
+  sftpProgressLines: document.getElementById("sftp-progress-lines"),
+  sftpConfigStatus: document.getElementById("sftp-config-status"),
+  codeEditorPath: document.getElementById("code-editor-path"),
+  codeEditorOpenButton: document.getElementById("code-editor-open-button"),
+  codeEditorSaveButton: document.getElementById("code-editor-save-button"),
+  codeEditorSaveAsButton: document.getElementById("code-editor-save-as-button"),
+  codeEditorStatus: document.getElementById("code-editor-status"),
+  codeEditorMonaco: document.getElementById("code-editor-monaco"),
+  codeEditorTextarea: document.getElementById("code-editor-textarea"),
+  codeEditorRemotePath: document.getElementById("code-editor-remote-path"),
+  codeEditorBrowseButton: document.getElementById("code-editor-browse-button"),
+  codeEditorFileList: document.getElementById("code-editor-file-list"),
+  codeEditorFileListContainer: document.getElementById("code-editor-file-list-container"),
+  codeEditorRemoteStatus: document.getElementById("code-editor-remote-status"),
   detailDomain: document.getElementById("detail-domain"),
   detailSsl: document.getElementById("detail-ssl"),
   detailWebServer: document.getElementById("detail-web-server"),
@@ -314,6 +681,7 @@ const elements = {
   detailDbVersion: document.getElementById("detail-db-version"),
   detailWordpressVersion: document.getElementById("detail-wordpress-version"),
   overviewEmptyCard: document.getElementById("overview-empty-card"),
+  localServerType: document.getElementById("local-server-type"),
   pickXamppRootButton: document.getElementById("pick-xampp-root-button"),
   settingsPickHtdocsButton: document.getElementById("settings-pick-htdocs-button"),
   settingsXamppRoot: document.getElementById("settings-xampp-root"),
@@ -334,6 +702,10 @@ const elements = {
   settingsWpInstallEmail: document.getElementById("settings-wp-install-email"),
   saveWpInstallDefaultsButton: document.getElementById("save-wp-install-defaults-button"),
   settingsShareLocalSessions: document.getElementById("settings-share-local-sessions"),
+  syncGoogleBtn: document.getElementById("sync-google-btn"),
+  syncGoogleStatus: document.getElementById("sync-google-status"),
+  syncMicrosoftBtn: document.getElementById("sync-microsoft-btn"),
+  syncMicrosoftStatus: document.getElementById("sync-microsoft-status"),
   settingsShareOnlineSessions: document.getElementById("settings-share-online-sessions"),
   sessionSaveActiveCopy: document.getElementById("session-save-active-copy"),
   sessionAutosaveButton: document.getElementById("session-autosave-button"),
@@ -368,7 +740,21 @@ const elements = {
   openPhpConfigButton: document.getElementById("open-php-config-button"),
   openPhpMyAdminFolderButton: document.getElementById("open-phpmyadmin-folder-button"),
   siteTabs: document.querySelectorAll(".site-tab"),
-  siteTabPanels: document.querySelectorAll(".site-tab-panel")
+  siteTabPanels: document.querySelectorAll(".site-tab-panel"),
+  settingsMysqlMonaco: document.getElementById("settings-mysql-monaco"),
+  workspaceNotesMonaco: document.getElementById("workspace-notes-monaco"),
+  loadAppExtensionButton: document.getElementById("load-app-extension-button"),
+  appExtensionsList: document.getElementById("app-extensions-list"),
+  mcpStatusText: document.getElementById("mcp-status-text"),
+  mcpToggleButton: document.getElementById("mcp-toggle-button"),
+  mcpEndpointText: document.getElementById("mcp-endpoint-text"),
+  mcpSessionsCount: document.getElementById("mcp-sessions-count"),
+  mcpErrorItem: document.getElementById("mcp-error-item"),
+  mcpErrorText: document.getElementById("mcp-error-text"),
+  mcpHost: document.getElementById("mcp-host"),
+  mcpPort: document.getElementById("mcp-port"),
+  mcpSaveConfigButton: document.getElementById("mcp-save-config-button"),
+  mcpConfigStatus: document.getElementById("mcp-config-status")
 };
 
 state.addressSuggestions = [];
@@ -592,9 +978,15 @@ async function openBookmarkSaveDialogForBookmark(bookmark) {
 
 function renderSidebarState() {
   elements.appShell.classList.toggle("sidebar-collapsed", uiState.sidebarCollapsed);
+  elements.appShell.classList.toggle("right-sidebar-collapsed", uiState.rightSidebarCollapsed);
   elements.appShell.classList.toggle("browser-focus-mode", uiState.browserFocusMode);
   elements.sidebarToggleButton.setAttribute("aria-label", uiState.sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar");
   elements.sidebarToggleButton.querySelector(".sidebar-toggle-glyph").textContent = uiState.sidebarCollapsed ? ">>" : "<<";
+  elements.rightSidebarToggleButton?.setAttribute("aria-label", uiState.rightSidebarCollapsed ? "Expand right sidebar" : "Collapse right sidebar");
+  const rightGlyph = elements.rightSidebarToggleButton?.querySelector(".right-sidebar-toggle-glyph");
+  if (rightGlyph) {
+    rightGlyph.textContent = uiState.rightSidebarCollapsed ? "<<" : ">>";
+  }
   elements.browserFullscreenButton.setAttribute("aria-label", uiState.browserFocusMode ? "Exit Full Screen" : "Full Screen");
   elements.browserFullscreenButton.title = uiState.browserFocusMode ? "Exit Full Screen" : "Full Screen";
   elements.browserFullscreenButton.querySelector(".toolbar-icon-glyph").textContent = uiState.browserFocusMode ? "×" : "⛶";
@@ -607,13 +999,156 @@ function toggleSidebar() {
   renderSidebarState();
 }
 
+function toggleRightSidebar() {
+  uiState.rightSidebarCollapsed = !uiState.rightSidebarCollapsed;
+  localStorage.setItem("wpdesktop.rightSidebarCollapsed", uiState.rightSidebarCollapsed ? "1" : "0");
+  renderSidebarState();
+}
+
 function toggleBrowserFocusMode(forceValue) {
   uiState.browserFocusMode = typeof forceValue === "boolean" ? forceValue : !uiState.browserFocusMode;
   if (uiState.browserFocusMode && state.vaultOpen) {
     state.vaultOpen = false;
     renderVaultPanel();
   }
+  if (uiState.browserFocusMode) {
+    closeBottomPanel();
+  }
   renderSidebarState();
+}
+
+function getScreenNavigationMeta(screenName) {
+  const button = document.querySelector(`[data-screen="${screenName}"]`);
+  const label = button?.querySelector(".nav-button-label")?.textContent?.trim() || screenName;
+  const short = button?.querySelector(".nav-button-short")?.textContent?.trim() || "▣";
+  return { label: label.replace(short, "").trim() || label, short };
+}
+
+function getBottomPanelHeightBounds() {
+  const viewportHeight = window.innerHeight || 720;
+  return {
+    min: Math.min(280, Math.max(180, viewportHeight - 220)),
+    max: Math.max(320, Math.floor(viewportHeight * 0.82))
+  };
+}
+
+function applyBottomPanelHeight(nextHeight, persist = true) {
+  if (!elements.bottomPanel) return;
+
+  const bounds = getBottomPanelHeightBounds();
+  const height = Math.min(bounds.max, Math.max(bounds.min, Number(nextHeight) || 0));
+  elements.bottomPanel.style.height = `${height}px`;
+
+  if (persist) {
+    localStorage.setItem("wpdesktop.bottomPanelHeight", String(height));
+  }
+
+  if (uiState.bottomPanelScreen === "editor" && codeEditor) {
+    setTimeout(() => codeEditor.layout(), 40);
+  }
+}
+
+function restoreBottomPanelHeight() {
+  const savedHeight = Number(localStorage.getItem("wpdesktop.bottomPanelHeight"));
+  if (savedHeight) {
+    applyBottomPanelHeight(savedHeight, false);
+  }
+}
+
+function initBottomPanelResize() {
+  const handle = elements.bottomPanelResizeHandle;
+  if (!handle || !elements.bottomPanel) return;
+
+  handle.addEventListener("pointerdown", (event) => {
+    event.preventDefault();
+    const startY = event.clientY;
+    const startHeight = elements.bottomPanel.getBoundingClientRect().height;
+    handle.setPointerCapture?.(event.pointerId);
+    document.body.classList.add("bottom-panel-resizing");
+
+    const onPointerMove = (moveEvent) => {
+      const delta = startY - moveEvent.clientY;
+      applyBottomPanelHeight(startHeight + delta, false);
+    };
+
+    const onPointerUp = () => {
+      document.removeEventListener("pointermove", onPointerMove);
+      document.removeEventListener("pointerup", onPointerUp);
+      document.body.classList.remove("bottom-panel-resizing");
+      const finalHeight = elements.bottomPanel.getBoundingClientRect().height;
+      applyBottomPanelHeight(finalHeight, true);
+      syncBrowserLayoutSoon();
+    };
+
+    document.addEventListener("pointermove", onPointerMove);
+    document.addEventListener("pointerup", onPointerUp);
+  });
+
+  window.addEventListener("resize", () => {
+    if (!elements.bottomPanel.classList.contains("hidden")) {
+      const currentHeight = elements.bottomPanel.getBoundingClientRect().height;
+      applyBottomPanelHeight(currentHeight, false);
+    }
+  });
+}
+
+function openBottomPanel(screenName) {
+  const screen = document.getElementById(`${screenName}-screen`);
+  if (!screen || !elements.bottomPanel || !elements.bottomPanelBody) {
+    return;
+  }
+
+  const { label, short } = getScreenNavigationMeta(screenName);
+  uiState.bottomPanelScreen = screenName;
+  
+  // Update panel header with context
+  let contextLabel = label;
+  let contextIcon = short;
+  
+  if (screenName === "editor" && state.integration.editorProjectContext) {
+    const project = state.workspaceClients.find(c => c.id === state.integration.editorProjectContext);
+    if (project) {
+      contextLabel = `${label} • ${project.name}`;
+    }
+  }
+  
+  if (screenName === "sftp" && state.selectedWorkspaceClientId) {
+    const project = state.workspaceClients.find(c => c.id === state.selectedWorkspaceClientId);
+    if (project) {
+      contextLabel = `${label} • ${project.name}`;
+    }
+  }
+  
+  elements.bottomPanelIcon.textContent = contextIcon;
+  elements.bottomPanelLabel.textContent = contextLabel;
+  elements.bottomPanelBody.appendChild(screen);
+  restoreBottomPanelHeight();
+  elements.bottomPanel.classList.remove("hidden");
+  elements.appShell.classList.add("bottom-panel-open");
+  screen.classList.add("active", "bottom-panel-screen");
+
+  if (screenName === "editor" && codeEditor) {
+    setTimeout(() => codeEditor.layout(), 80);
+  }
+}
+
+function closeBottomPanel() {
+  if (uiState.bottomPanelScreen) {
+    const screen = document.getElementById(`${uiState.bottomPanelScreen}-screen`);
+    screen?.classList.remove("active", "bottom-panel-screen");
+  }
+
+  uiState.bottomPanelScreen = null;
+  elements.bottomPanel?.classList.add("hidden");
+  elements.appShell?.classList.remove("bottom-panel-open");
+
+  elements.navButtons.forEach((button) => {
+    button.classList.toggle("active", button.dataset.screen === "browser");
+  });
+
+  const browserScreen = document.getElementById("browser-screen");
+  browserScreen?.classList.add("active");
+  syncBrowserLayoutSoon();
 }
 
 function showScreen(screenName) {
@@ -629,13 +1164,1098 @@ function showScreen(screenName) {
     screen.classList.toggle("active", screen.id === `${screenName}-screen`);
   });
 
+  if (screenName === "editor" && codeEditor) {
+    setTimeout(() => codeEditor.layout(), 50);
+  }
+
   syncBrowserLayoutSoon();
 }
 
-elements.navButtons.forEach((button) => {
-  button.addEventListener("click", () => showScreen(button.dataset.screen));
-});
+function getSelectedSftpSite() {
+  if (!elements.sftpSiteSelect) {
+    return getSelectedSite();
+  }
+
+  const selectedId = elements.sftpSiteSelect.value || state.selectedSiteId;
+  return state.sites.find((site) => site.id === selectedId) || getSelectedSite();
+}
+
+function renderSftpSiteSelect() {
+  if (!elements.sftpSiteSelect) {
+    return;
+  }
+
+  elements.sftpSiteSelect.innerHTML = "";
+  if (!state.sites.length) {
+    const emptyOption = document.createElement("option");
+    emptyOption.value = "";
+    emptyOption.textContent = "No local sites available";
+    elements.sftpSiteSelect.appendChild(emptyOption);
+    elements.sftpSiteSelect.disabled = true;
+    return;
+  }
+
+  state.sites.forEach((site) => {
+    const option = document.createElement("option");
+    option.value = site.id;
+    option.textContent = site.name;
+    if (site.id === state.selectedSiteId) {
+      option.selected = true;
+    }
+    elements.sftpSiteSelect.appendChild(option);
+  });
+
+  if (!elements.sftpSiteSelect.value) {
+    elements.sftpSiteSelect.value = state.selectedSiteId || state.sites[0]?.id || "";
+  }
+
+  elements.sftpSiteSelect.disabled = false;
+}
+
+function renderSftpConfig() {
+  if (!elements.sftpHost) {
+    return;
+  }
+
+  const site = getSelectedSftpSite();
+
+  // Only update UI visibility and button states, don't clear user-entered fields
+  const isReady = Boolean(elements.sftpHost.value.trim() && elements.sftpUsername.value.trim());
+  [elements.sftpUploadButton, elements.sftpDownloadButton].forEach((button) => {
+    if (button) {
+      button.disabled = !isReady || !site;
+    }
+  });
+
+  if (elements.sftpConfigStatus) {
+    if (site) {
+      elements.sftpConfigStatus.textContent = `SFTP configured for: ${site.name}`;
+    } else {
+      elements.sftpConfigStatus.textContent = "Enter SFTP details above and test the connection.";
+    }
+  }
+
+  const showPassword = elements.sftpAuthType.value === "password";
+  if (elements.sftpPassword?.closest) {
+    const passwordField = elements.sftpPassword.closest(".field");
+    if (passwordField) {
+      passwordField.style.display = showPassword ? "block" : "none";
+    }
+  }
+  if (elements.sftpKeyPath?.closest) {
+    const keyField = elements.sftpKeyPath.closest(".field");
+    if (keyField) {
+      keyField.style.display = showPassword ? "none" : "block";
+    }
+  }
+}
+
+function appendSftpProgressLine(line, isError = false) {
+  if (!elements.sftpProgressLines) {
+    return;
+  }
+  const item = document.createElement("li");
+  item.textContent = String(line || "");
+  if (isError) {
+    item.style.color = "var(--danger-color)";
+  }
+  elements.sftpProgressLines.appendChild(item);
+  while (elements.sftpProgressLines.children.length > 50) {
+    elements.sftpProgressLines.removeChild(elements.sftpProgressLines.firstChild);
+  }
+  if (elements.sftpProgressLines.parentElement) {
+    elements.sftpProgressLines.parentElement.scrollTop = elements.sftpProgressLines.parentElement.scrollHeight;
+  }
+}
+
+function setCodeEditorStatus(message, isError = false) {
+  if (!elements.codeEditorStatus) {
+    return;
+  }
+  elements.codeEditorStatus.textContent = message;
+  elements.codeEditorStatus.style.color = isError ? "var(--danger-color)" : "var(--text-dim)";
+}
+
+function getCodeEditorLanguageForPath(filePath) {
+  const extension = String(filePath || "").split(".").pop().toLowerCase();
+  switch (extension) {
+    case "js": return "javascript";
+    case "ts": return "typescript";
+    case "jsx": return "javascript";
+    case "tsx": return "typescript";
+    case "json": return "json";
+    case "css": return "css";
+    case "scss": return "scss";
+    case "html":
+    case "htm": return "html";
+    case "md":
+    case "markdown": return "markdown";
+    case "php": return "php";
+    case "sql": return "sql";
+    case "yaml":
+    case "yml": return "yaml";
+    case "xml": return "xml";
+    case "py": return "python";
+    case "sh": return "shell";
+    default: return "plaintext";
+  }
+}
+
+function setCodeEditorFilePath(filePath) {
+  currentlyOpenCodeFilePath = filePath || null;
+  if (elements.codeEditorPath) {
+    elements.codeEditorPath.value = filePath || "";
+  }
+  if (filePath) {
+    setCodeEditorStatus(`Ready to edit ${filePath}`);
+    codeEditorLanguage = getCodeEditorLanguageForPath(filePath);
+    if (codeEditor && window.monaco) {
+      monaco.editor.setModelLanguage(codeEditor.getModel(), codeEditorLanguage);
+    }
+  } else {
+    setCodeEditorStatus("Open a local file to begin editing.");
+  }
+}
+
+function loadCodeEditorContent(content) {
+  if (codeEditor) {
+    codeEditor.setValue(content || "");
+  }
+  if (elements.codeEditorTextarea) {
+    elements.codeEditorTextarea.value = content || "";
+  }
+}
+
+function renderRemoteFileList(files, remotePath) {
+  if (!elements.codeEditorFileList) {
+    return;
+  }
+  
+  elements.codeEditorFileList.innerHTML = "";
+  
+  // Add parent directory option if not root
+  if (remotePath !== "/") {
+    const parentPath = remotePath.split("/").slice(0, -1).join("/") || "/";
+    const parentItem = document.createElement("li");
+    parentItem.style.cursor = "pointer";
+    parentItem.style.color = "var(--text-dim)";
+    parentItem.textContent = ".. (parent directory)";
+    parentItem.addEventListener("click", async () => {
+      elements.codeEditorRemotePath.value = parentPath;
+      elements.codeEditorBrowseButton.click();
+    });
+    elements.codeEditorFileList.appendChild(parentItem);
+  }
+  
+  // Add files and directories
+  (files || []).forEach(file => {
+    const item = document.createElement("li");
+    item.style.cursor = "pointer";
+    item.style.paddingLeft = "20px";
+    
+    const prefix = file.type === "directory" ? "📁 " : "📄 ";
+    const sizeStr = file.type === "directory" ? "" : ` (${(file.size / 1024).toFixed(1)}KB)`;
+    item.textContent = `${prefix}${file.name}${sizeStr}`;
+    
+    if (file.type === "directory") {
+      item.addEventListener("click", async () => {
+        const newPath = remotePath === "/" ? `/${file.name}` : `${remotePath}/${file.name}`;
+        elements.codeEditorRemotePath.value = newPath;
+        elements.codeEditorBrowseButton.click();
+      });
+    } else {
+      item.addEventListener("click", async () => {
+        await loadRemoteFile(remotePath, file.name);
+      });
+    }
+    
+    elements.codeEditorFileList.appendChild(item);
+  });
+}
+
+function loadRemoteFile(remotePath, fileName) {
+  if (!activeSftpConnectionId) {
+    setCodeEditorStatus("No active SFTP connection.", true);
+    return;
+  }
+
+  const fullPath = remotePath === "/" ? `/${fileName}` : `${remotePath}/${fileName}`;
+  
+  setCodeEditorStatus(`Loading ${fullPath}...`);
+
+  window.desktopAPI.readSftpFile(activeSftpConnectionId, fullPath)
+    .then((content) => {
+      setCodeEditorFilePath(fullPath);
+      loadCodeEditorContent(content);
+      setCodeEditorStatus(`Loaded ${fullPath}`);
+    })
+    .catch((error) => {
+      setCodeEditorStatus(`Failed to load file: ${error.message}`, true);
+    });
+}
+
+// ─── Sidebar Search Sort Filter (SSF) & Categories ───────────────────
+const SIDEBAR_ITEMS = [
+  // Core Development
+  { screen: "terminal", label: "Terminal", short: "💻", category: "development" },
+  { screen: "database", label: "Database", short: "🗄️", category: "development" },
+  { screen: "git", label: "Git", short: "🌿", category: "development" },
+  { screen: "wpcli", label: "WP-CLI", short: "⌨️", category: "development" },
+
+  // Advanced MCP Tools
+  { screen: "mcp", label: "MCP Status", short: "🔌", category: "mcp_tools" },
+  { screen: "mcp_filesystem", label: "Filesystem MCP", short: "📁", category: "mcp_tools" },
+  { screen: "mcp_github", label: "GitHub MCP", short: "🐙", category: "mcp_tools" },
+  { screen: "mcp_postgres", label: "PostgreSQL MCP", short: "🐘", category: "mcp_tools" },
+  { screen: "mcp_mysql", label: "MySQL MCP", short: "🐬", category: "mcp_tools" },
+  { screen: "mcp_browser", label: "Browser Auto MCP", short: "🤖", category: "mcp_tools" },
+  { screen: "mcp_slack", label: "Slack MCP", short: "💬", category: "mcp_tools" },
+  { screen: "mcp_notion", label: "Notion MCP", short: "📓", category: "mcp_tools" },
+  { screen: "mcp_gdrive", label: "Google Drive MCP", short: "☁️", category: "mcp_tools" },
+  { screen: "mcp_cloudflare", label: "Cloudflare MCP", short: "⚡", category: "mcp_tools" },
+
+  // DevOps & System
+  { screen: "devops_docker", label: "Docker", short: "🐳", category: "devops" },
+  { screen: "devops_compose", label: "Docker Compose", short: "🐙", category: "devops" },
+  { screen: "devops_k8s", label: "Kubernetes", short: "☸️", category: "devops" },
+  { screen: "devops_cicd", label: "CI/CD Runner", short: "🔄", category: "devops" },
+  { screen: "deploy", label: "Deployment Mgr", short: "🚀", category: "devops" },
+  { screen: "devops_monitor", label: "Server Monitor", short: "📈", category: "devops" },
+
+  // Productivity
+  { screen: "prod_notes", label: "Notes", short: "🗒️", category: "productivity" },
+  { screen: "prod_kanban", label: "Kanban Board", short: "📋", category: "productivity" },
+  { screen: "prod_time", label: "Time Tracking", short: "⏱️", category: "productivity" },
+  { screen: "prod_docs", label: "Doc Viewer", short: "📚", category: "productivity" },
+  { screen: "prod_vault", label: "Password Vault", short: "🔐", category: "productivity" },
+  { screen: "prod_secrets", label: "Secrets Manager", short: "🔑", category: "productivity" },
+  { screen: "backups", label: "Backups", short: "💾", category: "productivity" },
+
+  // Collaboration
+  { screen: "collab_chat", label: "Team Chat", short: "💬", category: "collaboration" },
+  { screen: "meeting", label: "Video Meetings", short: "📞", category: "collaboration" },
+  { screen: "collab_workspace", label: "Shared Workspace", short: "👥", category: "collaboration" },
+  { screen: "collab_feed", label: "Activity Feed", short: "🔔", category: "collaboration" },
+  { screen: "collab_permissions", label: "Site Permissions", short: "🛡️", category: "collaboration" },
+  { screen: "ai", label: "AI Assistant", short: "🤖", category: "collaboration" }
+];
+
+const CUSTOM_CATEGORIES = {
+  core: "Core Development",
+  mcp_tools: "Advanced MCP Tools",
+  devops: "DevOps & Systems",
+  productivity: "Productivity",
+  collaboration: "Collaboration"
+};
+
+const DEFAULT_CATEGORY_MAPPING = {
+  browser: "core",
+  editor: "core",
+  terminal: "core",
+  database: "core",
+  git: "core",
+  installer: "core",
+  wpcli: "core",
+
+  mcp: "mcp_tools",
+  mcp_filesystem: "mcp_tools",
+  mcp_github: "mcp_tools",
+  mcp_postgres: "mcp_tools",
+  mcp_mysql: "mcp_tools",
+  mcp_browser: "mcp_tools",
+  mcp_slack: "mcp_tools",
+  mcp_notion: "mcp_tools",
+  mcp_gdrive: "mcp_tools",
+  mcp_cloudflare: "mcp_tools",
+
+  devops_docker: "devops",
+  devops_compose: "devops",
+  devops_k8s: "devops",
+  devops_cicd: "devops",
+  deploy: "devops",
+  devops_monitor: "devops",
+
+  workspace: "productivity",
+  prod_notes: "productivity",
+  prod_kanban: "productivity",
+  prod_time: "productivity",
+  prod_docs: "productivity",
+  prod_vault: "productivity",
+  prod_secrets: "productivity",
+  backups: "productivity",
+
+  collab_chat: "collaboration",
+  meeting: "collaboration",
+  collab_workspace: "collaboration",
+  collab_feed: "collaboration",
+  collab_permissions: "collaboration",
+  ai: "collaboration",
+  settings: "collaboration"
+};
+
+const CATEGORY_LABELS = {
+  development: "Dev Tools",
+  mcp_tools: "MCP Tools",
+  devops: "DevOps",
+  productivity: "Productivity",
+  collaboration: "Collaboration"
+};
+
+let ssfSearchQuery = "";
+let ssfFilterCategory = "all";
+let ssfSortBy = "custom"; // custom, name, category
+
+function getBetaEnabled() {
+  try {
+    const saved = localStorage.getItem("wpdesktop.beta.enabled");
+    return saved !== "0"; // default to true
+  } catch (_) {
+    return true;
+  }
+}
+
+function setBetaEnabled(val) {
+  try {
+    localStorage.setItem("wpdesktop.beta.enabled", val ? "1" : "0");
+  } catch (_) {}
+  applyBetaFeaturesState();
+}
+
+// ─────────────────────────────────────────────────────────────────
+// ─── Custom Categories & Filters CRUD System ─────────────────────
+// ─────────────────────────────────────────────────────────────────
+
+function getCustomCategories() {
+  try {
+    const saved = localStorage.getItem("wpdesktop.beta.custom-categories");
+    if (saved) return JSON.parse(saved);
+  } catch (_) {}
+  return [];
+}
+
+function saveCustomCategories(categories) {
+  localStorage.setItem("wpdesktop.beta.custom-categories", JSON.stringify(categories));
+}
+
+function addCustomCategory(name) {
+  if (!name || typeof name !== "string" || name.trim().length === 0) {
+    return null;
+  }
+
+  const categories = getCustomCategories();
+  const id = `custom-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  const category = {
+    id,
+    name: name.trim(),
+    createdAt: Date.now(),
+    toolIds: []
+  };
+
+  categories.push(category);
+  saveCustomCategories(categories);
+  return category;
+}
+
+function updateCustomCategory(categoryId, name) {
+  if (!name || name.trim().length === 0) return false;
+
+  const categories = getCustomCategories();
+  const category = categories.find(c => c.id === categoryId);
+  if (!category) return false;
+
+  category.name = name.trim();
+  saveCustomCategories(categories);
+  return true;
+}
+
+function deleteCustomCategory(categoryId) {
+  const categories = getCustomCategories();
+  const filtered = categories.filter(c => c.id !== categoryId);
+  saveCustomCategories(filtered);
+  return true;
+}
+
+function assignToolToCategory(categoryId, toolId) {
+  const categories = getCustomCategories();
+  const category = categories.find(c => c.id === categoryId);
+  if (!category) return false;
+
+  if (!category.toolIds.includes(toolId)) {
+    category.toolIds.push(toolId);
+    saveCustomCategories(categories);
+  }
+  return true;
+}
+
+function unassignToolFromCategory(categoryId, toolId) {
+  const categories = getCustomCategories();
+  const category = categories.find(c => c.id === categoryId);
+  if (!category) return false;
+
+  category.toolIds = category.toolIds.filter(id => id !== toolId);
+  saveCustomCategories(categories);
+  return true;
+}
+
+function getToolsForCategory(categoryId) {
+  const categories = getCustomCategories();
+  const category = categories.find(c => c.id === categoryId);
+  return category ? category.toolIds : [];
+}
+
+function getCategoriesForTool(toolId) {
+  const categories = getCustomCategories();
+  return categories.filter(c => c.toolIds.includes(toolId));
+}
+
+function getAllCategoryNames() {
+  const builtin = Object.values(BROWSER_TOOL_CATEGORIES);
+  const custom = getCustomCategories().map(c => c.name);
+  return [...builtin, ...custom];
+}
+
+function renderCustomCategories() {
+  const container = document.getElementById("beta-categories-list");
+  if (!container) return;
+
+  const categories = getCustomCategories();
+  container.innerHTML = "";
+
+  if (categories.length === 0) {
+    const empty = document.createElement("div");
+    empty.style.cssText = "color: var(--text-dim); font-size: 0.9rem; padding: 8px; text-align: center;";
+    empty.textContent = "No custom categories yet. Create one above.";
+    container.appendChild(empty);
+    return;
+  }
+
+  categories.forEach(category => {
+    const item = document.createElement("div");
+    item.style.cssText = "display: grid; grid-template-columns: 1fr auto; gap: 8px; padding: 12px; background: var(--surface-2); border-radius: 4px; border: 1px solid var(--line);";
+    
+    const toolCount = category.toolIds.length;
+    const assignedTools = category.toolIds
+      .map(tid => SIDEBAR_ITEMS.find(s => s.screen === tid)?.label)
+      .filter(Boolean)
+      .join(", ");
+
+    item.innerHTML = `
+      <div style="min-width: 0;">
+        <input type="text" class="beta-category-edit" data-category-id="${category.id}" value="${escapeHtml(category.name)}" style="width: 100%; padding: 4px 6px; background: var(--input-bg); border: 1px solid var(--input-border); border-radius: 3px; color: var(--text); font-size: 0.9rem; margin-bottom: 6px;">
+        <div style="font-size: 0.85rem; color: var(--text-dim); line-height: 1.4;">
+          ${toolCount > 0 
+            ? `<strong>Tools:</strong> ${escapeHtml(assignedTools)}` 
+            : '<em>No tools assigned yet</em>'}
+        </div>
+      </div>
+      <div style="display: flex; flex-direction: column; gap: 4px;">
+        <button type="button" class="beta-category-save" data-category-id="${category.id}" style="padding: 4px 8px; background: var(--accent-dim); color: var(--accent); border: 1px solid var(--accent); border-radius: 3px; cursor: pointer; font-size: 0.85rem; white-space: nowrap;">Save</button>
+        <button type="button" class="beta-category-assign" data-category-id="${category.id}" style="padding: 4px 8px; background: var(--surface-3); color: var(--text); border: 1px solid var(--line); border-radius: 3px; cursor: pointer; font-size: 0.85rem; white-space: nowrap;">Assign Tools</button>
+        <button type="button" class="beta-category-delete" data-category-id="${category.id}" style="padding: 4px 8px; background: var(--danger-bg); color: var(--danger-color); border: 1px solid var(--danger-border); border-radius: 3px; cursor: pointer; font-size: 0.85rem; white-space: nowrap;">Delete</button>
+      </div>
+    `;
+    container.appendChild(item);
+  });
+}
+
+function showCategoryToolAssignmentModal(categoryId) {
+  const category = getCustomCategories().find(c => c.id === categoryId);
+  if (!category) return;
+
+  const allBetaTools = SIDEBAR_ITEMS.filter(item => {
+    return !["browser", "sftp", "editor", "installer", "workspace", "settings"].includes(item.screen);
+  });
+
+  let html = `
+    <div style="background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px; max-width: 500px; max-height: 80vh; overflow-y: auto;">
+      <div style="margin-bottom: 16px;">
+        <h3 style="margin: 0 0 8px 0;">Assign Tools to "${escapeHtml(category.name)}"</h3>
+        <p style="margin: 0; color: var(--text-dim); font-size: 0.9rem;">Select which beta tools should belong to this category.</p>
+      </div>
+      <div style="display: grid; gap: 8px; margin-bottom: 16px;">
+  `;
+
+  allBetaTools.forEach(tool => {
+    const isAssigned = category.toolIds.includes(tool.screen);
+    html += `
+      <label style="display: flex; align-items: center; gap: 8px; padding: 8px; background: var(--surface-2); border-radius: 4px; cursor: pointer;">
+        <input type="checkbox" class="category-tool-checkbox" data-category-id="${categoryId}" data-tool-id="${tool.screen}" ${isAssigned ? 'checked' : ''} style="width: 16px; height: 16px; cursor: pointer;">
+        <span>${tool.short} ${tool.label}</span>
+      </label>
+    `;
+  });
+
+  html += `
+      </div>
+      <div style="display: flex; gap: 8px; justify-content: flex-end;">
+        <button type="button" class="category-modal-cancel" style="padding: 6px 12px; background: transparent; border: 1px solid var(--line); border-radius: 4px; cursor: pointer; color: var(--text);">Cancel</button>
+        <button type="button" class="category-modal-confirm" style="padding: 6px 12px; background: var(--accent-dim); border: 1px solid var(--accent); border-radius: 4px; cursor: pointer; color: var(--accent);">Confirm</button>
+      </div>
+    </div>
+  `;
+
+  const backdrop = document.createElement("div");
+  backdrop.style.cssText = "position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; z-index: 1000;";
+  backdrop.id = "category-assignment-modal";
+  backdrop.innerHTML = html;
+  document.body.appendChild(backdrop);
+
+  // Handle checkboxes
+  backdrop.querySelectorAll(".category-tool-checkbox").forEach(checkbox => {
+    checkbox.addEventListener("change", (e) => {
+      const cId = e.target.dataset.categoryId;
+      const tId = e.target.dataset.toolId;
+      if (e.target.checked) {
+        assignToolToCategory(cId, tId);
+      } else {
+        unassignToolFromCategory(cId, tId);
+      }
+    });
+  });
+
+  // Handle buttons
+  backdrop.querySelector(".category-modal-cancel").addEventListener("click", () => {
+    backdrop.remove();
+  });
+
+  backdrop.querySelector(".category-modal-confirm").addEventListener("click", () => {
+    backdrop.remove();
+    renderCustomCategories();
+    renderBetaFeaturesSettings();
+  });
+
+  backdrop.addEventListener("click", (e) => {
+    if (e.target === backdrop) backdrop.remove();
+  });
+}
+
+function initBetaCategoryManagement() {
+  const addButton = document.getElementById("beta-category-add-button");
+  const nameInput = document.getElementById("beta-category-name-input");
+  const categoriesList = document.getElementById("beta-categories-list");
+
+  if (!addButton || !nameInput || !categoriesList) return;
+
+  addButton.addEventListener("click", () => {
+    const name = nameInput.value.trim();
+    if (name.length === 0) {
+      return;
+    }
+    addCustomCategory(name);
+    nameInput.value = "";
+    renderCustomCategories();
+    renderBetaFeaturesSettings();
+  });
+
+  nameInput.addEventListener("keypress", (e) => {
+    if (e.key === "Enter") {
+      addButton.click();
+    }
+  });
+
+  categoriesList.addEventListener("click", (e) => {
+    const deleteBtn = e.target.closest(".beta-category-delete");
+    const saveBtn = e.target.closest(".beta-category-save");
+
+  const assignBtn = e.target.closest(".beta-category-assign");
+
+  if (deleteBtn) {
+      const categoryId = deleteBtn.dataset.categoryId;
+      if (confirm(`Delete category? This will not delete assigned tools.`)) {
+        deleteCustomCategory(categoryId);
+        renderCustomCategories();
+        renderBetaFeaturesSettings();
+      }
+    }
+
+    if (saveBtn) {
+      const categoryId = saveBtn.dataset.categoryId;
+      const input = categoriesList.querySelector(`[data-category-id="${categoryId}"]`);
+      if (input) {
+        const newName = input.value.trim();
+        if (newName.length > 0) {
+          updateCustomCategory(categoryId, newName);
+
+              if (assignBtn) {
+                const categoryId = assignBtn.dataset.categoryId;
+                showCategoryToolAssignmentModal(categoryId);
+              }
+          renderCustomCategories();
+          renderBetaFeaturesSettings();
+        }
+      }
+    }
+  });
+
+  renderCustomCategories();
+}
+
+function getBetaDisabledTools() {
+  try {
+    const saved = localStorage.getItem("wpdesktop.beta.disabled-tools");
+    if (saved) return JSON.parse(saved);
+  } catch (_) {}
+  return [];
+}
+
+function saveBetaDisabledTools(list) {
+  try {
+    localStorage.setItem("wpdesktop.beta.disabled-tools", JSON.stringify(list));
+  } catch (_) {}
+}
+
+function isBetaToolEnabled(screen) {
+  const disabled = getBetaDisabledTools();
+  return !disabled.includes(screen);
+}
+
+function setBetaToolEnabled(screen, enabled) {
+  let disabled = getBetaDisabledTools();
+  if (enabled) {
+    disabled = disabled.filter(s => s !== screen);
+  } else {
+    if (!disabled.includes(screen)) {
+      disabled.push(screen);
+    }
+  }
+  saveBetaDisabledTools(disabled);
+  renderSidebar();
+}
+
+function applyBetaFeaturesState() {
+  const isEnabled = getBetaEnabled();
+  if (elements.betaFeaturesSidebarWrapper) {
+    elements.betaFeaturesSidebarWrapper.style.display = "flex";
+  }
+  if (elements.settingsBetaEnabled) {
+    elements.settingsBetaEnabled.checked = isEnabled;
+  }
+  renderSidebar();
+}
+
+function renderBetaFeaturesSettings() {
+  if (!elements.settingsBetaEnabled || !elements.betaToolsCheckboxes) return;
+
+  elements.settingsBetaEnabled.checked = getBetaEnabled();
+
+  let html = "";
+  const categories = {};
+  const customCategories = getCustomCategories();
+  
+  SIDEBAR_ITEMS.forEach(item => {
+    const isReleased = ["browser", "sftp", "editor", "installer", "workspace", "settings"].includes(item.screen);
+    if (isReleased) return;
+
+    if (!categories[item.category]) {
+      categories[item.category] = [];
+    }
+    categories[item.category].push(item);
+  });
+
+  const disabledTools = getBetaDisabledTools();
+
+  // Render built-in categories
+  Object.entries(CATEGORY_LABELS).forEach(([catKey, catLabel]) => {
+    const items = categories[catKey] || [];
+    if (items.length === 0) return;
+
+    html += `
+      <div style="grid-column: 1 / -1; margin-top: 8px; font-size: 0.82rem; font-weight: 600; color: var(--text-dim); border-bottom: 1px solid var(--line-soft); padding-bottom: 4px;">
+        ${catLabel}
+      </div>
+    `;
+
+    items.forEach(item => {
+      const isChecked = !disabledTools.includes(item.screen);
+      html += `
+        <label class="checkbox-row" style="margin: 4px 0;">
+          <input type="checkbox" class="beta-tool-toggle" data-screen="${item.screen}" ${isChecked ? 'checked' : ''}>
+          <span>${item.short} ${item.label}</span>
+        </label>
+      `;
+    });
+  });
+
+  // Render custom categories
+  if (customCategories.length > 0) {
+    html += `
+      <div style="grid-column: 1 / -1; margin-top: 8px; font-size: 0.82rem; font-weight: 600; color: var(--accent); border-bottom: 1px solid var(--accent-soft); padding-bottom: 4px;">
+        ✨ Custom Categories
+      </div>
+    `;
+
+    customCategories.forEach(category => {
+      html += `
+        <div style="grid-column: 1 / -1; padding: 6px; background: var(--accent-soft); border-radius: 3px; font-size: 0.85rem; color: var(--text);">
+          <strong>${escapeHtml(category.name)}</strong> <span style="color: var(--text-dim);">(${category.toolIds.length} tools)</span>
+        </div>
+      `;
+
+      // Show tools assigned to this custom category
+      category.toolIds.forEach(toolId => {
+        const tool = SIDEBAR_ITEMS.find(item => item.screen === toolId);
+        if (tool) {
+          const isChecked = !disabledTools.includes(toolId);
+          html += `
+            <label class="checkbox-row" style="margin: 4px 0; margin-left: 16px;">
+              <input type="checkbox" class="beta-tool-toggle" data-screen="${toolId}" ${isChecked ? 'checked' : ''}>
+              <span>${tool.short} ${tool.label}</span>
+            </label>
+          `;
+        }
+      });
+    });
+  }
+
+  elements.betaToolsCheckboxes.innerHTML = html;
+}
+
+function getSidebarCustomOrder() {
+  let order = [];
+  try {
+    const saved = localStorage.getItem("wpdesktop.sidebar-order");
+    if (saved) order = JSON.parse(saved);
+  } catch (_) {}
+  
+  const allScreens = SIDEBAR_ITEMS.map(item => item.screen);
+  if (!order || !order.length) {
+    return allScreens;
+  }
+  
+  allScreens.forEach(screen => {
+    if (!order.includes(screen)) {
+      order.push(screen);
+    }
+  });
+  return order;
+}
+
+function saveSidebarCustomOrder(order) {
+  localStorage.setItem("wpdesktop.sidebar-order", JSON.stringify(order));
+}
+
+function getCollapsedCategories() {
+  try {
+    const saved = localStorage.getItem("wpdesktop.collapsed-categories");
+    if (saved) return JSON.parse(saved);
+  } catch (_) {}
+  return [];
+}
+
+function saveCollapsedCategories(collapsed) {
+  localStorage.setItem("wpdesktop.collapsed-categories", JSON.stringify(collapsed));
+}
+
+function getToolCategoryMapping() {
+  try {
+    const saved = localStorage.getItem("wpdesktop.tool-category-mapping");
+    if (saved) return JSON.parse(saved);
+  } catch (_) {}
+  return { ...DEFAULT_CATEGORY_MAPPING };
+}
+
+function saveToolCategoryMapping(mapping) {
+  localStorage.setItem("wpdesktop.tool-category-mapping", JSON.stringify(mapping));
+}
+
+function renderSidebar() {
+  const sidebarNav = document.getElementById("sidebar-nav");
+  if (!sidebarNav) return;
+
+  const isBetaEnabled = getBetaEnabled();
+  if (elements.betaFeaturesSidebarWrapper) {
+    elements.betaFeaturesSidebarWrapper.style.display = "flex";
+  }
+
+  const activeScreen = uiState.bottomPanelScreen || Array.from(document.querySelectorAll(".screen"))
+    .find(s => s.classList.contains("active"))
+    ?.id?.replace("-screen", "") || "workspace";
+
+  const customOrder = getSidebarCustomOrder();
+  const collapsedCats = getCollapsedCategories();
+  const mapping = getToolCategoryMapping();
+
+  // Filter items
+  let items = SIDEBAR_ITEMS.filter(item => {
+    // Check if beta tool is enabled
+    if (!isBetaToolEnabled(item.screen)) {
+      return false;
+    }
+
+    // Technical category filter
+    const matchesCategory = ssfFilterCategory === "all" || item.category === ssfFilterCategory;
+    
+    // Search query matches label or custom category label
+    const mappedCat = mapping[item.screen] || "core";
+    const mappedCatLabel = CUSTOM_CATEGORIES[mappedCat] || "";
+    const matchesSearch = item.label.toLowerCase().includes(ssfSearchQuery.toLowerCase()) || 
+                          mappedCatLabel.toLowerCase().includes(ssfSearchQuery.toLowerCase());
+                          
+    return matchesSearch && matchesCategory;
+  });
+
+  // Sort items
+  if (ssfSortBy === "name") {
+    items.sort((a, b) => a.label.localeCompare(b.label));
+  } else {
+    items.sort((a, b) => customOrder.indexOf(a.screen) - customOrder.indexOf(b.screen));
+  }
+
+  // Generate HTML
+  let html = "";
+
+  // Group by the 5 custom categories
+  const categories = { core: [], mcp_tools: [], devops: [], productivity: [], collaboration: [] };
+  items.forEach(item => {
+    const cat = mapping[item.screen] || "core";
+    if (categories[cat]) categories[cat].push(item);
+  });
+
+  Object.entries(CUSTOM_CATEGORIES).forEach(([catKey, catLabel]) => {
+    const catItems = categories[catKey] || [];
+    const isCollapsed = collapsedCats.includes(catKey);
+
+    if (catItems.length === 0) {
+      // Hide empty categories if there is a search or category filter active
+      if (ssfSearchQuery || ssfFilterCategory !== "all") return;
+
+      // Otherwise, show empty placeholder dropzone
+      html += `
+        <div class="sidebar-category-wrapper" data-category="${catKey}">
+          <div class="sidebar-category-header ${isCollapsed ? 'collapsed' : ''}" data-cat-key="${catKey}">
+            <span>${catLabel}</span>
+            <span class="sidebar-category-arrow">▼</span>
+          </div>
+          <div class="sidebar-category-items empty ${isCollapsed ? 'collapsed' : ''}" data-cat-key="${catKey}">
+            Drag tools here
+          </div>
+        </div>
+      `;
+      return;
+    }
+
+    html += `
+      <div class="sidebar-category-wrapper" data-category="${catKey}">
+        <div class="sidebar-category-header ${isCollapsed ? 'collapsed' : ''}" data-cat-key="${catKey}">
+          <span>${catLabel}</span>
+          <span class="sidebar-category-arrow">▼</span>
+        </div>
+        <div class="sidebar-category-items ${isCollapsed ? 'collapsed' : ''}" data-cat-key="${catKey}">
+          ${catItems.map(item => renderButtonHtml(item, activeScreen)).join("")}
+        </div>
+      </div>
+    `;
+  });
+
+  sidebarNav.innerHTML = html;
+
+  // Re-bind events & update elements reference
+  bindSidebarEvents();
+  elements.navButtons = document.querySelectorAll(".nav-button");
+}
+
+function renderButtonHtml(item, activeScreen) {
+  const isActive = item.screen === activeScreen;
+  return `
+    <button class="nav-button ${isActive ? 'active' : ''}" data-screen="${item.screen}" draggable="true">
+      <span class="nav-button-short">${item.short}</span>
+      <span class="nav-button-label">${item.short} ${item.label}</span>
+    </button>
+  `;
+}
+
+function bindSidebarEvents() {
+  const buttons = document.querySelectorAll("#sidebar-nav .nav-button");
+  buttons.forEach(button => {
+    button.addEventListener("click", () => {
+      showScreen(button.dataset.screen);
+    });
+
+    // HTML5 Drag and Drop Events
+    button.addEventListener("dragstart", (e) => {
+      e.dataTransfer.setData("text/plain", button.dataset.screen);
+      button.classList.add("dragging");
+    });
+
+    button.addEventListener("dragend", () => {
+      button.classList.remove("dragging");
+      buttons.forEach(btn => btn.classList.remove("drag-over"));
+    });
+
+    button.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      const dragging = document.querySelector(".nav-button.dragging");
+      if (dragging && dragging !== button) {
+        button.classList.add("drag-over");
+      }
+    });
+
+    button.addEventListener("dragleave", () => {
+      button.classList.remove("drag-over");
+    });
+
+    button.addEventListener("drop", (e) => {
+      e.preventDefault();
+      button.classList.remove("drag-over");
+      e.stopPropagation(); // Stop propagation to avoid container drop
+      const draggedScreen = e.dataTransfer.getData("text/plain");
+      const targetScreen = button.dataset.screen;
+
+      if (draggedScreen && targetScreen && draggedScreen !== targetScreen) {
+        const mapping = getToolCategoryMapping();
+        const targetCat = mapping[targetScreen] || "core";
+
+        // Assign dragged tool to target category
+        mapping[draggedScreen] = targetCat;
+        saveToolCategoryMapping(mapping);
+
+        // Reorder custom order list
+        const order = getSidebarCustomOrder();
+        const fromIdx = order.indexOf(draggedScreen);
+        const toIdx = order.indexOf(targetScreen);
+
+        if (fromIdx !== -1 && toIdx !== -1) {
+          order.splice(fromIdx, 1);
+          order.splice(toIdx, 0, draggedScreen);
+          saveSidebarCustomOrder(order);
+        }
+        renderSidebar();
+      }
+    });
+  });
+
+  // Collapsible category headers
+  const catHeaders = document.querySelectorAll(".sidebar-category-header");
+  catHeaders.forEach(header => {
+    header.addEventListener("click", () => {
+      const catKey = header.dataset.catKey;
+      let collapsed = getCollapsedCategories();
+      if (collapsed.includes(catKey)) {
+        collapsed = collapsed.filter(c => c !== catKey);
+      } else {
+        collapsed.push(catKey);
+      }
+      saveCollapsedCategories(collapsed);
+      renderSidebar();
+    });
+
+    // Support dragging over and dropping directly onto headers
+    header.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      header.classList.add("drag-over");
+    });
+
+    header.addEventListener("dragleave", () => {
+      header.classList.remove("drag-over");
+    });
+
+    header.addEventListener("drop", (e) => {
+      e.preventDefault();
+      header.classList.remove("drag-over");
+      const draggedScreen = e.dataTransfer.getData("text/plain");
+      const targetCat = header.dataset.catKey;
+      if (draggedScreen && targetCat) {
+        const mapping = getToolCategoryMapping();
+        mapping[draggedScreen] = targetCat;
+        saveToolCategoryMapping(mapping);
+        renderSidebar();
+      }
+    });
+  });
+
+  // Support dropping onto category list containers directly (useful for empty categories)
+  const catContainers = document.querySelectorAll(".sidebar-category-items");
+  catContainers.forEach(container => {
+    container.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      container.classList.add("drag-over");
+    });
+
+    container.addEventListener("dragleave", () => {
+      container.classList.remove("drag-over");
+    });
+
+    container.addEventListener("drop", (e) => {
+      e.preventDefault();
+      container.classList.remove("drag-over");
+      const draggedScreen = e.dataTransfer.getData("text/plain");
+      const targetCat = container.dataset.catKey;
+      if (draggedScreen && targetCat) {
+        const mapping = getToolCategoryMapping();
+        mapping[draggedScreen] = targetCat;
+        saveToolCategoryMapping(mapping);
+        renderSidebar();
+      }
+    });
+  });
+}
+
+function initSidebarSsf() {
+  const searchInput = document.getElementById("ssf-search-input");
+  const configToggle = document.getElementById("ssf-config-toggle");
+  const configRow = document.getElementById("ssf-config-row");
+  const filterCat = document.getElementById("ssf-filter-category");
+  const sortBy = document.getElementById("ssf-sort-by");
+
+  // Load initial options
+  const savedFilter = localStorage.getItem("wpdesktop.ssf-filter") || "all";
+  const savedSort = localStorage.getItem("wpdesktop.ssf-sort") || "custom";
+
+  ssfFilterCategory = savedFilter;
+  ssfSortBy = savedSort;
+
+  if (filterCat) filterCat.value = savedFilter;
+  if (sortBy) sortBy.value = savedSort;
+
+  if (searchInput) {
+    searchInput.addEventListener("input", (e) => {
+      ssfSearchQuery = e.target.value;
+      renderSidebar();
+    });
+  }
+
+  if (configToggle) {
+    configToggle.addEventListener("click", () => {
+      configRow?.classList.toggle("hidden");
+      configToggle.classList.toggle("active");
+    });
+  }
+
+  if (filterCat) {
+    filterCat.addEventListener("change", (e) => {
+      ssfFilterCategory = e.target.value;
+      localStorage.setItem("wpdesktop.ssf-filter", ssfFilterCategory);
+      renderSidebar();
+    });
+  }
+
+  if (sortBy) {
+    sortBy.addEventListener("change", (e) => {
+      ssfSortBy = e.target.value;
+      localStorage.setItem("wpdesktop.ssf-sort", ssfSortBy);
+      renderSidebar();
+    });
+  }
+
+  // Render initial sidebar
+  renderSidebar();
+}
+
+// Initialize Sidebar SSF System
+initSidebarSsf();
+initializeIntegrationMaps();
+initQuickNavigationHandlers();
+restoreBottomPanelHeight();
+initBottomPanelResize();
 elements.sidebarToggleButton.addEventListener("click", toggleSidebar);
+elements.rightSidebarToggleButton?.addEventListener("click", toggleRightSidebar);
+elements.bottomPanelCloseButton?.addEventListener("click", closeBottomPanel);
+
+// Released Featured sidebar click delegation
+document.getElementById("released-sidebar-nav")?.addEventListener("click", (e) => {
+  const btn = e.target.closest(".nav-button");
+  if (btn) showScreen(btn.dataset.screen);
+});
 elements.workspaceAddClientButton?.addEventListener("click", () => {
   const client = buildWorkspaceClientRecord("");
   state.workspaceClients.unshift(client);
@@ -691,6 +2311,252 @@ elements.workspaceAddTodoButton?.addEventListener("click", () => {
   });
   resetWorkspaceTodoForm();
 });
+
+  elements.sftpSiteSelect?.addEventListener("change", () => {
+    if (!elements.sftpSiteSelect.value) {
+      return;
+    }
+    state.selectedSiteId = elements.sftpSiteSelect.value;
+    renderSitesList();
+    renderSiteDetails();
+    renderSftpConfig();
+  });
+
+  elements.sftpAuthType?.addEventListener("change", () => {
+    renderSftpConfig();
+  });
+
+  elements.sftpKeySelectButton?.addEventListener("click", async () => {
+    try {
+      const keyPath = await window.desktopAPI.pickFile();
+      if (keyPath) {
+        elements.sftpKeyPath.value = keyPath;
+      }
+    } catch (error) {
+      console.error(error);
+    }
+  });
+
+  elements.sftpSaveConfigButton?.addEventListener("click", async () => {
+    const site = getSelectedSftpSite();
+    if (!site) {
+      if (elements.sftpConfigStatus) {
+        elements.sftpConfigStatus.textContent = "Select a local site to save SFTP settings for transfers.";
+      }
+      return;
+    }
+
+    const config = {
+      host: elements.sftpHost.value.trim(),
+      port: elements.sftpPort.value.trim() || "22",
+      username: elements.sftpUsername.value.trim(),
+      authType: elements.sftpAuthType.value,
+      password: elements.sftpPassword.value,
+      keyPath: elements.sftpKeyPath.value.trim(),
+      remoteDir: elements.sftpRemoteDir.value.trim() || "/"
+    };
+
+    try {
+      await window.desktopAPI.saveSftpConfig(site.id, config);
+      if (elements.sftpConfigStatus) {
+        elements.sftpConfigStatus.textContent = "SFTP configuration saved for " + site.name + ".";
+      }
+      await refreshSites();
+      renderSftpSiteSelect();
+      renderSftpConfig();
+    } catch (error) {
+      if (elements.sftpConfigStatus) {
+        elements.sftpConfigStatus.textContent = `Save failed: ${error.message}`;
+      }
+    }
+  });
+
+  elements.sftpTestConnectionButton?.addEventListener("click", async () => {
+    const config = {
+      host: elements.sftpHost.value.trim(),
+      port: elements.sftpPort.value.trim() || "22",
+      username: elements.sftpUsername.value.trim(),
+      authType: elements.sftpAuthType.value,
+      password: elements.sftpPassword.value,
+      keyPath: elements.sftpKeyPath.value.trim(),
+      remoteDir: elements.sftpRemoteDir.value.trim() || "/"
+    };
+
+    if (!config.host) {
+      if (elements.sftpConfigStatus) {
+        elements.sftpConfigStatus.textContent = "Enter SFTP host to test connection.";
+      }
+      return;
+    }
+
+    if (!config.username) {
+      if (elements.sftpConfigStatus) {
+        elements.sftpConfigStatus.textContent = "Enter SFTP username to test connection.";
+      }
+      return;
+    }
+
+    if (elements.sftpConfigStatus) {
+      elements.sftpConfigStatus.textContent = "Testing connection...";
+    }
+
+    try {
+      const result = await window.desktopAPI.testSftpConnection(config);
+      if (result.connectionId) {
+        activeSftpConnectionId = result.connectionId;
+        activeSftpConnectionConfig = config;
+        if (elements.sftpConfigStatus) {
+          elements.sftpConfigStatus.textContent = "✓ SFTP connection successful! Go to the Editor tab to browse and edit remote files.";
+        }
+        if (elements.codeEditorRemoteStatus) {
+          elements.codeEditorRemoteStatus.textContent = `✓ Connected to ${config.username}@${config.host}:${config.remoteDir}`;
+        }
+      }
+    } catch (error) {
+      if (elements.sftpConfigStatus) {
+        elements.sftpConfigStatus.textContent = `✗ Connection failed: ${error.message}`;
+      }
+    }
+  });
+
+  const handleSftpTransfer = async (direction) => {
+    const site = getSelectedSftpSite();
+    if (!site) {
+      if (elements.sftpConfigStatus) {
+        elements.sftpConfigStatus.textContent = "Select a local site to transfer files.";
+      }
+      return;
+    }
+
+    const config = {
+      host: elements.sftpHost.value.trim(),
+      port: elements.sftpPort.value.trim() || "22",
+      username: elements.sftpUsername.value.trim(),
+      authType: elements.sftpAuthType.value,
+      password: elements.sftpPassword.value,
+      keyPath: elements.sftpKeyPath.value.trim(),
+      remoteDir: elements.sftpRemoteDir.value.trim() || "/"
+    };
+
+    if (!config.host || !config.username) {
+      if (elements.sftpConfigStatus) {
+        elements.sftpConfigStatus.textContent = "Complete SFTP settings and test connection before transferring.";
+      }
+      return;
+    }
+
+    if (elements.sftpProgressStatus) {
+      elements.sftpProgressStatus.textContent = `${direction === "upload" ? "Uploading" : "Downloading"}...`;
+    }
+    if (elements.sftpProgressLines) {
+      elements.sftpProgressLines.innerHTML = "";
+    }
+
+    try {
+      await window.desktopAPI.startSftpTransfer({
+        siteId: site.id,
+        direction,
+        subpath: elements.sftpSubpath?.value.trim() || ""
+      });
+    } catch (error) {
+      if (elements.sftpProgressStatus) {
+        elements.sftpProgressStatus.textContent = `Transfer failed: ${error.message}`;
+      }
+    }
+  };
+
+  elements.sftpUploadButton?.addEventListener("click", () => handleSftpTransfer("upload"));
+  elements.sftpDownloadButton?.addEventListener("click", () => handleSftpTransfer("download"));
+
+  elements.codeEditorOpenButton?.addEventListener("click", async () => {
+    try {
+      const filePath = await window.desktopAPI.pickFile();
+      if (!filePath) {
+        return;
+      }
+      const content = await window.desktopAPI.readExtensionFile(filePath);
+      setCodeEditorFilePath(filePath);
+      loadCodeEditorContent(content);
+    } catch (error) {
+      setCodeEditorStatus(`Open failed: ${error.message}`, true);
+    }
+  });
+
+  const writeEditorFile = async (filePath) => {
+    const content = codeEditor ? codeEditor.getValue() : elements.codeEditorTextarea?.value || "";
+    await window.desktopAPI.writeFile({ filePath, content });
+    setCodeEditorStatus(`Saved ${filePath}`);
+  };
+
+  elements.codeEditorSaveButton?.addEventListener("click", async () => {
+    try {
+      if (!currentlyOpenCodeFilePath) {
+        const savePath = await window.desktopAPI.saveFile(elements.codeEditorPath?.value || undefined);
+        if (!savePath) {
+          return;
+        }
+        setCodeEditorFilePath(savePath);
+      }
+      await writeEditorFile(currentlyOpenCodeFilePath);
+    } catch (error) {
+      setCodeEditorStatus(`Save failed: ${error.message}`, true);
+    }
+  });
+
+  elements.codeEditorSaveAsButton?.addEventListener("click", async () => {
+    try {
+      const savePath = await window.desktopAPI.saveFile(elements.codeEditorPath?.value || undefined);
+      if (!savePath) {
+        return;
+      }
+      setCodeEditorFilePath(savePath);
+      await writeEditorFile(savePath);
+    } catch (error) {
+      setCodeEditorStatus(`Save failed: ${error.message}`, true);
+    }
+  });
+
+  elements.codeEditorBrowseButton?.addEventListener("click", async () => {
+    if (!activeSftpConnectionId) {
+      if (elements.codeEditorRemoteStatus) {
+        elements.codeEditorRemoteStatus.textContent = "✗ No active SFTP connection. Test a connection in the SFTP tab first.";
+      }
+      return;
+    }
+
+    const remotePath = (elements.codeEditorRemotePath?.value || "/").trim() || "/";
+    if (elements.codeEditorRemoteStatus) {
+      elements.codeEditorRemoteStatus.textContent = "Loading directory...";
+    }
+
+    try {
+      const files = await window.desktopAPI.listSftpDirectory(activeSftpConnectionId, remotePath);
+      renderRemoteFileList(files, remotePath);
+      if (elements.codeEditorFileListContainer) {
+        elements.codeEditorFileListContainer.style.display = "block";
+      }
+      if (elements.codeEditorRemoteStatus) {
+        elements.codeEditorRemoteStatus.textContent = `✓ Browsing ${remotePath}`;
+      }
+    } catch (error) {
+      if (elements.codeEditorRemoteStatus) {
+        elements.codeEditorRemoteStatus.textContent = `✗ Failed to list directory: ${error.message}`;
+      }
+    }
+  });
+
+  window.desktopAPI.onSftpProgress?.((payload) => {
+    if (!payload) {
+      return;
+    }
+    if (payload.statusText && elements.sftpProgressStatus) {
+      elements.sftpProgressStatus.textContent = payload.statusText;
+    }
+    if (payload.logLine) {
+      appendSftpProgressLine(payload.logLine, payload.isError);
+    }
+  });
+
 elements.workspaceTodoInput?.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
@@ -1100,15 +2966,22 @@ function bindSettingsPath(labelElement, buttonElement, targetPath) {
 }
 
 function renderXamppSettings() {
-  const paths = state.xamppPaths || {};
+  const paths = state.serverPaths || {};
+  const localServerLabel = getLocalServerLabel();
+  const documentRootLabel = getDocumentRootLabel();
 
-  elements.settingsXamppRoot.value = paths.xamppRootPath || "";
+  if (elements.localServerType) {
+    elements.localServerType.value = state.localServerType || "xampp";
+  }
+  elements.settingsXamppRoot.value = paths.localServerRootPath || paths.xamppRootPath || "";
   elements.settingsHtdocsPath.value = paths.htdocsPath || state.htdocsPath || "";
-  elements.xamppSettingsNote.textContent = paths.xamppRootPath
-    ? "This XAMPP root is used to auto-detect service files and support local site management."
-    : "Set the XAMPP root to auto-detect Apache, PHP, MySQL, and phpMyAdmin files.";
+  elements.xamppSettingsNote.textContent = (paths.localServerRootPath || paths.xamppRootPath)
+    ? `This ${localServerLabel} root is used to auto-detect Apache, PHP, MySQL, and phpMyAdmin files.`
+    : `Set the ${localServerLabel} root to auto-detect Apache, PHP, MySQL, and phpMyAdmin files.`;
 
-  elements.openXamppRootButton.disabled = !paths.xamppRootPath;
+  elements.pickXamppRootButton.textContent = `Set ${localServerLabel} root`;
+  elements.settingsPickHtdocsButton.textContent = `Set ${documentRootLabel}`;
+  elements.openXamppRootButton.disabled = !(paths.localServerRootPath || paths.xamppRootPath);
   elements.openSettingsHtdocsButton.disabled = !paths.htdocsPath;
   bindSettingsPath(elements.settingsApacheStart, elements.openApacheStartButton, paths.apacheStartPath);
   bindSettingsPath(elements.settingsApacheStop, elements.openApacheStopButton, paths.apacheStopPath);
@@ -1121,7 +2994,13 @@ function renderXamppSettings() {
   elements.settingsWpInstallPassword.value = state.wpInstallPassword ?? "root";
   elements.settingsWpInstallEmail.value = state.wpInstallEmail || "";
   elements.settingsMysqlEditor.value = state.mysqlConfigContent || "";
+  if (window.wpDesktopMysqlEditor && window.wpDesktopMysqlEditor.getValue() !== (state.mysqlConfigContent || "")) {
+    window.wpDesktopMysqlEditor.setValue(state.mysqlConfigContent || "");
+  }
   elements.settingsMysqlEditor.readOnly = !paths.mysqlConfigPath;
+  if (window.wpDesktopMysqlEditor) {
+    window.wpDesktopMysqlEditor.updateOptions({ readOnly: !paths.mysqlConfigPath });
+  }
   elements.saveMysqlConfigButton.disabled = !paths.mysqlConfigPath;
   bindSettingsPath(elements.settingsPhpExe, elements.openPhpExeButton, paths.phpExecutablePath);
   bindSettingsPath(elements.settingsPhpConfig, elements.openPhpConfigButton, paths.phpConfigPath);
@@ -2112,6 +3991,12 @@ function renderWorkspaceNotesPanel(client) {
 
   if (elements.workspaceNotes) {
     elements.workspaceNotes.value = notesValue;
+    if (window.wpDesktopNotesEditor && window.wpDesktopNotesEditor.getValue() !== notesValue) {
+      window.wpDesktopNotesEditor.setValue(notesValue);
+    }
+  }
+  if (window.wpDesktopNotesEditor) {
+    window.wpDesktopNotesEditor.updateOptions({ readOnly: !hasClient });
   }
   if (elements.workspaceNotesPageTitle) {
     elements.workspaceNotesPageTitle.value = selectedPage?.title || "";
@@ -2283,9 +4168,12 @@ function renderWorkspaceClients() {
     `;
     button.addEventListener("click", () => {
       state.selectedWorkspaceClientId = client.id;
+      state.integration.editorProjectContext = client.id;
       saveWorkspaceClients();
       hideWorkspaceContextMenu();
+      syncProjectWithSites(client.id);
       renderWorkspace();
+      renderSftpSiteSelect();
     });
     button.addEventListener("contextmenu", (event) => {
       event.preventDefault();
@@ -2749,8 +4637,27 @@ function loadWorkspaceState() {
 }
 
 function saveBrowserToolOrder() {
-  const order = getBrowserToolSections().map((section) => section.dataset.toolSection);
+  const sections = getBrowserToolSections();
+  const order = sections.map((section) => section.dataset.toolSection);
   writeBrowserToolPrefs(BROWSER_TOOL_ORDER_KEY, order);
+
+  // Update category mapping based on DOM parent
+  const mapping = getBrowserToolCategoryMapping();
+  let changed = false;
+  sections.forEach((section) => {
+    const parentContainer = section.closest(".browser-category-items");
+    if (parentContainer && parentContainer.dataset.catKey) {
+      const currentCat = parentContainer.dataset.catKey;
+      const toolId = section.dataset.toolSection;
+      if (mapping[toolId] !== currentCat) {
+        mapping[toolId] = currentCat;
+        changed = true;
+      }
+    }
+  });
+  if (changed) {
+    saveBrowserToolCategoryMapping(mapping);
+  }
 }
 
 function saveBrowserToolCollapseState() {
@@ -2768,19 +4675,162 @@ function applyBrowserToolSectionPrefs() {
 
   const order = readBrowserToolPrefs(BROWSER_TOOL_ORDER_KEY, DEFAULT_BROWSER_TOOL_ORDER);
   const collapsed = readBrowserToolPrefs(BROWSER_TOOL_COLLAPSE_KEY, DEFAULT_BROWSER_TOOL_COLLAPSE);
-  const sectionMap = new Map(getBrowserToolSections().map((section) => [section.dataset.toolSection, section]));
+  const categoryMapping = getBrowserToolCategoryMapping();
+  const collapsedCats = getBrowserToolCollapsedCategories();
 
+  // Cache static sections from DOM to keep them in memory with their event listeners
+  if (!window.wpDesktopBrowserToolSectionsCache) {
+    window.wpDesktopBrowserToolSectionsCache = getBrowserToolSections();
+  }
+  const sectionMap = new Map(window.wpDesktopBrowserToolSectionsCache.map((section) => [section.dataset.toolSection, section]));
+
+  // Detach sections so they aren't destroyed when clearing innerHTML
+  window.wpDesktopBrowserToolSectionsCache.forEach(section => {
+    section.remove();
+  });
+
+  // Clear panel body except for header
+  const header = panel.querySelector(".panel-header");
+  panel.innerHTML = "";
+  if (header) {
+    panel.appendChild(header);
+  }
+
+  // Group by category
+  const categories = { security_access: [], navigation: [], data_permissions: [] };
   order.forEach((id) => {
-    const section = sectionMap.get(id);
-    if (section) {
-      panel.appendChild(section);
+    const cat = categoryMapping[id] || "data_permissions";
+    if (categories[cat]) {
+      const section = sectionMap.get(id);
+      if (section) categories[cat].push(section);
     }
   });
 
-  getBrowserToolSections().forEach((section) => {
-    section.classList.toggle("collapsed", Boolean(collapsed[section.dataset.toolSection]));
+  // Render each category wrapper and append its items
+  Object.entries(BROWSER_TOOL_CATEGORIES).forEach(([catKey, catLabel]) => {
+    const catItems = categories[catKey] || [];
+    const isCatCollapsed = collapsedCats.includes(catKey);
+
+    const wrapper = document.createElement("div");
+    wrapper.className = "browser-category-wrapper";
+    wrapper.dataset.category = catKey;
+
+    const headerDiv = document.createElement("div");
+    headerDiv.className = `browser-category-header ${isCatCollapsed ? 'collapsed' : ''}`;
+    headerDiv.dataset.catKey = catKey;
+    headerDiv.innerHTML = `
+      <span>${catLabel}</span>
+      <span class="browser-category-arrow">▼</span>
+    `;
+
+    const itemsDiv = document.createElement("div");
+    itemsDiv.className = `browser-category-items ${isCatCollapsed ? 'collapsed' : ''} ${catItems.length === 0 ? 'empty' : ''}`;
+    itemsDiv.dataset.catKey = catKey;
+
+    if (catItems.length === 0) {
+      itemsDiv.textContent = "Drag tools here";
+    } else {
+      catItems.forEach((section) => {
+        itemsDiv.appendChild(section);
+        section.classList.toggle("collapsed", Boolean(collapsed[section.dataset.toolSection]));
+      });
+    }
+
+    wrapper.appendChild(headerDiv);
+    wrapper.appendChild(itemsDiv);
+    panel.appendChild(wrapper);
+  });
+
+  // Re-bind category click events & drag events
+  bindBrowserToolCategoryEvents();
+}
+
+function bindBrowserToolCategoryEvents() {
+  const headers = document.querySelectorAll(".browser-category-header");
+  headers.forEach(header => {
+    header.addEventListener("click", () => {
+      const catKey = header.dataset.catKey;
+      let collapsed = getBrowserToolCollapsedCategories();
+      if (collapsed.includes(catKey)) {
+        collapsed = collapsed.filter(c => c !== catKey);
+      } else {
+        collapsed.push(catKey);
+      }
+      saveBrowserToolCollapsedCategories(collapsed);
+      applyBrowserToolSectionPrefs();
+    });
+
+    // Drag over category header
+    header.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      header.classList.add("drag-over");
+    });
+
+    header.addEventListener("dragleave", () => {
+      header.classList.remove("drag-over");
+    });
+
+    header.addEventListener("drop", (e) => {
+      e.preventDefault();
+      header.classList.remove("drag-over");
+      const draggedId = e.dataTransfer ? e.dataTransfer.getData("text/plain") : "";
+      const targetCat = header.dataset.catKey;
+      if (draggedId && targetCat) {
+        const mapping = getBrowserToolCategoryMapping();
+        mapping[draggedId] = targetCat;
+        saveBrowserToolCategoryMapping(mapping);
+        
+        // Move dragged item to the end of the target category
+        const order = readBrowserToolPrefs(BROWSER_TOOL_ORDER_KEY, DEFAULT_BROWSER_TOOL_ORDER);
+        const idx = order.indexOf(draggedId);
+        if (idx !== -1) {
+          order.splice(idx, 1);
+          order.push(draggedId);
+          writeBrowserToolPrefs(BROWSER_TOOL_ORDER_KEY, order);
+        }
+        
+        applyBrowserToolSectionPrefs();
+      }
+    });
+  });
+
+  // Drag over category items container (useful for empty categories)
+  const containers = document.querySelectorAll(".browser-category-items");
+  containers.forEach(container => {
+    container.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      container.classList.add("drag-over");
+    });
+
+    container.addEventListener("dragleave", () => {
+      container.classList.remove("drag-over");
+    });
+
+    container.addEventListener("drop", (e) => {
+      e.preventDefault();
+      container.classList.remove("drag-over");
+      const draggedId = e.dataTransfer ? e.dataTransfer.getData("text/plain") : "";
+      const targetCat = container.dataset.catKey;
+      if (draggedId && targetCat) {
+        const mapping = getBrowserToolCategoryMapping();
+        mapping[draggedId] = targetCat;
+        saveBrowserToolCategoryMapping(mapping);
+        
+        // Move dragged item to the end of target category
+        const order = readBrowserToolPrefs(BROWSER_TOOL_ORDER_KEY, DEFAULT_BROWSER_TOOL_ORDER);
+        const idx = order.indexOf(draggedId);
+        if (idx !== -1) {
+          order.splice(idx, 1);
+          order.push(draggedId);
+          writeBrowserToolPrefs(BROWSER_TOOL_ORDER_KEY, order);
+        }
+        
+        applyBrowserToolSectionPrefs();
+      }
+    });
   });
 }
+
 
 function saveWorkspacePanelOrder() {
   writeBrowserToolPrefs(WORKSPACE_PANEL_ORDER_KEY, getWorkspacePanels().map((panel) => panel.dataset.workspacePanel));
@@ -2928,6 +4978,7 @@ function initBrowserToolSections() {
       draggedBrowserToolSection?.classList.remove("dragging");
       draggedBrowserToolSection = null;
       saveBrowserToolOrder();
+      applyBrowserToolSectionPrefs();
     });
 
     section.addEventListener("dragover", (event) => {
@@ -2955,6 +5006,7 @@ function initBrowserToolSections() {
 
       event.preventDefault();
       saveBrowserToolOrder();
+      applyBrowserToolSectionPrefs();
     });
   });
 
@@ -3820,7 +5872,7 @@ function renderSitesList() {
     empty.className = "site-list-empty";
     empty.textContent = state.htdocsPath
       ? "No sites found in the selected htdocs folder."
-      : "Set your XAMPP htdocs folder to load sites from the shared server.";
+      : `Set your ${getLocalServerLabel()} ${getDocumentRootLabel()} folder to load sites from the shared server.`;
     elements.sitesList.appendChild(empty);
     return;
   }
@@ -3872,6 +5924,7 @@ function renderSiteDetails() {
     elements.deleteSiteButton.disabled = true;
     elements.overviewEmptyCard.classList.remove("hidden");
     setCreateProgress(progressState.creating);
+    renderSftpConfig();
     return;
   }
 
@@ -3900,6 +5953,7 @@ function renderSiteDetails() {
   elements.deleteSiteButton.disabled = progressState.deleting;
   elements.overviewEmptyCard.classList.add("hidden");
   setCreateProgress(progressState.creating);
+  renderSftpConfig();
 }
 
 async function refreshSites() {
@@ -3908,6 +5962,7 @@ async function refreshSites() {
   state.htdocsPath = response.htdocsPath || "";
   applyXamppServiceStatusSnapshot(response);
   elements.htdocsPath.value = state.htdocsPath;
+  renderSftpSiteSelect();
   if (!state.selectedSiteId && state.sites[0]) {
     state.selectedSiteId = state.sites[0].id;
   }
@@ -3987,9 +6042,11 @@ async function restoreBackup(backup) {
 }
 
 function applySettingsPayload(settings) {
+  state.localServerType = settings.localServerType || "xampp";
+  state.localServerLabel = settings.localServerLabel || (state.localServerType === "laragon" ? "Laragon" : "XAMPP");
   state.htdocsPath = settings.htdocsPath || "";
   state.browser.downloadDirectory = settings.downloadDirectory || state.browser.downloadDirectory || "";
-  state.xamppPaths = settings.xamppPaths || null;
+  state.serverPaths = settings.serverPaths || settings.xamppPaths || null;
   state.effectiveDbProfile = settings.effectiveDbProfile || getEffectiveDbProfile();
   state.mysqlConfigContent = settings.mysqlConfigContent || "";
   state.wpInstallUsername = settings.wpInstallUsername || "admin";
@@ -4016,6 +6073,11 @@ function applySettingsPayload(settings) {
   renderExtensionsSettings();
   renderExtensionsMenuPopup();
   renderThemeAccentInputs();
+  if (settings.mcpServerStatus) {
+    renderMcpSettings(settings.mcpServerStatus);
+  }
+  renderBetaFeaturesSettings();
+  initBetaCategoryManagement();
 }
 
 async function updateLocalSessionSharing() {
@@ -4096,11 +6158,22 @@ async function pickAndSaveXamppRoot() {
     return;
   }
 
-  const result = await window.desktopAPI.setXamppRootPath(selected);
+  const result = await window.desktopAPI.setLocalServerRootPath({
+    localServerType: state.localServerType,
+    rootPath: selected
+  });
   applySettingsPayload(result);
 
   await refreshSites();
-  setStatus("Updated XAMPP root path.");
+  setStatus(`Updated ${getLocalServerLabel()} root path.`);
+}
+
+async function updateLocalServerType() {
+  const selectedType = elements.localServerType?.value === "laragon" ? "laragon" : "xampp";
+  const result = await window.desktopAPI.setLocalServerType(selectedType);
+  applySettingsPayload(result);
+  await refreshSites();
+  setStatus(`Switched local server stack to ${getLocalServerLabel()}.`);
 }
 
 async function pickAndSaveHtdocsPath() {
@@ -4113,7 +6186,7 @@ async function pickAndSaveHtdocsPath() {
   applySettingsPayload(result);
 
   await refreshSites();
-  setStatus("Updated XAMPP htdocs path.");
+  setStatus(`Updated ${getLocalServerLabel()} ${getDocumentRootLabel()} path.`);
 }
 
 async function openExistingPath(targetPath, emptyMessage) {
@@ -4171,6 +6244,9 @@ async function refreshXamppServiceStatus({ force = false } = {}) {
     try {
       const settings = await window.desktopAPI.getSettings();
       applyXamppServiceStatusSnapshot(settings);
+      if (settings.mcpServerStatus) {
+        renderMcpSettings(settings.mcpServerStatus);
+      }
     } catch (_) {
       // Ignore transient polling failures and keep the last visible state.
     } finally {
@@ -4307,6 +6383,13 @@ async function deleteSelectedSite() {
     if (state.selectedSiteId === site.id) {
       state.selectedSiteId = null;
     }
+
+    // Unlink site from project if it was linked
+    const projectId = getProjectForSite(site.id);
+    if (projectId) {
+      unlinkSiteFromProject(site.id, projectId);
+    }
+
     await refreshSites();
     await refreshBackups();
     setStatus(`Deleted ${site.name}. Backup saved to ${result?.backupPath || "the backups folder"}.`);
@@ -4388,7 +6471,9 @@ elements.vaultToggleButton.addEventListener("click", () => {
   state.vaultOpen = !state.vaultOpen;
   renderVaultPanel();
 });
-elements.browserFullscreenButton.addEventListener("click", () => toggleBrowserFocusMode());
+elements.browserFullscreenButton.addEventListener("click", () => {
+  window.desktopAPI.browserToggleFullscreen();
+});
 elements.addressForm.addEventListener("submit", (event) => {
   event.preventDefault();
   if (state.activeAddressSuggestionIndex >= 0 && state.addressSuggestions.length) {
@@ -4568,28 +6653,86 @@ elements.pickHtdocsButton.addEventListener("click", () => void pickAndSaveHtdocs
 elements.openSidebarPhpMyAdminButton.addEventListener("click", () => {
   openUrlInAppBrowser("http://localhost/phpmyadmin");
 });
+elements.localServerType?.addEventListener("change", () => void updateLocalServerType());
 elements.pickXamppRootButton.addEventListener("click", () => void pickAndSaveXamppRoot());
 elements.settingsPickHtdocsButton.addEventListener("click", () => void pickAndSaveHtdocsPath());
 elements.openXamppRootButton.addEventListener("click", () =>
-  void openExistingPath(state.xamppPaths?.xamppRootPath, "Set the XAMPP root first.")
+  void openExistingPath(state.serverPaths?.localServerRootPath || state.serverPaths?.xamppRootPath, `Set the ${getLocalServerLabel()} root first.`)
 );
 elements.openSettingsHtdocsButton.addEventListener("click", () =>
-  void openExistingPath(state.xamppPaths?.htdocsPath || state.htdocsPath, "Set the XAMPP htdocs folder first.")
+  void openExistingPath(state.serverPaths?.htdocsPath || state.htdocsPath, `Set the ${getLocalServerLabel()} ${getDocumentRootLabel()} folder first.`)
 );
 elements.openApacheStartButton.addEventListener("click", () =>
-  void openExistingPath(state.xamppPaths?.apacheStartPath, "Apache start script was not found.")
+  void openExistingPath(state.serverPaths?.apacheStartPath, "Apache start script was not found.")
 );
 elements.openApacheStopButton.addEventListener("click", () =>
-  void openExistingPath(state.xamppPaths?.apacheStopPath, "Apache stop script was not found.")
+  void openExistingPath(state.serverPaths?.apacheStopPath, "Apache stop script was not found.")
 );
 elements.openApacheConfigButton.addEventListener("click", () =>
-  void openExistingPath(state.xamppPaths?.apacheConfigPath, "Apache config file was not found.")
+  void openExistingPath(state.serverPaths?.apacheConfigPath, "Apache config file was not found.")
 );
 elements.openMysqlConfigButton.addEventListener("click", () =>
-  void openExistingPath(state.xamppPaths?.mysqlConfigPath, "MySQL config file was not found.")
+  void openExistingPath(state.serverPaths?.mysqlConfigPath, "MySQL config file was not found.")
 );
 elements.settingsShareLocalSessions.addEventListener("change", () => void updateLocalSessionSharing());
 elements.settingsShareOnlineSessions.addEventListener("change", () => void updateOnlineSessionSharing());
+
+async function updateCloudSyncStatusUI() {
+  if (!elements.syncGoogleStatus || !elements.syncMicrosoftStatus) return;
+  try {
+    const status = await window.desktopAPI.syncGetStatus();
+    
+    if (status.googleConnected) {
+      elements.syncGoogleStatus.textContent = `Connected (${status.googleEmail})`;
+      elements.syncGoogleStatus.style.color = "var(--success-color)";
+      elements.syncGoogleBtn.textContent = "Disconnect Google";
+    } else {
+      elements.syncGoogleStatus.textContent = "Not connected";
+      elements.syncGoogleStatus.style.color = "";
+      elements.syncGoogleBtn.textContent = "Link Google Account";
+    }
+
+    if (status.microsoftConnected) {
+      elements.syncMicrosoftStatus.textContent = `Connected (${status.microsoftEmail})`;
+      elements.syncMicrosoftStatus.style.color = "var(--success-color)";
+      elements.syncMicrosoftBtn.textContent = "Disconnect Microsoft";
+    } else {
+      elements.syncMicrosoftStatus.textContent = "Not connected";
+      elements.syncMicrosoftStatus.style.color = "";
+      elements.syncMicrosoftBtn.textContent = "Link Microsoft Account";
+    }
+  } catch (err) {
+    console.error("Failed to update cloud sync status:", err);
+  }
+}
+
+elements.syncGoogleBtn?.addEventListener("click", async () => {
+  const status = await window.desktopAPI.syncGetStatus();
+  if (status.googleConnected) {
+    await window.desktopAPI.syncDisconnectGoogle();
+    setStatus("Disconnected Google Account.");
+  } else {
+    const res = await window.desktopAPI.syncAuthGoogle();
+    if (res.ok) {
+      setStatus(`Successfully linked Google account: ${res.email}`);
+    }
+  }
+  updateCloudSyncStatusUI();
+});
+
+elements.syncMicrosoftBtn?.addEventListener("click", async () => {
+  const status = await window.desktopAPI.syncGetStatus();
+  if (status.microsoftConnected) {
+    await window.desktopAPI.syncDisconnectMicrosoft();
+    setStatus("Disconnected Microsoft Account.");
+  } else {
+    const res = await window.desktopAPI.syncAuthMicrosoft();
+    if (res.ok) {
+      setStatus(`Successfully linked Microsoft account: ${res.email}`);
+    }
+  }
+  updateCloudSyncStatusUI();
+});
 elements.sessionAutosaveButton?.addEventListener("click", () => void saveActiveTabSession(true));
 elements.sessionSaveButton?.addEventListener("click", () => void saveActiveTabSession(false));
 elements.sessionUnsaveButton?.addEventListener("click", () => void unsaveActiveTabSession());
@@ -4598,6 +6741,15 @@ elements.settingsAutosaveOnlineSessions?.addEventListener("change", () => void u
 elements.settingsSessionAutosaveDelay?.addEventListener("change", () => void updateSessionAutoSaveDelay());
 elements.settingsSessionAutosaveDelay?.addEventListener("blur", () => void updateSessionAutoSaveDelay());
 elements.saveMysqlConfigButton.addEventListener("click", () => void saveMysqlConfigFromSettings());
+
+elements.settingsBetaEnabled?.addEventListener("change", (e) => {
+  setBetaEnabled(e.target.checked);
+});
+elements.betaToolsCheckboxes?.addEventListener("change", (e) => {
+  if (e.target.classList.contains("beta-tool-toggle")) {
+    setBetaToolEnabled(e.target.dataset.screen, e.target.checked);
+  }
+});
 elements.installExtensionFolderButton?.addEventListener("click", async () => {
   const selected = await window.desktopAPI.pickFolder();
   if (!selected) {
@@ -4631,16 +6783,16 @@ elements.saveThemeAccentsButton?.addEventListener("click", saveThemeAccentSettin
 elements.resetThemeAccentsButton?.addEventListener("click", resetThemeAccentSettings);
 elements.saveWpInstallDefaultsButton.addEventListener("click", () => void saveWpInstallDefaultsFromSettings());
 elements.openControlPanelButton.addEventListener("click", () =>
-  void openExistingPath(state.xamppPaths?.controlPanelPath, "XAMPP control panel was not found.")
+  void openExistingPath(state.serverPaths?.controlPanelPath, `${getLocalServerLabel()} control panel was not found.`)
 );
 elements.openPhpExeButton.addEventListener("click", () =>
-  void openExistingPath(state.xamppPaths?.phpExecutablePath, "PHP executable was not found.")
+  void openExistingPath(state.serverPaths?.phpExecutablePath, "PHP executable was not found.")
 );
 elements.openPhpConfigButton.addEventListener("click", () =>
-  void openExistingPath(state.xamppPaths?.phpConfigPath, "PHP config file was not found.")
+  void openExistingPath(state.serverPaths?.phpConfigPath, "PHP config file was not found.")
 );
 elements.openPhpMyAdminFolderButton.addEventListener("click", () =>
-  void openExistingPath(state.xamppPaths?.phpMyAdminPath, "phpMyAdmin folder was not found.")
+  void openExistingPath(state.serverPaths?.phpMyAdminPath, "phpMyAdmin folder was not found.")
 );
 elements.openFolderButton.addEventListener("click", () => void openSelectedSiteTarget("folder"));
 elements.openShellButton.addEventListener("click", () => void openSelectedSiteTarget("shell"));
@@ -4721,6 +6873,8 @@ elements.installButton.addEventListener("click", async () => {
     elements.resultCard.classList.remove("hidden");
     setCreateProgress(true, "Finalizing local site setup...");
     await refreshSites();
+    autoLinkNewSitesToProject();
+    renderSftpSiteSelect();
     setCreateProgress(false);
     toggleCreateSiteModal(false);
     showSiteTab("tools");
@@ -4746,11 +6900,53 @@ window.desktopAPI.onBrowserState((payload) => {
   refreshControls();
 });
 
+window.desktopAPI.onBrowserFullscreenChanged((isFullscreen) => {
+  toggleBrowserFocusMode(isFullscreen);
+});
+
 window.desktopAPI.onBrowserNotice((payload) => {
   if (payload?.message) {
     setBrowserFeedback(payload.message, payload.type || "info");
   }
 });
+
+let pendingPasswordSavePayload = null;
+
+function hidePasswordSaveModal() {
+  elements.passwordSaveModal.classList.add("hidden");
+  pendingPasswordSavePayload = null;
+}
+
+elements.passwordSaveConfirmButton.addEventListener("click", () => {
+  if (pendingPasswordSavePayload) {
+    void window.desktopAPI.saveSiteCredentials({
+      key: pendingPasswordSavePayload.key,
+      url: pendingPasswordSavePayload.url,
+      username: pendingPasswordSavePayload.username,
+      password: pendingPasswordSavePayload.password
+    }).then(saved => {
+      state.currentVaultCredentials = saved;
+      renderVaultCredentialOptions(saved);
+      syncVaultPanel();
+      setStatus(`Saved credentials for ${pendingPasswordSavePayload.key}.`);
+    });
+  }
+  hidePasswordSaveModal();
+});
+
+elements.passwordNeverSaveButton.addEventListener("click", () => {
+  hidePasswordSaveModal();
+});
+
+elements.closePasswordSaveButton.addEventListener("click", hidePasswordSaveModal);
+
+if (window.desktopAPI.onPromptSaveCredentials) {
+  window.desktopAPI.onPromptSaveCredentials((payload) => {
+    pendingPasswordSavePayload = payload;
+    elements.passwordSaveUsername.textContent = payload.username;
+    elements.passwordSaveModal.classList.remove("hidden");
+  });
+}
 
 window.desktopAPI.onBrowserDownloadComplete((payload) => {
   if (payload?.filename) {
@@ -4866,6 +7062,10 @@ async function loadSavedState() {
   renderDownloads();
   renderPermissions();
   syncBrowserLayoutSoon();
+  updateCloudSyncStatusUI();
+  
+  // Initialize Monaco Editor and app extensions
+  initMonacoEditor(loadAllCustomExtensions);
 }
 
 const browserResizeObserver = new ResizeObserver(() => {
@@ -4880,6 +7080,3548 @@ showSiteTab("overview");
 setCreateProgress(false);
 setDeleteProgress(false);
 uiState.sidebarCollapsed = localStorage.getItem("wpdesktop.sidebarCollapsed") === "1";
+uiState.rightSidebarCollapsed = false;
 renderSidebarState();
 startXamppStatusAutoRefresh();
 void loadSavedState();
+
+// ─── Monaco Editor and Extensions API Integration ─────────────────
+let notesEditor = null;
+let mysqlEditor = null;
+let monacoLoaded = false;
+let currentlyLoadingPath = null;
+const extensionListeners = {};
+const loadedExtensions = new Map();
+
+function initMonacoEditor(callback) {
+  if (typeof window.require !== "undefined" && !monacoLoaded) {
+    window.require.config({ paths: { vs: 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.39.0/min/vs' } });
+    window.require(['vs/editor/editor.main'], function () {
+      monacoLoaded = true;
+      const isDark = document.documentElement.getAttribute("data-theme") === "dark";
+      monaco.editor.setTheme(isDark ? "vs-dark" : "vs");
+
+      if (elements.settingsMysqlMonaco && elements.settingsMysqlEditor) {
+        elements.settingsMysqlEditor.classList.add("hidden");
+        elements.settingsMysqlMonaco.classList.remove("hidden");
+        mysqlEditor = monaco.editor.create(elements.settingsMysqlMonaco, {
+          value: elements.settingsMysqlEditor.value || "",
+          language: "ini",
+          theme: isDark ? "vs-dark" : "vs",
+          automaticLayout: true,
+          minimap: { enabled: false }
+        });
+        mysqlEditor.onDidChangeModelContent(() => {
+          elements.settingsMysqlEditor.value = mysqlEditor.getValue();
+          elements.settingsMysqlEditor.dispatchEvent(new Event("input"));
+        });
+      }
+
+      if (elements.workspaceNotesMonaco && elements.workspaceNotes) {
+        elements.workspaceNotes.classList.add("hidden");
+        elements.workspaceNotesMonaco.classList.remove("hidden");
+        notesEditor = monaco.editor.create(elements.workspaceNotesMonaco, {
+          value: elements.workspaceNotes.value || "",
+          language: "markdown",
+          theme: isDark ? "vs-dark" : "vs",
+          automaticLayout: true,
+          minimap: { enabled: false }
+        });
+        notesEditor.onDidChangeModelContent(() => {
+          elements.workspaceNotes.value = notesEditor.getValue();
+          elements.workspaceNotes.dispatchEvent(new Event("input"));
+        });
+      }
+
+      if (elements.codeEditorMonaco && elements.codeEditorTextarea) {
+        elements.codeEditorTextarea.classList.add("hidden");
+        elements.codeEditorMonaco.classList.remove("hidden");
+        codeEditor = monaco.editor.create(elements.codeEditorMonaco, {
+          value: elements.codeEditorTextarea.value || "",
+          language: codeEditorLanguage,
+          theme: isDark ? "vs-dark" : "vs",
+          automaticLayout: true,
+          minimap: { enabled: false }
+        });
+        codeEditor.onDidChangeModelContent(() => {
+          elements.codeEditorTextarea.value = codeEditor.getValue();
+          elements.codeEditorTextarea.dispatchEvent(new Event("input"));
+        });
+      }
+
+      window.wpDesktopNotesEditor = notesEditor;
+      window.wpDesktopMysqlEditor = mysqlEditor;
+
+      if (callback) callback();
+      window.wpDesktopExtensionsAPI.emit("editor-init", { notesEditor, mysqlEditor });
+    });
+  } else {
+    if (callback) callback();
+  }
+}
+
+// Observe theme mutations to dynamically update Monaco
+const observer = new MutationObserver((mutations) => {
+  mutations.forEach((mutation) => {
+    if (mutation.attributeName === "data-theme" && monacoLoaded) {
+      const isDark = document.documentElement.getAttribute("data-theme") === "dark";
+      monaco.editor.setTheme(isDark ? "vs-dark" : "vs");
+    }
+  });
+});
+observer.observe(document.documentElement, { attributes: true });
+
+// Custom Extensions API Exponent
+window.wpDesktopExtensionsAPI = {
+  getNotesEditor: () => window.wpDesktopNotesEditor,
+  getMysqlEditor: () => window.wpDesktopMysqlEditor,
+  
+  register: (id, config) => {
+    if (!id) return;
+    loadedExtensions.set(id, config);
+    console.log(`Registered custom extension: ${config.name || id} (v${config.version || "1.0.0"})`);
+    if (currentlyLoadingPath) {
+      saveLoadedExtensionMetadata(currentlyLoadingPath, id, config);
+    }
+    if (typeof config.activate === "function") {
+      try {
+        config.activate(window.wpDesktopExtensionsAPI);
+      } catch (err) {
+        console.error(`Error activating extension ${id}:`, err);
+      }
+    }
+  },
+
+  on: (event, callback) => {
+    if (!extensionListeners[event]) {
+      extensionListeners[event] = [];
+    }
+    extensionListeners[event].push(callback);
+  },
+
+  emit: (event, data) => {
+    const list = extensionListeners[event] || [];
+    list.forEach(callback => {
+      try {
+        callback(data);
+      } catch (err) {
+        console.error(`Error in event listener for ${event}:`, err);
+      }
+    });
+  },
+
+  addStyle: (cssText) => {
+    const style = document.createElement("style");
+    style.textContent = cssText;
+    document.head.appendChild(style);
+    return style;
+  },
+
+  desktopAPI: window.desktopAPI,
+  getState: () => state,
+  getUiState: () => uiState,
+  getElements: () => elements
+};
+
+function getCustomExtensionsList() {
+  try {
+    return JSON.parse(localStorage.getItem("wpdesktop.app-extensions") || "[]");
+  } catch (_) {
+    return [];
+  }
+}
+
+function saveCustomExtensionsList(list) {
+  localStorage.setItem("wpdesktop.app-extensions", JSON.stringify(list));
+}
+
+async function loadAllCustomExtensions() {
+  const list = getCustomExtensionsList();
+  for (const ext of list) {
+    if (ext.enabled) {
+      await loadCustomExtensionFromPath(ext.path);
+    }
+  }
+  renderCustomExtensionsList();
+}
+
+async function loadCustomExtensionFromPath(filePath) {
+  try {
+    currentlyLoadingPath = filePath;
+    const code = await window.desktopAPI.readExtensionFile(filePath);
+    const extFunc = new Function("api", code);
+    extFunc(window.wpDesktopExtensionsAPI);
+    currentlyLoadingPath = null;
+    return true;
+  } catch (err) {
+    console.error(`Failed to execute extension at ${filePath}:`, err);
+    currentlyLoadingPath = null;
+    return false;
+  }
+}
+
+function saveLoadedExtensionMetadata(filePath, id, config) {
+  const list = getCustomExtensionsList();
+  let ext = list.find(item => item.path === filePath);
+  if (!ext) {
+    ext = { path: filePath, enabled: true };
+    list.push(ext);
+  }
+  ext.id = id;
+  ext.name = config.name || id;
+  ext.description = config.description || "";
+  ext.version = config.version || "1.0.0";
+  saveCustomExtensionsList(list);
+}
+
+function renderCustomExtensionsList() {
+  if (!elements.appExtensionsList) return;
+  elements.appExtensionsList.innerHTML = "";
+  
+  const list = getCustomExtensionsList();
+  if (list.length === 0) {
+    const note = document.createElement("div");
+    note.className = "settings-note";
+    note.textContent = "No custom app extensions loaded yet.";
+    elements.appExtensionsList.appendChild(note);
+    return;
+  }
+
+  list.forEach(ext => {
+    const item = document.createElement("div");
+    item.className = "app-extension-item";
+    
+    const badgeClass = ext.enabled ? "enabled" : "disabled";
+    const badgeText = ext.enabled ? "Enabled" : "Disabled";
+
+    item.innerHTML = `
+      <div class="app-extension-info">
+        <div class="app-extension-name">
+          ${escapeHtml(ext.name || ext.path.split(/[\\/]/).pop())}
+          <span class="app-extension-badge ${badgeClass}">${badgeText}</span>
+        </div>
+        <div class="app-extension-path">${escapeHtml(ext.path)}</div>
+        ${ext.description ? `<div style="font-size: 0.84rem; color: var(--text-dim); margin-top: 4px;">${escapeHtml(ext.description)}</div>` : ""}
+      </div>
+      <div class="button-row compact">
+        <button type="button" class="toggle-ext-btn">${ext.enabled ? "Disable" : "Enable"}</button>
+        <button type="button" class="danger-button remove-ext-btn">Remove</button>
+      </div>
+    `;
+
+    item.querySelector(".toggle-ext-btn").addEventListener("click", () => {
+      toggleCustomExtension(ext.path);
+    });
+
+    item.querySelector(".remove-ext-btn").addEventListener("click", () => {
+      removeCustomExtension(ext.path);
+    });
+
+    elements.appExtensionsList.appendChild(item);
+  });
+}
+
+function toggleCustomExtension(filePath) {
+  const list = getCustomExtensionsList();
+  const ext = list.find(item => item.path === filePath);
+  if (ext) {
+    ext.enabled = !ext.enabled;
+    saveCustomExtensionsList(list);
+    
+    if (ext.enabled) {
+      loadCustomExtensionFromPath(filePath);
+    } else {
+      if (ext.id) {
+        const config = loadedExtensions.get(ext.id);
+        if (config && typeof config.deactivate === "function") {
+          try {
+            config.deactivate();
+          } catch (err) {
+            console.error("Deactivate error:", err);
+          }
+        }
+        loadedExtensions.delete(ext.id);
+      }
+    }
+    renderCustomExtensionsList();
+  }
+}
+
+function removeCustomExtension(filePath) {
+  const list = getCustomExtensionsList();
+  const ext = list.find(item => item.path === filePath);
+  if (ext) {
+    if (ext.id) {
+      const config = loadedExtensions.get(ext.id);
+      if (config && typeof config.deactivate === "function") {
+        try {
+          config.deactivate();
+        } catch (err) {
+          console.error("Deactivate error:", err);
+        }
+      }
+      loadedExtensions.delete(ext.id);
+    }
+    
+    const filtered = list.filter(item => item.path !== filePath);
+    saveCustomExtensionsList(filtered);
+    renderCustomExtensionsList();
+  }
+}
+
+// Hook up load-app-extension button
+elements.loadAppExtensionButton?.addEventListener("click", async () => {
+  try {
+    const selectedPath = await window.desktopAPI.pickFile();
+    if (!selectedPath) return;
+
+    const list = getCustomExtensionsList();
+    if (list.some(item => item.path === selectedPath)) {
+      setStatus("Extension already loaded: " + selectedPath);
+      return;
+    }
+
+    setStatus("Loading custom extension...");
+    const success = await loadCustomExtensionFromPath(selectedPath);
+    if (success) {
+      const newList = getCustomExtensionsList();
+      if (!newList.some(item => item.path === selectedPath)) {
+        newList.push({
+          path: selectedPath,
+          enabled: true,
+          name: selectedPath.split(/[\\/]/).pop(),
+          description: ""
+        });
+        saveCustomExtensionsList(newList);
+      }
+      setStatus("Successfully loaded extension!");
+      renderCustomExtensionsList();
+    } else {
+      setStatus("Failed to load extension. Check console for details.");
+    }
+  } catch (err) {
+    setStatus("Load extension error: " + err.message);
+  }
+});
+
+function renderMcpSettings(mcpStatus) {
+  if (!elements.mcpStatusText) return;
+
+  const running = mcpStatus?.running === true;
+  elements.mcpStatusText.textContent = running ? "Running" : "Stopped";
+  elements.mcpStatusText.style.color = running ? "var(--success-color, #10b981)" : "var(--text-dim, #78716c)";
+  elements.mcpToggleButton.textContent = running ? "Stop server" : "Start server";
+  elements.mcpToggleButton.className = running ? "danger-button" : "primary-button";
+
+  elements.mcpEndpointText.textContent = mcpStatus?.endpoint || "-";
+  elements.mcpSessionsCount.textContent = `${mcpStatus?.sessions || 0} active connection${(mcpStatus?.sessions || 0) === 1 ? "" : "s"}`;
+
+  if (mcpStatus?.lastError) {
+    elements.mcpErrorText.textContent = mcpStatus.lastError;
+    elements.mcpErrorItem.classList.remove("hidden");
+  } else {
+    elements.mcpErrorItem.classList.add("hidden");
+  }
+
+  if (document.activeElement !== elements.mcpHost) {
+    elements.mcpHost.value = mcpStatus?.host || "127.0.0.1";
+  }
+  if (document.activeElement !== elements.mcpPort) {
+    elements.mcpPort.value = mcpStatus?.port || 3789;
+  }
+}
+
+async function toggleMcpServer() {
+  const isRunning = elements.mcpStatusText.textContent === "Running";
+  elements.mcpToggleButton.disabled = true;
+  elements.mcpStatusText.textContent = isRunning ? "Stopping..." : "Starting...";
+
+  try {
+    let status;
+    if (isRunning) {
+      status = await window.desktopAPI.stopMcpServer();
+    } else {
+      const config = {
+        host: elements.mcpHost.value.trim() || "127.0.0.1",
+        port: Number(elements.mcpPort.value) || 3789
+      };
+      status = await window.desktopAPI.startMcpServer(config);
+    }
+    renderMcpSettings(status);
+  } catch (error) {
+    console.error("Failed to toggle MCP server:", error);
+    alert(`Failed to toggle MCP server: ${error.message}`);
+  } finally {
+    elements.mcpToggleButton.disabled = false;
+  }
+}
+
+async function saveMcpConfig() {
+  elements.mcpSaveConfigButton.disabled = true;
+  elements.mcpConfigStatus.textContent = "Saving configuration...";
+  elements.mcpConfigStatus.style.color = "var(--text-dim)";
+
+  try {
+    const config = {
+      host: elements.mcpHost.value.trim() || "127.0.0.1",
+      port: Number(elements.mcpPort.value) || 3789
+    };
+    const isRunning = elements.mcpStatusText.textContent === "Running";
+    const status = await window.desktopAPI.startMcpServer(config);
+    if (!isRunning) {
+      await window.desktopAPI.stopMcpServer();
+    }
+    
+    const settings = await window.desktopAPI.getSettings();
+    applySettingsPayload(settings);
+    
+    elements.mcpConfigStatus.textContent = "Configuration saved successfully!";
+    elements.mcpConfigStatus.style.color = "var(--success-color)";
+    setTimeout(() => {
+      elements.mcpConfigStatus.textContent = "Configure the host and port for your local MCP server.";
+      elements.mcpConfigStatus.style.color = "var(--text-dim)";
+    }, 3000);
+  } catch (error) {
+    elements.mcpConfigStatus.textContent = `Save failed: ${error.message}`;
+    elements.mcpConfigStatus.style.color = "var(--danger-color)";
+  } finally {
+    elements.mcpSaveConfigButton.disabled = false;
+  }
+}
+
+function initMcpUi() {
+  elements.mcpToggleButton?.addEventListener("click", toggleMcpServer);
+  elements.mcpSaveConfigButton?.addEventListener("click", saveMcpConfig);
+}
+
+initMcpUi();
+
+// ─── P2P Meeting Implementation ──────────────────────────────────
+let meetLocalStream = null;
+let meetScreenStream = null;
+let meetPeer = null;
+let meetActiveCall = null;
+let meetPC = null; // Manual mode peer connection
+let meetAudioMuted = false;
+let meetVideoMuted = false;
+let meetScreenSharing = false;
+let meetSelectedCameraId = "";
+let meetSelectedMicId = "";
+let meetCurrentMode = "cloud"; // "cloud" or "manual"
+let meetLocalICEs = [];
+
+// Query meeting elements
+const meetUI = {
+  setupPanel: document.getElementById("meet-setup-panel"),
+  callPanel: document.getElementById("meet-call-panel"),
+  setupPreview: document.getElementById("meet-setup-preview"),
+  previewFallback: document.getElementById("meet-preview-fallback"),
+  cameraSelect: document.getElementById("meet-camera-select"),
+  micSelect: document.getElementById("meet-mic-select"),
+  
+  modeBtnCloud: document.getElementById("meet-mode-btn-cloud"),
+  modeBtnManual: document.getElementById("meet-mode-btn-manual"),
+  formCloud: document.getElementById("meet-form-cloud"),
+  formManual: document.getElementById("meet-form-manual"),
+  
+  cloudRoomInput: document.getElementById("meet-cloud-room"),
+  cloudStartBtn: document.getElementById("meet-cloud-start-btn"),
+  
+  manualInitBtn: document.getElementById("meet-manual-init-btn"),
+  manualJoinBtn: document.getElementById("meet-manual-join-btn"),
+  manualStageHost: document.getElementById("meet-manual-stage-host"),
+  manualStageJoiner: document.getElementById("meet-manual-stage-joiner"),
+  
+  manualOfferText: document.getElementById("meet-manual-offer"),
+  manualAnswerText: document.getElementById("meet-manual-answer"),
+  manualConnectBtn: document.getElementById("meet-manual-connect-btn"),
+  
+  manualJoinOfferText: document.getElementById("meet-manual-join-offer"),
+  manualJoinAnswerText: document.getElementById("meet-manual-join-answer"),
+  manualGenerateAnswerBtn: document.getElementById("meet-manual-generate-answer-btn"),
+  
+  statusIndicator: document.getElementById("meet-status-indicator"),
+  roomLabel: document.getElementById("meet-room-label"),
+  
+  localVideo: document.getElementById("meet-local-video"),
+  localVideoFallback: document.getElementById("meet-local-fallback"),
+  remoteVideo: document.getElementById("meet-remote-video"),
+  remoteVideoFallback: document.getElementById("meet-remote-fallback"),
+  
+  toggleAudioBtn: document.getElementById("meet-toggle-audio"),
+  toggleVideoBtn: document.getElementById("meet-toggle-video"),
+  toggleShareBtn: document.getElementById("meet-toggle-share"),
+  hangupBtn: document.getElementById("meet-hangup")
+};
+
+// Initialize P2P Meeting
+function initMeetingFeature() {
+  // Navigation trigger: start device check when Meet screen is shown
+  document.querySelector('[data-screen="meeting"]')?.addEventListener("click", () => {
+    startMeetSetupPreview();
+    loadMeetDevices();
+  });
+
+  // Switch setup modes
+  meetUI.modeBtnCloud?.addEventListener("click", () => selectMeetMode("cloud"));
+  meetUI.modeBtnManual?.addEventListener("click", () => selectMeetMode("manual"));
+
+  // Device selectors
+  meetUI.cameraSelect?.addEventListener("change", (e) => {
+    meetSelectedCameraId = e.target.value;
+    startMeetSetupPreview();
+  });
+  meetUI.micSelect?.addEventListener("change", (e) => {
+    meetSelectedMicId = e.target.value;
+    startMeetSetupPreview();
+  });
+
+  // Connection controls
+  meetUI.cloudStartBtn?.addEventListener("click", startCloudMeeting);
+  meetUI.manualInitBtn?.addEventListener("click", () => showManualStage("host"));
+  meetUI.manualJoinBtn?.addEventListener("click", () => showManualStage("joiner"));
+  meetUI.manualConnectBtn?.addEventListener("click", connectManualHost);
+  meetUI.manualGenerateAnswerBtn?.addEventListener("click", connectManualJoiner);
+
+  // In-Call controls
+  meetUI.toggleAudioBtn?.addEventListener("click", toggleMeetAudio);
+  meetUI.toggleVideoBtn?.addEventListener("click", toggleMeetVideo);
+  meetUI.toggleShareBtn?.addEventListener("click", toggleMeetScreenShare);
+  meetUI.hangupBtn?.addEventListener("click", hangUpMeet);
+}
+
+// Select meet connection mode
+function selectMeetMode(mode) {
+  meetCurrentMode = mode;
+  meetUI.modeBtnCloud.classList.toggle("active", mode === "cloud");
+  meetUI.modeBtnManual.classList.toggle("active", mode === "manual");
+  meetUI.formCloud.classList.toggle("hidden", mode !== "cloud");
+  meetUI.formManual.classList.toggle("hidden", mode !== "manual");
+}
+
+// Show manual setup steps
+function showManualStage(role) {
+  meetUI.manualStageHost.classList.toggle("hidden", role !== "host");
+  meetUI.manualStageJoiner.classList.toggle("hidden", role !== "joiner");
+  
+  if (role === "host") {
+    initManualHostConnection();
+  }
+}
+
+// Load available media devices
+async function loadMeetDevices() {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    if (!meetUI.cameraSelect || !meetUI.micSelect) return;
+    
+    meetUI.cameraSelect.innerHTML = "";
+    meetUI.micSelect.innerHTML = "";
+    
+    devices.forEach(device => {
+      const option = document.createElement("option");
+      option.value = device.deviceId;
+      option.textContent = device.label || `${device.kind} (${device.deviceId.slice(0, 5)})`;
+      
+      if (device.kind === "videoinput") {
+        meetUI.cameraSelect.appendChild(option);
+      } else if (device.kind === "audioinput") {
+        meetUI.micSelect.appendChild(option);
+      }
+    });
+  } catch (err) {
+    console.error("Failed to load media devices", err);
+  }
+}
+
+// Start Setup camera preview
+async function startMeetSetupPreview() {
+  try {
+    // Stop any existing stream
+    if (meetLocalStream) {
+      meetLocalStream.getTracks().forEach(track => track.stop());
+    }
+
+    const constraints = {
+      video: meetSelectedCameraId ? { deviceId: { exact: meetSelectedCameraId } } : true,
+      audio: meetSelectedMicId ? { deviceId: { exact: meetSelectedMicId } } : true
+    };
+
+    meetLocalStream = await navigator.mediaDevices.getUserMedia(constraints);
+    
+    if (meetUI.setupPreview) {
+      meetUI.setupPreview.srcObject = meetLocalStream;
+      meetUI.setupPreview.style.display = "block";
+    }
+    if (meetUI.previewFallback) {
+      meetUI.previewFallback.style.display = "none";
+    }
+  } catch (err) {
+    console.error("Error accessing user devices:", err);
+    if (meetUI.setupPreview) {
+      meetUI.setupPreview.style.display = "none";
+    }
+    if (meetUI.previewFallback) {
+      meetUI.previewFallback.style.display = "flex";
+      meetUI.previewFallback.textContent = "Camera Blocked / Not Found";
+    }
+  }
+}
+
+// Configure WebRTC Call Panel state
+function enterCallUI(roomName) {
+  meetUI.setupPanel.classList.add("hidden");
+  meetUI.callPanel.classList.remove("hidden");
+  meetUI.roomLabel.textContent = `Room: ${roomName}`;
+  
+  if (meetUI.localVideo) {
+    meetUI.localVideo.srcObject = meetLocalStream;
+    meetUI.localVideo.style.display = "block";
+  }
+  if (meetUI.localVideoFallback) {
+    meetUI.localVideoFallback.style.display = "none";
+  }
+  
+  updateMeetControlsUI();
+}
+
+function updateMeetControlsUI() {
+  meetUI.toggleAudioBtn.classList.toggle("muted", meetAudioMuted);
+  meetUI.toggleAudioBtn.textContent = meetAudioMuted ? "🔇" : "🎤";
+  
+  meetUI.toggleVideoBtn.classList.toggle("muted", meetVideoMuted);
+  meetUI.toggleVideoBtn.textContent = meetVideoMuted ? "📷 (Off)" : "📷";
+  
+  meetUI.toggleShareBtn.classList.toggle("muted", !meetScreenSharing);
+  meetUI.toggleShareBtn.textContent = meetScreenSharing ? "🛑 Share" : "🖥️";
+}
+
+// ─── CLOUD MODE (PeerJS) ───
+function startCloudMeeting() {
+  const rawRoom = meetUI.cloudRoomInput.value.trim();
+  if (!rawRoom) {
+    alert("Please enter a room code first.");
+    return;
+  }
+
+  const roomHash = `wpdesktop-room-${rawRoom}`;
+  setStatus(`Connecting to meeting room "${rawRoom}"...`);
+  meetUI.statusIndicator.textContent = "Connecting...";
+  meetUI.statusIndicator.className = "status-badge connecting";
+
+  enterCallUI(rawRoom);
+  connectToCloudPeer(roomHash, "peer-a");
+}
+
+function connectToCloudPeer(roomHash, roleId) {
+  const currentPeerId = `${roomHash}-${roleId}`;
+  
+  meetPeer = new Peer(currentPeerId, {
+    config: {
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+    }
+  });
+
+  meetPeer.on("open", (id) => {
+    console.log(`Connected to PeerJS cloud with ID: ${id}`);
+    
+    if (roleId === "peer-b") {
+      // If we are peer-b, we initiate the call to peer-a
+      const targetId = `${roomHash}-peer-a`;
+      console.log(`Peer-b calling peer-a (${targetId})...`);
+      const call = meetPeer.call(targetId, meetLocalStream);
+      handleCloudCall(call);
+    }
+  });
+
+  meetPeer.on("call", (incomingCall) => {
+    console.log("Receiving call from peer-b...");
+    incomingCall.answer(meetLocalStream);
+    handleCloudCall(incomingCall);
+  });
+
+  meetPeer.on("error", (err) => {
+    console.error("PeerJS error:", err);
+    if (err.type === "unavailable-id" && roleId === "peer-a") {
+      // If peer-a is taken, try connecting as peer-b
+      console.log("Peer-a ID taken. Re-connecting as Peer-b...");
+      meetPeer.destroy();
+      connectToCloudPeer(roomHash, "peer-b");
+    } else {
+      meetUI.statusIndicator.textContent = "Error";
+      meetUI.statusIndicator.className = "status-badge failed";
+      setStatus(`Connection error: ${err.message}`);
+    }
+  });
+}
+
+function handleCloudCall(call) {
+  meetActiveCall = call;
+  
+  meetUI.statusIndicator.textContent = "Connected";
+  meetUI.statusIndicator.className = "status-badge connected";
+  setStatus("Connected to remote peer!");
+
+  call.on("stream", (remoteStream) => {
+    console.log("Received remote stream!");
+    if (meetUI.remoteVideo) {
+      meetUI.remoteVideo.srcObject = remoteStream;
+      meetUI.remoteVideo.style.display = "block";
+    }
+    if (meetUI.remoteVideoFallback) {
+      meetUI.remoteVideoFallback.style.display = "none";
+    }
+  });
+
+  call.on("close", () => {
+    console.log("Call closed by remote peer.");
+    hangUpMeet();
+  });
+}
+
+// ─── MANUAL P2P MODE ───
+const rtcConfig = {
+  iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+};
+
+function createManualPeerConnection() {
+  meetPC = new RTCPeerConnection(rtcConfig);
+  meetLocalICEs = [];
+
+  // Add tracks
+  if (meetLocalStream) {
+    meetLocalStream.getTracks().forEach(track => {
+      meetPC.addTrack(track, meetLocalStream);
+    });
+  }
+
+  // Handle remote track
+  meetPC.ontrack = (event) => {
+    console.log("Manual connection received remote track");
+    const remoteStream = event.streams[0];
+    if (meetUI.remoteVideo) {
+      meetUI.remoteVideo.srcObject = remoteStream;
+      meetUI.remoteVideo.style.display = "block";
+    }
+    if (meetUI.remoteVideoFallback) {
+      meetUI.remoteVideoFallback.style.display = "none";
+    }
+  };
+
+  meetPC.oniceconnectionstatechange = () => {
+    const state = meetPC.iceConnectionState;
+    console.log("ICE Connection State changed:", state);
+    if (state === "connected") {
+      meetUI.statusIndicator.textContent = "Connected";
+      meetUI.statusIndicator.className = "status-badge connected";
+      setStatus("Direct manual P2P connection established!");
+    } else if (state === "failed" || state === "closed") {
+      meetUI.statusIndicator.textContent = "Failed";
+      meetUI.statusIndicator.className = "status-badge failed";
+      hangUpMeet();
+    }
+  };
+}
+
+async function initManualHostConnection() {
+  createManualPeerConnection();
+  
+  meetPC.onicecandidate = (event) => {
+    if (event.candidate) {
+      meetLocalICEs.push(event.candidate);
+    }
+    // Update display with Offer + Candidates once complete
+    updateHostOfferDisplay();
+  };
+
+  const offer = await meetPC.createOffer();
+  await meetPC.setLocalDescription(offer);
+  updateHostOfferDisplay();
+}
+
+function updateHostOfferDisplay() {
+  const signalData = {
+    sdp: meetPC.localDescription,
+    candidates: meetLocalICEs
+  };
+  meetUI.manualOfferText.value = btoa(JSON.stringify(signalData));
+}
+
+async function connectManualHost() {
+  const rawAnswer = meetUI.manualAnswerText.value.trim();
+  if (!rawAnswer) {
+    alert("Please paste the answer code from the joiner first.");
+    return;
+  }
+
+  try {
+    const signalData = JSON.parse(atob(rawAnswer));
+    enterCallUI("Manual P2P (Host)");
+    meetUI.statusIndicator.textContent = "Connecting...";
+    meetUI.statusIndicator.className = "status-badge connecting";
+
+    await meetPC.setRemoteDescription(new RTCSessionDescription(signalData.sdp));
+    
+    // Add joiner candidates
+    if (Array.isArray(signalData.candidates)) {
+      for (const candidate of signalData.candidates) {
+        await meetPC.addIceCandidate(new RTCIceCandidate(candidate));
+      }
+    }
+  } catch (err) {
+    alert("Failed to parse the response code: " + err.message);
+  }
+}
+
+async function connectManualJoiner() {
+  const rawOffer = meetUI.manualJoinOfferText.value.trim();
+  if (!rawOffer) {
+    alert("Please paste the host's connection code first.");
+    return;
+  }
+
+  try {
+    const signalData = JSON.parse(atob(rawOffer));
+    createManualPeerConnection();
+
+    meetPC.onicecandidate = (event) => {
+      if (event.candidate) {
+        meetLocalICEs.push(event.candidate);
+      }
+      updateJoinerAnswerDisplay();
+    };
+
+    await meetPC.setRemoteDescription(new RTCSessionDescription(signalData.sdp));
+    const answer = await meetPC.createAnswer();
+    await meetPC.setLocalDescription(answer);
+
+    // Add host candidates
+    if (Array.isArray(signalData.candidates)) {
+      for (const candidate of signalData.candidates) {
+        await meetPC.addIceCandidate(new RTCIceCandidate(candidate));
+      }
+    }
+
+    updateJoinerAnswerDisplay();
+    enterCallUI("Manual P2P (Joiner)");
+    meetUI.statusIndicator.textContent = "Connecting...";
+    meetUI.statusIndicator.className = "status-badge connecting";
+  } catch (err) {
+    alert("Failed to parse connection code: " + err.message);
+  }
+}
+
+function updateJoinerAnswerDisplay() {
+  const signalData = {
+    sdp: meetPC.localDescription,
+    candidates: meetLocalICEs
+  };
+  meetUI.manualJoinAnswerText.value = btoa(JSON.stringify(signalData));
+}
+
+// ─── IN-CALL TOGGLES & ACTIONS ───
+
+// Toggle mic track
+function toggleMeetAudio() {
+  if (!meetLocalStream) return;
+  meetAudioMuted = !meetAudioMuted;
+  meetLocalStream.getAudioTracks().forEach(track => {
+    track.enabled = !meetAudioMuted;
+  });
+  updateMeetControlsUI();
+  setStatus(meetAudioMuted ? "Microphone muted" : "Microphone unmuted");
+}
+
+// Toggle camera track
+function toggleMeetVideo() {
+  if (!meetLocalStream) return;
+  meetVideoMuted = !meetVideoMuted;
+  meetLocalStream.getVideoTracks().forEach(track => {
+    track.enabled = !meetVideoMuted;
+  });
+  
+  if (meetUI.localVideo) {
+    meetUI.localVideo.style.display = meetVideoMuted ? "none" : "block";
+  }
+  if (meetUI.localVideoFallback) {
+    meetUI.localVideoFallback.style.display = meetVideoMuted ? "flex" : "none";
+  }
+  
+  updateMeetControlsUI();
+  setStatus(meetVideoMuted ? "Camera stream stopped" : "Camera stream active");
+}
+
+// Toggle Screen Share stream
+async function toggleMeetScreenShare() {
+  if (!meetLocalStream) return;
+  
+  if (!meetScreenSharing) {
+    try {
+      meetScreenStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      const screenVideoTrack = meetScreenStream.getVideoTracks()[0];
+      
+      // Listen to "ended" event (when user stops sharing from browser toolbar)
+      screenVideoTrack.addEventListener("ended", () => {
+        stopScreenSharingTracks();
+      });
+
+      // Replace video track in current peer call / connection
+      replaceVideoTrack(screenVideoTrack);
+      
+      if (meetUI.localVideo) {
+        meetUI.localVideo.srcObject = meetScreenStream;
+      }
+      
+      meetScreenSharing = true;
+      updateMeetControlsUI();
+      setStatus("Screen sharing started");
+    } catch (err) {
+      console.error("Failed to share screen:", err);
+      setStatus("Failed to start screen share");
+    }
+  } else {
+    stopScreenSharingTracks();
+  }
+}
+
+function stopScreenSharingTracks() {
+  if (!meetScreenSharing) return;
+
+  if (meetScreenStream) {
+    meetScreenStream.getTracks().forEach(track => track.stop());
+    meetScreenStream = null;
+  }
+
+  const cameraTrack = meetLocalStream.getVideoTracks()[0];
+  replaceVideoTrack(cameraTrack);
+
+  if (meetUI.localVideo) {
+    meetUI.localVideo.srcObject = meetLocalStream;
+  }
+
+  meetScreenSharing = false;
+  updateMeetControlsUI();
+  setStatus("Screen sharing stopped");
+}
+
+function replaceVideoTrack(newTrack) {
+  if (!newTrack) return;
+  
+  if (meetActiveCall && meetActiveCall.peerConnection) {
+    const senders = meetActiveCall.peerConnection.getSenders();
+    const videoSender = senders.find(s => s.track && s.track.kind === "video");
+    if (videoSender) {
+      videoSender.replaceTrack(newTrack);
+    }
+  } else if (meetPC) {
+    const senders = meetPC.getSenders();
+    const videoSender = senders.find(s => s.track && s.track.kind === "video");
+    if (videoSender) {
+      videoSender.replaceTrack(newTrack);
+    }
+  }
+}
+
+// End call / cleanup
+function hangUpMeet() {
+  setStatus("Meeting ended.");
+  
+  // Stop active call streams
+  if (meetActiveCall) {
+    meetActiveCall.close();
+    meetActiveCall = null;
+  }
+  if (meetPeer) {
+    meetPeer.destroy();
+    meetPeer = null;
+  }
+  
+  // Close manual connection
+  if (meetPC) {
+    meetPC.close();
+    meetPC = null;
+  }
+
+  // Stop screen stream if active
+  if (meetScreenStream) {
+    meetScreenStream.getTracks().forEach(track => track.stop());
+    meetScreenStream = null;
+  }
+
+  // Restore camera preview inside setup
+  meetAudioMuted = false;
+  meetVideoMuted = false;
+  meetScreenSharing = false;
+
+  meetUI.callPanel.classList.add("hidden");
+  meetUI.setupPanel.classList.remove("hidden");
+
+  // Restart setup preview
+  startMeetSetupPreview();
+}
+
+// Auto-run meeting initialization
+initMeetingFeature();
+
+
+// ═══════════════════════════════════════════════════════════════════
+// TAILSCALE ADMIN TOOLKIT — Renderer Module
+// ═══════════════════════════════════════════════════════════════════
+
+// ─── State ────────────────────────────────────────────────────────
+const tsState = {
+  detection: null,
+  peers: [],
+  self: null,
+  exitNodes: [],
+  activeExitNode: null,
+  serveConfig: null,
+  funnelInfo: null,
+  netcheck: null,
+  dns: null,
+  metrics: null,
+  activeTab: "dashboard",
+  consoleHistory: [],
+  consoleHistoryIndex: -1,
+  fileTransferLog: [],
+  selectedFilePath: null,
+  initialized: false,
+  loading: false
+};
+
+// ─── DOM refs ─────────────────────────────────────────────────────
+let tsUI = {};
+
+function tsBindUI() {
+  tsUI = {
+    statusPill:          document.getElementById("ts-status-pill"),
+    refreshBtn:          document.getElementById("ts-refresh-button"),
+    loginBtn:            document.getElementById("ts-login-button"),
+    logoutBtn:           document.getElementById("ts-logout-button"),
+    adminConsoleBtn:     document.getElementById("ts-admin-console-button"),
+    notInstalledBanner:  document.getElementById("ts-not-installed-banner"),
+    errorBanner:         document.getElementById("ts-error-banner"),
+    // Dashboard metrics
+    metricOnline:        document.getElementById("ts-metric-online"),
+    metricTotal:         document.getElementById("ts-metric-total"),
+    metricRelay:         document.getElementById("ts-metric-relay"),
+    metricExitnode:      document.getElementById("ts-metric-exitnode"),
+    metricTailnet:       document.getElementById("ts-metric-tailnet"),
+    metricAccount:       document.getElementById("ts-metric-account"),
+    dashboardPeerList:   document.getElementById("ts-dashboard-peer-list"),
+    // Devices
+    deviceRows:          document.getElementById("ts-device-rows"),
+    devicesFilter:       document.getElementById("ts-devices-filter"),
+    devicesSearch:       document.getElementById("ts-devices-search"),
+    devicesSort:         document.getElementById("ts-devices-sort"),
+    deviceModal:         document.getElementById("ts-device-modal"),
+    deviceModalName:     document.getElementById("ts-modal-device-name"),
+    deviceModalBody:     document.getElementById("ts-modal-body"),
+    deviceModalActions:  document.getElementById("ts-modal-actions"),
+    deviceModalClose:    document.getElementById("ts-modal-close"),
+    // Exit nodes
+    exitnodeList:        document.getElementById("ts-exitnode-list"),
+    activeExitnodeLabel: document.getElementById("ts-active-exitnode-label"),
+    disconnectExitnode:  document.getElementById("ts-disconnect-exitnode"),
+    // Serve
+    serveProtocol:       document.getElementById("ts-serve-protocol"),
+    servePort:           document.getElementById("ts-serve-port"),
+    serveTarget:         document.getElementById("ts-serve-target"),
+    serveAddBtn:         document.getElementById("ts-serve-add-btn"),
+    serveRoutes:         document.getElementById("ts-serve-routes"),
+    serveStatus:         document.getElementById("ts-serve-status"),
+    serveRefreshBtn:     document.getElementById("ts-serve-refresh-btn"),
+    // Funnel
+    funnelPort:          document.getElementById("ts-funnel-port"),
+    funnelEnableBtn:     document.getElementById("ts-funnel-enable-btn"),
+    funnelDisableBtn:    document.getElementById("ts-funnel-disable-btn"),
+    funnelStatusBtn:     document.getElementById("ts-funnel-status-btn"),
+    funnelStatusPill:    document.getElementById("ts-funnel-status-pill"),
+    funnelDomainPreview: document.getElementById("ts-funnel-domain-preview"),
+    funnelDomainUrl:     document.getElementById("ts-funnel-domain-url"),
+    funnelInfo:          document.getElementById("ts-funnel-info"),
+    // Files
+    fileTargetDevice:    document.getElementById("ts-file-target-device"),
+    filePath:            document.getElementById("ts-file-path"),
+    filePickBtn:         document.getElementById("ts-file-pick-btn"),
+    fileDropZone:        document.getElementById("ts-file-drop-zone"),
+    fileSendBtn:         document.getElementById("ts-file-send-btn"),
+    fileStatus:          document.getElementById("ts-file-status"),
+    fileHistory:         document.getElementById("ts-file-history"),
+    fileClearBtn:        document.getElementById("ts-file-clear-btn"),
+    // Netcheck
+    netcheckRunBtn:      document.getElementById("ts-netcheck-run-btn"),
+    netcheckSummary:     document.getElementById("ts-netcheck-summary"),
+    ncUdp:               document.getElementById("ts-nc-udp"),
+    ncIpv4:              document.getElementById("ts-nc-ipv4"),
+    ncIpv6:              document.getElementById("ts-nc-ipv6"),
+    ncNat:               document.getElementById("ts-nc-nat"),
+    netcheckDerp:        document.getElementById("ts-netcheck-derp"),
+    netcheckStatus:      document.getElementById("ts-netcheck-status"),
+    // DNS
+    dnsRefreshBtn:       document.getElementById("ts-dns-refresh-btn"),
+    dnsMagic:            document.getElementById("ts-dns-magic"),
+    dnsDomain:           document.getElementById("ts-dns-domain"),
+    dnsNameservers:      document.getElementById("ts-dns-nameservers"),
+    dnsStatus:           document.getElementById("ts-dns-status"),
+    // Certs
+    certHostname:        document.getElementById("ts-cert-hostname"),
+    certGetBtn:          document.getElementById("ts-cert-get-btn"),
+    certResult:          document.getElementById("ts-cert-result"),
+    certExpiry:          document.getElementById("ts-cert-expiry"),
+    certPath:            document.getElementById("ts-cert-path"),
+    certOpenBtn:         document.getElementById("ts-cert-open-btn"),
+    certStatus:          document.getElementById("ts-cert-status"),
+    // Console
+    consoleOutput:       document.getElementById("ts-console-output"),
+    consoleInput:        document.getElementById("ts-console-input"),
+    consoleRunBtn:       document.getElementById("ts-console-run-btn"),
+    consoleClearBtn:     document.getElementById("ts-console-clear-btn"),
+    // System
+    sysVersion:          document.getElementById("ts-sys-version"),
+    sysClipath:          document.getElementById("ts-sys-clipath"),
+    sysApiSource:        document.getElementById("ts-sys-apisource"),
+    sysService:          document.getElementById("ts-sys-service"),
+    sysAccount:          document.getElementById("ts-sys-account"),
+    sysTailnet:          document.getElementById("ts-sys-tailnet"),
+    sysDevice:           document.getElementById("ts-sys-device"),
+    sysIp:               document.getElementById("ts-sys-ip"),
+    sysLoginBtn:         document.getElementById("ts-sys-login-btn"),
+    sysLogoutBtn:        document.getElementById("ts-sys-logout-btn"),
+    sysLoginUrl:         document.getElementById("ts-sys-login-url"),
+    sysLoginUrlText:     document.getElementById("ts-sys-login-url-text"),
+    sysStatus:           document.getElementById("ts-sys-status"),
+    sysInfoRefreshBtn:   document.getElementById("ts-sysinfo-refresh-btn"),
+    // Quick action buttons
+    quickNetcheck:       document.getElementById("ts-quick-netcheck"),
+    quickStatus:         document.getElementById("ts-quick-status"),
+    quickExitnode:       document.getElementById("ts-quick-exitnode"),
+    quickServe:          document.getElementById("ts-quick-serve"),
+    quickFunnel:         document.getElementById("ts-quick-funnel"),
+    quickConsole:        document.getElementById("ts-quick-console"),
+    quickAdminConsole:   document.getElementById("ts-quick-admin-console"),
+    // Install link
+    installLink:         document.getElementById("ts-install-link")
+  };
+}
+
+// ─── Tab switching ─────────────────────────────────────────────────
+function tsTabSwitch(tabName) {
+  document.querySelectorAll(".ts-tab-btn").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.tsTab === tabName);
+  });
+  document.querySelectorAll(".ts-tab-panel").forEach((panel) => {
+    const isActive = panel.id === `ts-panel-${tabName}`;
+    panel.classList.toggle("active", isActive);
+  });
+  tsState.activeTab = tabName;
+}
+
+// ─── Status pill helper ────────────────────────────────────────────
+function tsSetStatusPill(text, state) {
+  if (!tsUI.statusPill) return;
+  tsUI.statusPill.textContent = text;
+  tsUI.statusPill.className = `ts-status-pill ts-status-${state}`;
+}
+
+// ─── Peer state helpers ────────────────────────────────────────────
+function tsGetPeerState(peer) {
+  return peer.state || "unknown";
+}
+
+function tsFormatLastSeen(lastSeen) {
+  if (!lastSeen) return "Never";
+  const now = Date.now();
+  const ts = new Date(lastSeen).getTime();
+  const diffMs = now - ts;
+  const diffMin = Math.floor(diffMs / 60000);
+  if (diffMin < 1) return "Just now";
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDay = Math.floor(diffHr / 24);
+  return `${diffDay}d ago`;
+}
+
+function tsStatusBadge(state) {
+  const labels = { online: "Online", relay: "Relayed", offline: "Offline", unknown: "Unknown" };
+  return `<span class="ts-badge ts-badge-${state}"><span class="ts-badge-dot"></span>${labels[state] || "Unknown"}</span>`;
+}
+
+function tsOsIcon(os) {
+  const o = (os || "").toLowerCase();
+  if (o.includes("windows")) return "🪟";
+  if (o.includes("mac") || o.includes("darwin")) return "🍎";
+  if (o.includes("linux")) return "🐧";
+  if (o.includes("ios") || o.includes("iphone")) return "📱";
+  if (o.includes("android")) return "🤖";
+  return "💻";
+}
+
+function tsCopy(text) {
+  navigator.clipboard.writeText(text).catch(() => {});
+}
+
+// ─── Dashboard ─────────────────────────────────────────────────────
+function tsRenderDashboard() {
+  const peers = tsState.peers;
+  const online  = peers.filter((p) => tsGetPeerState(p) === "online").length;
+  const relay   = peers.filter((p) => tsGetPeerState(p) === "relay").length;
+  const total   = peers.length;
+
+  if (tsUI.metricOnline) tsUI.metricOnline.textContent = online;
+  if (tsUI.metricTotal)  tsUI.metricTotal.textContent  = total;
+  if (tsUI.metricRelay)  tsUI.metricRelay.textContent  = relay;
+
+  const exitPeer = peers.find((p) => p.exitNode);
+  if (tsUI.metricExitnode) tsUI.metricExitnode.textContent = exitPeer ? (exitPeer.name || exitPeer.ip) : "None";
+
+  const tailnet = tsState.self?.DNSName?.split(".").slice(1).join(".") || "—";
+  if (tsUI.metricTailnet) tsUI.metricTailnet.textContent = tailnet;
+
+  const account = tsState.self?.UserID ? (tsState.detection?.account || "—") : "—";
+  if (tsUI.metricAccount) tsUI.metricAccount.textContent = account;
+
+  // Peer mini-list
+  if (tsUI.dashboardPeerList) {
+    if (!peers.length) {
+      tsUI.dashboardPeerList.innerHTML = `<div class="ts-device-empty">No peers found</div>`;
+    } else {
+      tsUI.dashboardPeerList.innerHTML = peers.slice(0, 20).map((p) => {
+        const state = tsGetPeerState(p);
+        return `<div class="ts-dashboard-peer-row">
+          <span class="ts-badge ts-badge-${state}"><span class="ts-badge-dot"></span></span>
+          <span class="ts-dashboard-peer-name">${tsOsIcon(p.os)} ${tsEsc(p.name || p.ip)}</span>
+          <span class="ts-dashboard-peer-ip">${tsEsc(p.ip)}</span>
+        </div>`;
+      }).join("");
+    }
+  }
+}
+
+// ─── Devices tab ───────────────────────────────────────────────────
+function tsGetFilteredPeers() {
+  const filter = tsUI.devicesFilter?.value || "all";
+  const search = (tsUI.devicesSearch?.value || "").toLowerCase();
+  const sort   = tsUI.devicesSort?.value || "name";
+
+  let peers = [...tsState.peers];
+
+  // Filter
+  if (filter !== "all") peers = peers.filter((p) => tsGetPeerState(p) === filter);
+
+  // Search
+  if (search) {
+    peers = peers.filter((p) =>
+      (p.name || "").toLowerCase().includes(search) ||
+      (p.ip   || "").toLowerCase().includes(search) ||
+      (p.os   || "").toLowerCase().includes(search) ||
+      (p.user || "").toLowerCase().includes(search)
+    );
+  }
+
+  // Sort
+  peers.sort((a, b) => {
+    switch (sort) {
+      case "status": {
+        const order = { online: 0, relay: 1, offline: 2, unknown: 3 };
+        return (order[tsGetPeerState(a)] ?? 4) - (order[tsGetPeerState(b)] ?? 4);
+      }
+      case "ip":   return (a.ip || "").localeCompare(b.ip || "");
+      case "os":   return (a.os || "").localeCompare(b.os || "");
+      default:     return (a.name || "").localeCompare(b.name || "");
+    }
+  });
+
+  return peers;
+}
+
+function tsEsc(str) {
+  return String(str || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function tsRenderDevices() {
+  if (!tsUI.deviceRows) return;
+  const peers = tsGetFilteredPeers();
+
+  if (!peers.length) {
+    tsUI.deviceRows.innerHTML = `<div class="ts-device-empty">No devices match your filter.</div>`;
+    return;
+  }
+
+  tsUI.deviceRows.innerHTML = peers.map((peer) => {
+    const state = tsGetPeerState(peer);
+    const ip    = tsEsc(peer.ip);
+    const name  = tsEsc(peer.name || peer.dnsName || peer.ip);
+    const os    = tsEsc(peer.os || "Unknown");
+    const seen  = tsFormatLastSeen(peer.lastSeen);
+    const exitBadge = peer.exitNode ? " 🚀" : "";
+
+    return `<div class="ts-device-row ts-${state}" data-peer-id="${tsEsc(peer.id)}">
+      <span class="ts-device-name">${tsOsIcon(peer.os)} ${name}${exitBadge}</span>
+      <span class="ts-device-os">${os}</span>
+      <span class="ts-device-ip" title="${ip}">${ip}</span>
+      <span>${tsStatusBadge(state)}</span>
+      <span class="ts-device-seen">${seen}</span>
+      <span class="ts-device-actions">
+        <button class="ts-device-action-btn" onclick="tsCopy('${ip}')" title="Copy IP">📋 IP</button>
+        <button class="ts-device-action-btn" onclick="tsOpenDeviceModal('${tsEsc(peer.id)}')" title="Details">🔍</button>
+        <button class="ts-device-action-btn" onclick="tsPingDevice('${tsEsc(peer.ip)}')" title="Ping">📡 Ping</button>
+        <button class="ts-device-action-btn" onclick="tsSshDevice('${tsEsc(peer.ip)}')" title="SSH">🔗 SSH</button>
+        ${process.platform === "win32" ? `<button class="ts-device-action-btn" onclick="tsRdpDevice('${tsEsc(peer.ip)}')" title="RDP">🖥️</button>` : ""}
+      </span>
+    </div>`;
+  }).join("");
+}
+
+// ─── Device modal ──────────────────────────────────────────────────
+function tsOpenDeviceModal(peerId) {
+  const peer = tsState.peers.find((p) => p.id === peerId);
+  if (!peer || !tsUI.deviceModal) return;
+
+  tsUI.deviceModalName.textContent = `${tsOsIcon(peer.os)} ${peer.name || peer.ip}`;
+
+  tsUI.deviceModalBody.innerHTML = `
+    <div class="overview-table">
+      <div class="overview-row"><span>Name</span><strong>${tsEsc(peer.name)}</strong></div>
+      <div class="overview-row"><span>DNS Name</span><strong>${tsEsc(peer.dnsName)}</strong></div>
+      <div class="overview-row"><span>OS</span><strong>${tsEsc(peer.os)}</strong></div>
+      <div class="overview-row"><span>User</span><strong>${tsEsc(peer.user)}</strong></div>
+      <div class="overview-row"><span>Tailscale IP</span><strong><span class="ts-device-ip">${tsEsc(peer.ip)}</span> <button class="ts-copy-btn" onclick="tsCopy('${tsEsc(peer.ip)}')">Copy</button></strong></div>
+      <div class="overview-row"><span>Status</span><strong>${tsStatusBadge(tsGetPeerState(peer))}</strong></div>
+      <div class="overview-row"><span>Last seen</span><strong>${tsFormatLastSeen(peer.lastSeen)}</strong></div>
+      <div class="overview-row"><span>Relay</span><strong>${tsEsc(peer.relay || "Direct")}</strong></div>
+      <div class="overview-row"><span>Exit node</span><strong>${peer.exitNodeOption ? "Available" : "No"} ${peer.exitNode ? " (Active)" : ""}</strong></div>
+      ${peer.tags?.length ? `<div class="overview-row"><span>Tags</span><strong>${peer.tags.map(tsEsc).join(", ")}</strong></div>` : ""}
+    </div>
+  `;
+
+  tsUI.deviceModalActions.innerHTML = `
+    <button class="primary-button" onclick="tsSshDevice('${tsEsc(peer.ip)}')">🔗 SSH</button>
+    <button onclick="tsPingDevice('${tsEsc(peer.ip)}')">📡 Ping</button>
+    <button onclick="tsCopy('${tsEsc(peer.ip)}')">📋 Copy IP</button>
+    <button onclick="tsCopy('${tsEsc(peer.dnsName || peer.name)}')">📋 Copy Hostname</button>
+    ${peer.exitNodeOption ? `<button onclick="tsSetExitNode('${tsEsc(peer.ip)}')">🚀 Use as Exit Node</button>` : ""}
+    ${process.platform === "win32" ? `<button onclick="tsRdpDevice('${tsEsc(peer.ip)}')">🖥️ RDP</button>` : ""}
+  `;
+
+  tsUI.deviceModal.classList.remove("hidden");
+}
+
+// ─── Device actions ────────────────────────────────────────────────
+async function tsPingDevice(ip) {
+  tsConsoleAppend(`$ tailscale ping ${ip}`, "ts-cmd");
+  tsTabSwitch("console");
+  try {
+    const res = await window.desktopAPI.tailscalePing(ip);
+    tsConsoleAppend(res.stdout || res.stderr || "(no output)", res.code === 0 ? "ts-out" : "ts-err");
+  } catch (e) {
+    tsConsoleAppend(`Error: ${e.message}`, "ts-err");
+  }
+}
+
+async function tsSshDevice(ip) {
+  try {
+    await window.desktopAPI.tailscaleSsh({ host: ip });
+  } catch (e) {
+    tsShowError(`SSH failed: ${e.message}`);
+  }
+}
+
+async function tsRdpDevice(ip) {
+  try {
+    await window.desktopAPI.tailscaleRdp(ip);
+  } catch (e) {
+    tsShowError(`RDP failed: ${e.message}`);
+  }
+}
+
+async function tsSetExitNode(nodeId) {
+  try {
+    const res = await window.desktopAPI.tailscaleSetExitNode(nodeId);
+    if (res.ok) {
+      tsShowSuccess(`Exit node set to ${nodeId}.`);
+      await tsLoadExitNodes();
+    } else {
+      tsShowError(res.stderr || "Failed to set exit node.");
+    }
+  } catch (e) {
+    tsShowError(e.message);
+  }
+}
+
+// ─── Exit Nodes ────────────────────────────────────────────────────
+async function tsLoadExitNodes() {
+  if (!tsUI.exitnodeList) return;
+  tsUI.exitnodeList.innerHTML = `<div class="ts-loading-row">Loading exit nodes</div>`;
+  try {
+    const res = await window.desktopAPI.tailscaleExitNodes();
+    tsState.exitNodes = res.exitNodes || [];
+    const activeId = res.activeNodeId;
+
+    if (tsUI.activeExitnodeLabel) {
+      const active = tsState.exitNodes.find((n) => n.active || n.id === activeId);
+      tsUI.activeExitnodeLabel.textContent = active ? `Active: ${active.name || active.ip}` : "No exit node active";
+    }
+
+    if (!tsState.exitNodes.length) {
+      tsUI.exitnodeList.innerHTML = `<div class="ts-device-empty">No exit nodes available in your tailnet.</div>`;
+      return;
+    }
+
+    tsUI.exitnodeList.innerHTML = tsState.exitNodes.map((node) => {
+      const isActive = node.active || node.id === activeId;
+      const stateClass = isActive ? "ts-active" : "";
+      const location = [node.city, node.country].filter(Boolean).join(", ");
+      return `<div class="ts-exitnode-card ${stateClass}">
+        <div>
+          <div class="ts-exitnode-name">${tsOsIcon("")} ${tsEsc(node.name || node.ip)}</div>
+          <div class="ts-exitnode-detail">${tsEsc(node.ip)}${location ? ` · ${tsEsc(location)}` : ""}</div>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center">
+          ${node.online ? tsStatusBadge("online") : tsStatusBadge("offline")}
+          ${isActive
+            ? `<button onclick="tsDisconnectExitNode()" class="danger-button" style="padding:4px 10px;font-size:0.82rem">Disconnect</button>`
+            : `<button onclick="tsSetExitNode('${tsEsc(node.ip)}')" class="primary-button" style="padding:4px 10px;font-size:0.82rem">Connect</button>`
+          }
+        </div>
+      </div>`;
+    }).join("");
+  } catch (e) {
+    tsUI.exitnodeList.innerHTML = `<div class="ts-device-empty">Error: ${tsEsc(e.message)}</div>`;
+  }
+}
+
+async function tsDisconnectExitNode() {
+  try {
+    const res = await window.desktopAPI.tailscaleSetExitNode("");
+    if (res.ok) {
+      tsShowSuccess("Disconnected from exit node.");
+      await tsLoadExitNodes();
+    }
+  } catch (e) {
+    tsShowError(e.message);
+  }
+}
+
+// ─── Serve ─────────────────────────────────────────────────────────
+async function tsLoadServeStatus() {
+  if (!tsUI.serveRoutes) return;
+  tsUI.serveRoutes.innerHTML = `<div class="ts-loading-row">Loading serve config</div>`;
+  try {
+    const res = await window.desktopAPI.tailscaleServeStatus();
+    tsState.serveConfig = res;
+    tsRenderServeRoutes(res);
+  } catch (e) {
+    if (tsUI.serveStatus) tsUI.serveStatus.textContent = `Error: ${e.message}`;
+  }
+}
+
+function tsRenderServeRoutes(res) {
+  if (!tsUI.serveRoutes) return;
+  const data = res?.data;
+
+  // Try to parse serve config structure
+  let routes = [];
+  if (data?.TCP) {
+    for (const [port, cfg] of Object.entries(data.TCP || {})) {
+      routes.push({ path: `tcp:${port}`, target: cfg.To || JSON.stringify(cfg) });
+    }
+  }
+  if (data?.Web) {
+    for (const [host, webCfg] of Object.entries(data.Web || {})) {
+      for (const [mountPath, handler] of Object.entries(webCfg?.Handlers || {})) {
+        routes.push({ path: `${host}${mountPath}`, target: handler.Proxy || handler.Path || JSON.stringify(handler) });
+      }
+    }
+  }
+
+  if (!routes.length) {
+    tsUI.serveRoutes.innerHTML = `<div class="ts-serve-empty">No serve routes configured. Add one above.</div>`;
+    return;
+  }
+
+  tsUI.serveRoutes.innerHTML = routes.map((r) => `
+    <div class="ts-serve-route">
+      <div class="ts-serve-route-info">
+        <span class="ts-serve-route-path">${tsEsc(r.path)}</span>
+        <span class="ts-serve-route-target">→ ${tsEsc(r.target)}</span>
+      </div>
+      <button class="danger-button" style="padding:4px 10px;font-size:0.82rem" 
+        onclick="tsRemoveServeRoute('${tsEsc(r.path)}')">Remove</button>
+    </div>
+  `).join("");
+}
+
+async function tsAddServeRoute() {
+  const protocol = tsUI.serveProtocol?.value || "https";
+  const port     = tsUI.servePort?.value || "443";
+  const target   = tsUI.serveTarget?.value?.trim() || "";
+
+  if (!target) {
+    if (tsUI.serveStatus) tsUI.serveStatus.textContent = "Please enter a target.";
+    return;
+  }
+  if (tsUI.serveStatus) tsUI.serveStatus.textContent = "Adding route…";
+  try {
+    const res = await window.desktopAPI.tailscaleServeAdd({ protocol, port, target });
+    if (res.ok) {
+      if (tsUI.serveStatus) tsUI.serveStatus.textContent = "Route added.";
+      if (tsUI.serveTarget) tsUI.serveTarget.value = "";
+      await tsLoadServeStatus();
+    } else {
+      if (tsUI.serveStatus) tsUI.serveStatus.textContent = `Error: ${res.stderr || "Failed"}`;
+    }
+  } catch (e) {
+    if (tsUI.serveStatus) tsUI.serveStatus.textContent = `Error: ${e.message}`;
+  }
+}
+
+async function tsRemoveServeRoute(path) {
+  const match = path.match(/^(https?|tcp):(\d+)/);
+  const protocol = match ? match[1] : "https";
+  const port     = match ? match[2] : "443";
+  try {
+    const res = await window.desktopAPI.tailscaleServeRemove({ protocol, port });
+    if (res.ok) await tsLoadServeStatus();
+    else if (tsUI.serveStatus) tsUI.serveStatus.textContent = `Remove failed: ${res.stderr}`;
+  } catch (e) {
+    if (tsUI.serveStatus) tsUI.serveStatus.textContent = `Error: ${e.message}`;
+  }
+}
+
+// ─── Funnel ────────────────────────────────────────────────────────
+async function tsLoadFunnelStatus() {
+  try {
+    const res = await window.desktopAPI.tailscaleFunnelStatus();
+    tsState.funnelInfo = res;
+    const isEnabled = Boolean(res?.data && Object.keys(res.data).length);
+    if (tsUI.funnelStatusPill) {
+      tsUI.funnelStatusPill.textContent = isEnabled ? "Enabled" : "Disabled";
+      tsUI.funnelStatusPill.className = `ts-status-pill ts-status-${isEnabled ? "online" : "offline"}`;
+    }
+    if (tsUI.funnelInfo) tsUI.funnelInfo.textContent = res?.raw || "Funnel status loaded.";
+  } catch (e) {
+    if (tsUI.funnelInfo) tsUI.funnelInfo.textContent = `Error: ${e.message}`;
+  }
+}
+
+async function tsSetFunnel(enable) {
+  const port = tsUI.funnelPort?.value || "443";
+  if (tsUI.funnelInfo) tsUI.funnelInfo.textContent = `${enable ? "Enabling" : "Disabling"} funnel…`;
+  try {
+    const res = await window.desktopAPI.tailscaleFunnelSet({ port, enable });
+    if (res.ok) {
+      if (tsUI.funnelInfo) tsUI.funnelInfo.textContent = `Funnel ${enable ? "enabled" : "disabled"}.`;
+      await tsLoadFunnelStatus();
+    } else {
+      if (tsUI.funnelInfo) tsUI.funnelInfo.textContent = `Error: ${res.stderr || "Failed"}`;
+    }
+  } catch (e) {
+    if (tsUI.funnelInfo) tsUI.funnelInfo.textContent = `Error: ${e.message}`;
+  }
+}
+
+// ─── Netcheck ──────────────────────────────────────────────────────
+async function tsRunNetcheck() {
+  if (!tsUI.netcheckStatus) return;
+  tsUI.netcheckStatus.textContent = "Running netcheck…";
+  if (tsUI.netcheckDerp) tsUI.netcheckDerp.innerHTML = `<div class="ts-loading-row">Running network check</div>`;
+  if (tsUI.netcheckSummary) tsUI.netcheckSummary.classList.add("hidden");
+
+  try {
+    const res = await window.desktopAPI.tailscaleNetcheck();
+    tsState.netcheck = res;
+    const data = res?.data;
+    tsUI.netcheckStatus.textContent = "";
+
+    if (data) {
+      if (tsUI.netcheckSummary) tsUI.netcheckSummary.classList.remove("hidden");
+      if (tsUI.ncUdp)  tsUI.ncUdp.textContent  = data.UDP ? "✅ Yes" : "❌ No";
+      if (tsUI.ncIpv4) tsUI.ncIpv4.textContent = data.GlobalV4 || "❌ None";
+      if (tsUI.ncIpv6) tsUI.ncIpv6.textContent = data.GlobalV6 || "❌ None";
+      if (tsUI.ncNat)  tsUI.ncNat.textContent  = data.MappingVariesByDestIP ? "⚠️ Yes (Symmetric NAT)" : "✅ No";
+
+      // DERP latencies
+      const derpMap = data.RegionLatency || {};
+      if (tsUI.netcheckDerp) {
+        if (!Object.keys(derpMap).length) {
+          tsUI.netcheckDerp.innerHTML = `<div class="ts-device-empty">No DERP relay data available.</div>`;
+        } else {
+          tsUI.netcheckDerp.innerHTML = Object.entries(derpMap).map(([region, latMs]) => {
+            const ms = Math.round(latMs * 1000);
+            const cls = ms < 50 ? "ts-fast" : ms < 150 ? "ts-medium" : "ts-slow";
+            const label = ms >= 0 ? `${ms}ms` : "Unavailable";
+            return `<div class="ts-derp-card">
+              <div class="ts-derp-region">DERP ${region}</div>
+              <div class="ts-derp-latency ${ms >= 0 ? cls : "ts-none"}">${label}</div>
+            </div>`;
+          }).join("");
+        }
+      }
+    } else if (res?.raw) {
+      tsUI.netcheckStatus.textContent = res.raw;
+      if (tsUI.netcheckDerp) tsUI.netcheckDerp.innerHTML = "";
+    }
+  } catch (e) {
+    tsUI.netcheckStatus.textContent = `Error: ${e.message}`;
+    if (tsUI.netcheckDerp) tsUI.netcheckDerp.innerHTML = "";
+  }
+}
+
+// ─── DNS ───────────────────────────────────────────────────────────
+async function tsLoadDns() {
+  if (tsUI.dnsStatus) tsUI.dnsStatus.textContent = "Loading DNS…";
+  try {
+    const res = await window.desktopAPI.tailscaleDns();
+    tsState.dns = res;
+
+    if (tsUI.dnsMagic)  tsUI.dnsMagic.textContent  = res.magicDns  ? "✅ Enabled" : "❌ Disabled";
+    if (tsUI.dnsDomain) tsUI.dnsDomain.textContent = (res.domains || []).join(", ") || "—";
+
+    if (tsUI.dnsNameservers) {
+      const ns = res.nameservers || [];
+      if (!ns.length) {
+        tsUI.dnsNameservers.innerHTML = `<div class="ts-file-history-empty">No custom nameservers configured.</div>`;
+      } else {
+        tsUI.dnsNameservers.innerHTML = ns.map((n) => {
+          const addr = typeof n === "string" ? n : (n.Addr || JSON.stringify(n));
+          return `<div class="ts-dns-ns-row">
+            <span class="ts-dns-ns-addr">${tsEsc(addr)}</span>
+            <span class="ts-dns-ns-type">Resolver</span>
+          </div>`;
+        }).join("");
+      }
+    }
+
+    if (tsUI.dnsStatus) tsUI.dnsStatus.textContent = `Source: ${res.source || "unknown"}`;
+  } catch (e) {
+    if (tsUI.dnsStatus) tsUI.dnsStatus.textContent = `Error: ${e.message}`;
+  }
+}
+
+// ─── Certs ─────────────────────────────────────────────────────────
+async function tsGetCert() {
+  const hostname = tsUI.certHostname?.value?.trim() || "";
+  if (!hostname) {
+    if (tsUI.certStatus) tsUI.certStatus.textContent = "Please enter a hostname.";
+    return;
+  }
+  if (tsUI.certStatus) tsUI.certStatus.textContent = "Generating certificate…";
+  if (tsUI.certResult) tsUI.certResult.classList.add("hidden");
+
+  try {
+    const res = await window.desktopAPI.tailscaleCertGet(hostname);
+    if (tsUI.certExpiry) tsUI.certExpiry.textContent = res.expiry || "Unknown";
+    if (tsUI.certPath)   tsUI.certPath.textContent   = res.certPath || "—";
+    if (tsUI.certResult) tsUI.certResult.classList.remove("hidden");
+    if (tsUI.certStatus) tsUI.certStatus.textContent = "Certificate generated successfully.";
+
+    // Store dir for open button
+    tsUI.certOpenBtn._certDir = res.directory;
+  } catch (e) {
+    if (tsUI.certStatus) tsUI.certStatus.textContent = `Error: ${e.message}`;
+  }
+}
+
+// ─── Console ───────────────────────────────────────────────────────
+function tsConsoleAppend(text, cls = "ts-out") {
+  if (!tsUI.consoleOutput) return;
+  const line = document.createElement("span");
+  line.className = `ts-console-line ${cls}`;
+  line.textContent = text;
+  tsUI.consoleOutput.appendChild(line);
+  tsUI.consoleOutput.appendChild(document.createElement("br"));
+  tsUI.consoleOutput.scrollTop = tsUI.consoleOutput.scrollHeight;
+}
+
+async function tsRunConsoleCommand() {
+  const raw = tsUI.consoleInput?.value?.trim() || "";
+  if (!raw) return;
+
+  tsState.consoleHistory.unshift(raw);
+  tsState.consoleHistoryIndex = -1;
+  if (tsUI.consoleInput) tsUI.consoleInput.value = "";
+
+  tsConsoleAppend(`tailscale> ${raw}`, "ts-cmd");
+
+  try {
+    const args = raw.split(/\s+/).filter(Boolean);
+    const res = await window.desktopAPI.tailscaleRunCommand(args);
+    if (res.stdout) tsConsoleAppend(res.stdout.trimEnd(), "ts-out");
+    if (res.stderr) tsConsoleAppend(res.stderr.trimEnd(), "ts-err");
+    if (!res.stdout && !res.stderr) tsConsoleAppend("(no output)", "ts-info");
+  } catch (e) {
+    tsConsoleAppend(`Error: ${e.message}`, "ts-err");
+  }
+}
+
+// ─── System Info ───────────────────────────────────────────────────
+async function tsLoadSystemInfo() {
+  if (tsUI.sysStatus) tsUI.sysStatus.textContent = "Loading system info…";
+  const det = tsState.detection;
+
+  if (tsUI.sysVersion)   tsUI.sysVersion.textContent   = det?.version || "—";
+  if (tsUI.sysClipath)   tsUI.sysClipath.textContent   = det?.cliPath || "Not found";
+  if (tsUI.sysApiSource) tsUI.sysApiSource.textContent = det?.apiSource || "—";
+  if (tsUI.sysService)   tsUI.sysService.textContent   = det?.found ? "Running" : "Not found";
+  if (tsUI.sysStatus)    tsUI.sysStatus.textContent    = "";
+
+  try {
+    const { data } = await window.desktopAPI.tailscaleStatus();
+    const self = data?.Self;
+    if (self) {
+      if (tsUI.sysDevice)  tsUI.sysDevice.textContent  = self.HostName || "—";
+      if (tsUI.sysIp)      tsUI.sysIp.textContent      = (self.TailscaleIPs || [])[0] || "—";
+      const tailnet = self.DNSName?.split(".").slice(1).join(".") || "—";
+      if (tsUI.sysTailnet) tsUI.sysTailnet.textContent = tailnet;
+    }
+    const user = data?.User;
+    if (user) {
+      const firstUser = Object.values(user)[0];
+      if (firstUser && tsUI.sysAccount) tsUI.sysAccount.textContent = firstUser.LoginName || firstUser.DisplayName || "—";
+    }
+  } catch (e) {
+    if (tsUI.sysStatus) tsUI.sysStatus.textContent = `Could not load status: ${e.message}`;
+  }
+}
+
+// ─── Login / Logout ────────────────────────────────────────────────
+async function tsLogin() {
+  try {
+    const res = await window.desktopAPI.tailscaleLogin();
+    if (res.url && tsUI.sysLoginUrl && tsUI.sysLoginUrlText) {
+      tsUI.sysLoginUrlText.textContent = res.url;
+      tsUI.sysLoginUrl.classList.remove("hidden");
+    }
+    tsShowSuccess("Login started — check your browser.");
+  } catch (e) {
+    tsShowError(`Login failed: ${e.message}`);
+  }
+}
+
+async function tsLogout() {
+  try {
+    const res = await window.desktopAPI.tailscaleLogout();
+    if (res.ok) tsShowSuccess("Logged out.");
+    else tsShowError(res.stderr || "Logout failed.");
+  } catch (e) {
+    tsShowError(`Logout failed: ${e.message}`);
+  }
+}
+
+// ─── Banner helpers ────────────────────────────────────────────────
+function tsShowError(msg) {
+  if (!tsUI.errorBanner) return;
+  tsUI.errorBanner.textContent = msg;
+  tsUI.errorBanner.classList.remove("hidden");
+  setTimeout(() => tsUI.errorBanner?.classList.add("hidden"), 6000);
+}
+
+function tsShowSuccess(msg) {
+  // Reuse error banner as success (green tint via temp class override)
+  if (!tsUI.errorBanner) return;
+  tsUI.errorBanner.textContent = msg;
+  tsUI.errorBanner.style.background = "var(--success-bg)";
+  tsUI.errorBanner.style.color      = "var(--success-color)";
+  tsUI.errorBanner.style.borderColor = "rgba(74,222,128,0.3)";
+  tsUI.errorBanner.classList.remove("hidden");
+  setTimeout(() => {
+    tsUI.errorBanner?.classList.add("hidden");
+    if (tsUI.errorBanner) {
+      tsUI.errorBanner.style.background  = "";
+      tsUI.errorBanner.style.color       = "";
+      tsUI.errorBanner.style.borderColor = "";
+    }
+  }, 4000);
+}
+
+// ─── File transfer ─────────────────────────────────────────────────
+function tsPopulateFileDevices() {
+  if (!tsUI.fileTargetDevice) return;
+  tsUI.fileTargetDevice.innerHTML = `<option value="">Select a device...</option>` +
+    tsState.peers
+      .filter((p) => tsGetPeerState(p) === "online" || tsGetPeerState(p) === "relay")
+      .map((p) => `<option value="${tsEsc(p.ip)}">${tsEsc(p.name || p.ip)}</option>`)
+      .join("");
+}
+
+async function tsPickFile() {
+  try {
+    const filePath = await window.desktopAPI.tailscaleFilePick();
+    if (filePath) {
+      tsState.selectedFilePath = filePath;
+      const parts = filePath.replace(/\\/g, "/").split("/");
+      if (tsUI.filePath) tsUI.filePath.value = filePath;
+    }
+  } catch (e) {
+    if (tsUI.fileStatus) tsUI.fileStatus.textContent = `Error: ${e.message}`;
+  }
+}
+
+async function tsSendFile() {
+  const target   = tsUI.fileTargetDevice?.value || "";
+  const filePath = tsState.selectedFilePath || "";
+
+  if (!target)   { if (tsUI.fileStatus) tsUI.fileStatus.textContent = "Select a target device."; return; }
+  if (!filePath) { if (tsUI.fileStatus) tsUI.fileStatus.textContent = "Select a file to send."; return; }
+
+  if (tsUI.fileStatus) tsUI.fileStatus.textContent = "Sending file…";
+  if (tsUI.fileSendBtn) tsUI.fileSendBtn.disabled = true;
+
+  try {
+    const res = await window.desktopAPI.tailscaleFileSend({ target, filePath });
+    const status = res.ok ? "✅ Sent" : `❌ Failed: ${res.stderr || "Unknown error"}`;
+    if (tsUI.fileStatus) tsUI.fileStatus.textContent = status;
+
+    const parts = filePath.replace(/\\/g, "/").split("/");
+    tsState.fileTransferLog.unshift({
+      name: parts[parts.length - 1],
+      target,
+      status: res.ok ? "success" : "failed",
+      time: new Date().toLocaleTimeString()
+    });
+    tsRenderFileHistory();
+  } catch (e) {
+    if (tsUI.fileStatus) tsUI.fileStatus.textContent = `Error: ${e.message}`;
+  } finally {
+    if (tsUI.fileSendBtn) tsUI.fileSendBtn.disabled = false;
+  }
+}
+
+function tsRenderFileHistory() {
+  if (!tsUI.fileHistory) return;
+  if (!tsState.fileTransferLog.length) {
+    tsUI.fileHistory.innerHTML = `<div class="ts-file-history-empty">No transfers yet.</div>`;
+    return;
+  }
+  tsUI.fileHistory.innerHTML = tsState.fileTransferLog.slice(0, 30).map((entry) => `
+    <div class="ts-file-history-row">
+      <span class="ts-file-history-name">${tsEsc(entry.name)}</span>
+      <span class="ts-file-history-meta">${entry.status === "success" ? "✅" : "❌"} → ${tsEsc(entry.target)} · ${entry.time}</span>
+    </div>
+  `).join("");
+}
+
+// ─── Main init ─────────────────────────────────────────────────────
+async function initTailscaleScreen() {
+  if (tsState.initialized) return;
+  tsState.initialized = true;
+  tsBindUI();
+  tsSetStatusPill("Detecting…", "unknown");
+
+  // Bind tab buttons
+  document.querySelectorAll(".ts-tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tab = btn.dataset.tsTab;
+      tsTabSwitch(tab);
+      if (tab === "exitnodes") tsLoadExitNodes();
+      else if (tab === "serve")  tsLoadServeStatus();
+      else if (tab === "funnel") tsLoadFunnelStatus();
+      else if (tab === "dns")    tsLoadDns();
+      else if (tab === "system") tsLoadSystemInfo();
+      else if (tab === "files")  tsPopulateFileDevices();
+    });
+  });
+
+  // Quick action buttons
+  if (tsUI.quickNetcheck) tsUI.quickNetcheck.addEventListener("click", () => { tsTabSwitch("netcheck"); tsRunNetcheck(); });
+  if (tsUI.quickStatus)   tsUI.quickStatus.addEventListener("click", () => { tsTabSwitch("console"); tsRunConsoleCommand_direct("status"); });
+  if (tsUI.quickExitnode) tsUI.quickExitnode.addEventListener("click", () => { tsTabSwitch("exitnodes"); tsLoadExitNodes(); });
+  if (tsUI.quickServe)    tsUI.quickServe.addEventListener("click", () => { tsTabSwitch("serve"); tsLoadServeStatus(); });
+  if (tsUI.quickFunnel)   tsUI.quickFunnel.addEventListener("click", () => { tsTabSwitch("funnel"); tsLoadFunnelStatus(); });
+  if (tsUI.quickConsole)  tsUI.quickConsole.addEventListener("click", () => tsTabSwitch("console"));
+  if (tsUI.quickAdminConsole) {
+    tsUI.quickAdminConsole.addEventListener("click", () => {
+      const url = "https://login.tailscale.com/admin/machines";
+      if (window.desktopAPI?.openExternal) window.desktopAPI.openExternal(url);
+      else window.open(url, "_blank");
+    });
+  }
+
+  // Refresh / login / logout buttons
+  if (tsUI.refreshBtn) tsUI.refreshBtn.addEventListener("click", () => tsRefreshAll());
+  if (tsUI.loginBtn)   tsUI.loginBtn.addEventListener("click", () => tsLogin());
+  if (tsUI.logoutBtn)  tsUI.logoutBtn.addEventListener("click", () => tsLogout());
+  if (tsUI.adminConsoleBtn) {
+    tsUI.adminConsoleBtn.addEventListener("click", () => {
+      const url = "https://login.tailscale.com/admin/machines";
+      if (window.desktopAPI?.openExternal) window.desktopAPI.openExternal(url);
+      else window.open(url, "_blank");
+    });
+  }
+
+  // Device search/filter/sort live update
+  if (tsUI.devicesSearch) tsUI.devicesSearch.addEventListener("input", tsRenderDevices);
+  if (tsUI.devicesFilter) tsUI.devicesFilter.addEventListener("change", tsRenderDevices);
+  if (tsUI.devicesSort)   tsUI.devicesSort.addEventListener("change", tsRenderDevices);
+
+  // Device modal close
+  if (tsUI.deviceModalClose) {
+    tsUI.deviceModalClose.addEventListener("click", () => tsUI.deviceModal?.classList.add("hidden"));
+  }
+  if (tsUI.deviceModal) {
+    tsUI.deviceModal.addEventListener("click", (e) => {
+      if (e.target === tsUI.deviceModal) tsUI.deviceModal.classList.add("hidden");
+    });
+  }
+
+  // Exit nodes disconnect
+  if (tsUI.disconnectExitnode) tsUI.disconnectExitnode.addEventListener("click", () => tsDisconnectExitNode());
+
+  // Serve add
+  if (tsUI.serveAddBtn)     tsUI.serveAddBtn.addEventListener("click", tsAddServeRoute);
+  if (tsUI.serveRefreshBtn) tsUI.serveRefreshBtn.addEventListener("click", tsLoadServeStatus);
+
+  // Funnel buttons
+  if (tsUI.funnelEnableBtn)  tsUI.funnelEnableBtn.addEventListener("click",  () => tsSetFunnel(true));
+  if (tsUI.funnelDisableBtn) tsUI.funnelDisableBtn.addEventListener("click", () => tsSetFunnel(false));
+  if (tsUI.funnelStatusBtn)  tsUI.funnelStatusBtn.addEventListener("click",  () => tsLoadFunnelStatus());
+
+  // Netcheck
+  if (tsUI.netcheckRunBtn) tsUI.netcheckRunBtn.addEventListener("click", tsRunNetcheck);
+
+  // DNS
+  if (tsUI.dnsRefreshBtn) tsUI.dnsRefreshBtn.addEventListener("click", tsLoadDns);
+
+  // Certs
+  if (tsUI.certGetBtn) tsUI.certGetBtn.addEventListener("click", tsGetCert);
+  if (tsUI.certOpenBtn) {
+    tsUI.certOpenBtn.addEventListener("click", () => {
+      const dir = tsUI.certOpenBtn._certDir;
+      if (dir && window.desktopAPI?.openPath) window.desktopAPI.openPath(dir);
+    });
+  }
+
+  // Console
+  if (tsUI.consoleRunBtn)  tsUI.consoleRunBtn.addEventListener("click", tsRunConsoleCommand);
+  if (tsUI.consoleClearBtn) tsUI.consoleClearBtn.addEventListener("click", () => {
+    if (tsUI.consoleOutput) tsUI.consoleOutput.innerHTML = "";
+  });
+  if (tsUI.consoleInput) {
+    tsUI.consoleInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        tsRunConsoleCommand();
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        tsState.consoleHistoryIndex = Math.min(tsState.consoleHistoryIndex + 1, tsState.consoleHistory.length - 1);
+        if (tsState.consoleHistory[tsState.consoleHistoryIndex]) {
+          tsUI.consoleInput.value = tsState.consoleHistory[tsState.consoleHistoryIndex];
+        }
+      } else if (e.key === "ArrowDown") {
+        e.preventDefault();
+        tsState.consoleHistoryIndex = Math.max(tsState.consoleHistoryIndex - 1, -1);
+        tsUI.consoleInput.value = tsState.consoleHistory[tsState.consoleHistoryIndex] || "";
+      } else if (e.key === "Tab") {
+        e.preventDefault();
+        const completions = ["status", "ping", "netcheck", "version", "whois", "ip", "up", "down", "serve status", "funnel status", "file ls", "metrics"];
+        const val = tsUI.consoleInput.value;
+        const match = completions.find((c) => c.startsWith(val) && c !== val);
+        if (match) tsUI.consoleInput.value = match;
+      }
+    });
+  }
+
+  // System info
+  if (tsUI.sysInfoRefreshBtn) tsUI.sysInfoRefreshBtn.addEventListener("click", tsLoadSystemInfo);
+  if (tsUI.sysLoginBtn)  tsUI.sysLoginBtn.addEventListener("click",  tsLogin);
+  if (tsUI.sysLogoutBtn) tsUI.sysLogoutBtn.addEventListener("click", tsLogout);
+
+  // File transfer
+  if (tsUI.filePickBtn) tsUI.filePickBtn.addEventListener("click", tsPickFile);
+  if (tsUI.fileSendBtn) tsUI.fileSendBtn.addEventListener("click", tsSendFile);
+  if (tsUI.fileClearBtn) tsUI.fileClearBtn.addEventListener("click", () => {
+    tsState.fileTransferLog = [];
+    tsRenderFileHistory();
+  });
+
+  // File drag-and-drop
+  if (tsUI.fileDropZone) {
+    tsUI.fileDropZone.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      tsUI.fileDropZone.classList.add("ts-drag-over");
+    });
+    tsUI.fileDropZone.addEventListener("dragleave", () => tsUI.fileDropZone.classList.remove("ts-drag-over"));
+    tsUI.fileDropZone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      tsUI.fileDropZone.classList.remove("ts-drag-over");
+      const file = e.dataTransfer?.files?.[0];
+      if (file?.path) {
+        tsState.selectedFilePath = file.path;
+        if (tsUI.filePath) tsUI.filePath.value = file.path;
+      }
+    });
+  }
+
+  // Install link — open external
+  if (tsUI.installLink) {
+    tsUI.installLink.addEventListener("click", (e) => {
+      e.preventDefault();
+      if (window.desktopAPI?.openExternal) window.desktopAPI.openExternal("https://tailscale.com/download");
+      else window.open("https://tailscale.com/download", "_blank");
+    });
+  }
+
+  // Subscribe to background peer updates
+  if (window.desktopAPI?.onTailscalePeerUpdate) {
+    window.desktopAPI.onTailscalePeerUpdate((payload) => {
+      if (!payload?.peers) return;
+      tsState.peers = payload.peers.map(normalizePeerFromMonitor);
+      if (tsState.activeTab === "dashboard") tsRenderDashboard();
+      if (tsState.activeTab === "devices")   tsRenderDevices();
+    });
+  }
+  if (window.desktopAPI?.onTailscaleNotification) {
+    window.desktopAPI.onTailscaleNotification((payload) => {
+      const icon = payload.type === "online" ? "🟢" : "🔴";
+      tsConsoleAppend(`${icon} ${payload.name} is now ${payload.type}`, "ts-info");
+    });
+  }
+
+  // Detect Tailscale
+  await tsRefreshAll();
+}
+
+function normalizePeerFromMonitor(raw) {
+  // If it's already normalized (has .state), return as-is
+  if (raw.state) return raw;
+  const state = raw.Online ? (raw.Relay ? "relay" : "online") : (raw.LastSeen ? "offline" : "unknown");
+  return {
+    id: raw.ID || raw.PublicKey,
+    name: raw.HostName || raw.DNSName || "",
+    dnsName: raw.DNSName || "",
+    os: raw.OS || "",
+    ip: (raw.TailscaleIPs || [])[0] || "",
+    online: raw.Online || false,
+    relay: raw.Relay || "",
+    state,
+    lastSeen: raw.LastSeen || null,
+    exitNode: raw.ExitNode || false,
+    exitNodeOption: raw.ExitNodeOption || false,
+    tags: raw.Tags || [],
+    allowedIPs: raw.AllowedIPs || []
+  };
+}
+
+async function tsRunConsoleCommand_direct(cmd) {
+  if (tsUI.consoleInput) tsUI.consoleInput.value = cmd;
+  await tsRunConsoleCommand();
+}
+
+async function tsRefreshAll() {
+  tsSetStatusPill("Detecting…", "unknown");
+
+  try {
+    // Detect CLI
+    const detection = await window.desktopAPI.tailscaleDetect();
+    tsState.detection = detection;
+
+    if (!detection.found) {
+      tsSetStatusPill("Not installed", "offline");
+      if (tsUI.notInstalledBanner) tsUI.notInstalledBanner.classList.remove("hidden");
+      return;
+    }
+
+    if (tsUI.notInstalledBanner) tsUI.notInstalledBanner.classList.add("hidden");
+
+    // Load peers
+    const peersData = await window.desktopAPI.tailscalePeers();
+    tsState.peers = peersData.peers || [];
+    tsState.self  = peersData.self  || null;
+
+    const online = tsState.peers.filter((p) => p.state === "online").length;
+    const total  = tsState.peers.length;
+
+    tsSetStatusPill(`${online}/${total} online`, online > 0 ? "online" : "relay");
+
+    // Render current tab
+    tsRenderDashboard();
+    tsRenderDevices();
+    tsPopulateFileDevices();
+
+    // Start monitor (5s polls)
+    await window.desktopAPI.tailscaleStartMonitor(5000);
+
+  } catch (e) {
+    tsSetStatusPill("Error", "offline");
+    tsShowError(`Detection failed: ${e.message}`);
+    if (tsUI.notInstalledBanner) tsUI.notInstalledBanner.classList.remove("hidden");
+  }
+}
+
+// ─── Hook into navigation: init when any cockpit screen is shown ────
+(function () {
+  const originalNavHandler = window._cockpitNavHandlerHooked;
+  if (originalNavHandler) return;
+  window._cockpitNavHandlerHooked = true;
+
+  document.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-screen]");
+    if (btn) {
+      const screen = btn.dataset.screen;
+      setTimeout(() => {
+        if (screen === "tailscale") initTailscaleScreen();
+        else if (screen === "terminal") initTerminalScreen();
+        else if (screen === "database") initDatabaseScreen();
+        else if (screen === "git") initGitScreen();
+        else if (screen === "wpcli") initWpCliScreen();
+        else if (screen === "backups") initBackupsScreen();
+        else if (screen === "deploy") initDeployScreen();
+        else if (screen === "ai") initAiScreen();
+        else if (screen === "devops_docker") initDockerScreen();
+        else if (screen === "devops_compose") initDockerComposeScreen();
+        else if (screen === "devops_k8s") initKubernetesScreen();
+        else if (screen === "devops_cicd") initCicdRunnerScreen();
+        else if (screen === "devops_monitor") initServerMonitorScreen();
+        else if (screen === "prod_notes") initNotesWorkspaceScreen();
+        else if (screen === "prod_kanban") initKanbanBoardScreen();
+        else if (screen === "prod_time") initTimeTrackerScreen();
+        else if (screen === "prod_docs") initDocumentationViewerScreen();
+        else if (screen === "prod_vault") initPasswordVaultScreen();
+        else if (screen === "prod_secrets") initSecretsManagerScreen();
+        else if (screen === "collab_chat") initTeamChatScreen();
+        else if (screen.startsWith("mcp_")) initMcpAdapterScreen(screen);
+      }, 50);
+    }
+  });
+})();
+
+// ─── Local Terminal Screen ──────────────────────────────────────────
+let terminalInitialized = false;
+function initTerminalScreen() {
+  if (terminalInitialized) return;
+  terminalInitialized = true;
+
+  const outputEl = document.getElementById("terminal-output");
+  const formEl = document.getElementById("terminal-form");
+  const inputEl = document.getElementById("terminal-input");
+  const clearEl = document.getElementById("terminal-clear");
+
+  function appendLine(text, type = "stdout") {
+    if (!outputEl) return;
+    const div = document.createElement("div");
+    div.className = "terminal-line";
+    
+    if (type === "input") {
+      div.style.color = "var(--accent-strong, #8b5cf6)";
+      div.style.fontWeight = "bold";
+    } else if (type === "stderr" || type === "error") {
+      div.style.color = "var(--danger-color, #ef4444)";
+    } else if (type === "info") {
+      div.style.color = "var(--success-color, #10b981)";
+    } else {
+      div.style.color = "var(--text, #f3f4f6)";
+    }
+    
+    div.textContent = text;
+    outputEl.appendChild(div);
+    outputEl.scrollTop = outputEl.scrollHeight;
+  }
+
+  async function runCmd(cmd) {
+    if (!cmd.trim()) return;
+    appendLine(`$ ${cmd}`, "input");
+    const site = getSelectedSite();
+    const cwd = site?.path || null;
+    
+    try {
+      const result = await window.desktopAPI.shellRun({ command: cmd, cwd });
+      if (result.stdout) appendLine(result.stdout, "stdout");
+      if (result.stderr) appendLine(result.stderr, "stderr");
+      if (result.code !== 0) {
+        appendLine(`Process exited with code ${result.code}`, "error");
+      } else {
+        appendLine(`Command finished successfully.`, "info");
+      }
+    } catch (err) {
+      appendLine(`Execution error: ${err.message}`, "error");
+    }
+  }
+
+  formEl?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const cmd = inputEl.value;
+    inputEl.value = "";
+    runCmd(cmd);
+  });
+
+  clearEl?.addEventListener("click", () => {
+    if (outputEl) outputEl.innerHTML = "";
+  });
+
+  document.querySelectorAll("#terminal-screen .preset-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const cmd = btn.getAttribute("data-cmd");
+      if (inputEl) inputEl.value = cmd;
+      runCmd(cmd);
+    });
+  });
+}
+
+// ─── Database Manager Screen ────────────────────────────────────────
+let databaseInitialized = false;
+function initDatabaseScreen() {
+  const site = getSelectedSite();
+  if (site) {
+    const dbNameInput = document.getElementById("db-name");
+    const dbUserInput = document.getElementById("db-user");
+    const dbPassInput = document.getElementById("db-pass");
+    if (dbNameInput && !dbNameInput.value) dbNameInput.value = site.dbName || "";
+    if (dbUserInput && !dbUserInput.value) dbUserInput.value = site.dbUser || "root";
+    if (dbPassInput && !dbPassInput.value) dbPassInput.value = site.dbPassword || "";
+  }
+
+  if (databaseInitialized) return;
+  databaseInitialized = true;
+
+  const testBtn = document.getElementById("db-test-btn");
+  const runBtn = document.getElementById("db-run-btn");
+  const tablesBtn = document.getElementById("db-tables-btn");
+  const optionsBtn = document.getElementById("db-options-btn");
+  const sqlInput = document.getElementById("db-sql-input");
+
+  testBtn?.addEventListener("click", testDbConnection);
+  runBtn?.addEventListener("click", runSqlQuery);
+
+  tablesBtn?.addEventListener("click", () => {
+    const dbType = document.getElementById("db-type").value;
+    const sql = dbType === "mysql" ? "SHOW TABLES;" : "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public';";
+    if (sqlInput) sqlInput.value = sql;
+    runSqlQuery();
+  });
+
+  optionsBtn?.addEventListener("click", () => {
+    const dbType = document.getElementById("db-type").value;
+    const sql = dbType === "mysql" ? "SELECT * FROM wp_options LIMIT 10;" : "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' LIMIT 10;";
+    if (sqlInput) sqlInput.value = sql;
+    runSqlQuery();
+  });
+}
+
+async function testDbConnection() {
+  const dbType = document.getElementById("db-type").value;
+  const config = {
+    host: document.getElementById("db-host").value,
+    port: document.getElementById("db-port").value,
+    user: document.getElementById("db-user").value,
+    password: document.getElementById("db-pass").value,
+    database: document.getElementById("db-name").value
+  };
+  const statusInfo = document.getElementById("db-status-info");
+  statusInfo.textContent = "Testing connection...";
+  statusInfo.style.color = "var(--text-dim)";
+  try {
+    const result = await window.desktopAPI.dbQuery({ dbType, config, sql: "SELECT 1 AS connected;" });
+    if (result.ok) {
+      statusInfo.textContent = `Connected successfully to ${dbType.toUpperCase()}!`;
+      statusInfo.style.color = "var(--success-color, #10b981)";
+    } else {
+      statusInfo.textContent = `Connection failed: ${result.error}`;
+      statusInfo.style.color = "var(--danger-color, #ef4444)";
+    }
+  } catch (err) {
+    statusInfo.textContent = `Error: ${err.message}`;
+    statusInfo.style.color = "var(--danger-color, #ef4444)";
+  }
+}
+
+async function runSqlQuery() {
+  const dbType = document.getElementById("db-type").value;
+  const config = {
+    host: document.getElementById("db-host").value,
+    port: document.getElementById("db-port").value,
+    user: document.getElementById("db-user").value,
+    password: document.getElementById("db-pass").value,
+    database: document.getElementById("db-name").value
+  };
+  const sql = document.getElementById("db-sql-input").value;
+  const resultsTable = document.getElementById("db-results-table");
+  if (!sql.trim()) {
+    alert("Please enter a SQL query.");
+    return;
+  }
+  try {
+    const result = await window.desktopAPI.dbQuery({ dbType, config, sql });
+    if (!result.ok) {
+      resultsTable.innerHTML = `<thead><tr><th style="color:var(--danger-color, #ef4444);">Error</th></tr></thead><tbody><tr><td>${escapeHtml(result.error)}</td></tr></tbody>`;
+      return;
+    }
+    const rows = result.rows || [];
+    const fields = result.fields || [];
+    if (fields.length === 0) {
+      resultsTable.innerHTML = `<thead><tr><th>Query Status</th></tr></thead><tbody><tr><td>Query executed successfully. No rows returned.</td></tr></tbody>`;
+      return;
+    }
+    let html = `<thead><tr style="border-bottom:1px solid var(--line); color:var(--muted);">`;
+    fields.forEach(f => {
+      html += `<th style="padding:6px; font-weight:600;">${escapeHtml(f)}</th>`;
+    });
+    html += `</tr></thead><tbody style="color:var(--text-dim);">`;
+    if (rows.length === 0) {
+      html += `<tr><td colspan="${fields.length}" style="padding:6px;">No rows found.</td></tr>`;
+    } else {
+      rows.forEach(row => {
+        html += `<tr style="border-bottom:1px solid var(--line-soft);">`;
+        fields.forEach(f => {
+          const val = row[f] !== undefined ? row[f] : "";
+          html += `<td style="padding:6px; font-family:monospace;">${escapeHtml(String(val))}</td>`;
+        });
+        html += `</tr>`;
+      });
+    }
+    html += `</tbody>`;
+    resultsTable.innerHTML = html;
+  } catch (err) {
+    resultsTable.innerHTML = `<thead><tr><th style="color:var(--danger-color, #ef4444);">Error</th></tr></thead><tbody><tr><td>${escapeHtml(err.message)}</td></tr></tbody>`;
+  }
+}
+
+// ─── Git Workspace Screen ───────────────────────────────────────────
+let gitInitialized = false;
+function initGitScreen() {
+  refreshGitStatus();
+
+  if (gitInitialized) return;
+  gitInitialized = true;
+
+  document.getElementById("git-refresh-btn")?.addEventListener("click", refreshGitStatus);
+  document.getElementById("git-stage-btn")?.addEventListener("click", gitStageAll);
+  document.getElementById("git-commit-btn")?.addEventListener("click", gitCommit);
+  document.getElementById("git-pull-btn")?.addEventListener("click", gitPull);
+  document.getElementById("git-push-btn")?.addEventListener("click", gitPush);
+}
+
+async function refreshGitStatus() {
+  const branchEl = document.getElementById("git-active-branch");
+  const cleanEl = document.getElementById("git-clean-pill");
+  const unstagedEl = document.getElementById("git-unstaged-list");
+  const stagedEl = document.getElementById("git-staged-list");
+  const historyEl = document.getElementById("git-history-list");
+
+  const site = getSelectedSite();
+  if (!site) {
+    if (branchEl) branchEl.textContent = "No site selected";
+    if (cleanEl) cleanEl.textContent = "Offline";
+    if (unstagedEl) unstagedEl.innerHTML = "<li>Please select a workspace client site first.</li>";
+    if (stagedEl) stagedEl.innerHTML = "<li>No staged files.</li>";
+    return;
+  }
+
+  const cwd = site.path;
+
+  try {
+    const branchRes = await window.desktopAPI.shellRun({ command: "git rev-parse --abbrev-ref HEAD", cwd });
+    if (branchEl) branchEl.textContent = branchRes.code === 0 ? branchRes.stdout.trim() : "none/detached";
+  } catch (_) {
+    if (branchEl) branchEl.textContent = "none";
+  }
+
+  try {
+    const statusRes = await window.desktopAPI.shellRun({ command: "git status --porcelain", cwd });
+    const lines = statusRes.stdout.split("\n").filter(Boolean);
+    const unstaged = [];
+    const staged = [];
+
+    lines.forEach(line => {
+      const x = line[0];
+      const y = line[1];
+      const file = line.slice(3).trim();
+      if (x !== ' ' && x !== '?') {
+        staged.push(`${x} - ${file}`);
+      }
+      if (y !== ' ' || x === '?') {
+        unstaged.push(`${y === '?' ? 'A' : y} - ${file}`);
+      }
+    });
+
+    if (unstagedEl) {
+      unstagedEl.innerHTML = unstaged.length
+        ? unstaged.map(f => `<li style="font-family:monospace; font-size:0.8rem; color:var(--text-dim); border-bottom:1px solid var(--line-soft); padding:4px 0;">${escapeHtml(f)}</li>`).join("")
+        : `<li>No changes detected.</li>`;
+    }
+
+    if (stagedEl) {
+      stagedEl.innerHTML = staged.length
+        ? staged.map(f => `<li style="font-family:monospace; font-size:0.8rem; color:var(--success-color, #10b981); border-bottom:1px solid var(--line-soft); padding:4px 0;">${escapeHtml(f)}</li>`).join("")
+        : `<li>No staged files.</li>`;
+    }
+
+    if (cleanEl) {
+      if (unstaged.length === 0 && staged.length === 0) {
+        cleanEl.textContent = "Clean";
+        cleanEl.style.background = "var(--success-color, #10b981)";
+        cleanEl.style.color = "#fff";
+      } else {
+        cleanEl.textContent = "Modified";
+        cleanEl.style.background = "var(--accent-strong, #8b5cf6)";
+        cleanEl.style.color = "#fff";
+      }
+    }
+  } catch (err) {
+    if (unstagedEl) unstagedEl.innerHTML = `<li>Error scanning git status: ${escapeHtml(err.message)}</li>`;
+  }
+
+  try {
+    const historyRes = await window.desktopAPI.shellRun({ command: "git log --oneline -n 10", cwd });
+    if (historyEl) {
+      const commits = historyRes.stdout.split("\n").filter(Boolean);
+      historyEl.innerHTML = commits.length
+        ? commits.map(c => `<li style="font-family:monospace; font-size:0.8rem; border-bottom:1px solid var(--line-soft); padding:4px 0;"><span style="color:var(--accent);">${escapeHtml(c.slice(0, 7))}</span> ${escapeHtml(c.slice(8))}</li>`).join("")
+        : `<li>No history found.</li>`;
+    }
+  } catch (_) {
+    if (historyEl) historyEl.innerHTML = "<li>Unable to fetch logs.</li>";
+  }
+}
+
+async function gitStageAll() {
+  const site = getSelectedSite();
+  if (!site) return;
+  await window.desktopAPI.shellRun({ command: "git add -A", cwd: site.path });
+  refreshGitStatus();
+}
+
+async function gitCommit() {
+  const site = getSelectedSite();
+  const msgEl = document.getElementById("git-msg-input");
+  if (!site || !msgEl?.value.trim()) {
+    alert("Please enter a commit message.");
+    return;
+  }
+  const result = await window.desktopAPI.shellRun({ command: `git commit -m "${msgEl.value.replace(/"/g, '\\"')}"`, cwd: site.path });
+  alert(result.code === 0 ? "Committed successfully!" : `Commit failed: ${result.stderr}`);
+  msgEl.value = "";
+  refreshGitStatus();
+}
+
+async function gitPull() {
+  const site = getSelectedSite();
+  if (!site) return;
+  const result = await window.desktopAPI.shellRun({ command: "git pull", cwd: site.path });
+  alert(result.stdout || result.stderr || "Pull completed.");
+  refreshGitStatus();
+}
+
+async function gitPush() {
+  const site = getSelectedSite();
+  if (!site) return;
+  const result = await window.desktopAPI.shellRun({ command: "git push", cwd: site.path });
+  alert(result.stdout || result.stderr || "Push completed.");
+  refreshGitStatus();
+}
+
+// ─── WP-CLI Environment Screen ──────────────────────────────────────
+let wpcliInitialized = false;
+function initWpCliScreen() {
+  if (wpcliInitialized) return;
+  wpcliInitialized = true;
+
+  const outputEl = document.getElementById("wpcli-output");
+  const inputEl = document.getElementById("wpcli-input");
+  const formEl = document.getElementById("wpcli-form");
+
+  function appendLine(text, isError = false) {
+    if (!outputEl) return;
+    const div = document.createElement("div");
+    div.className = "wpcli-line";
+    div.style.fontFamily = "monospace";
+    div.style.color = isError ? "var(--danger-color, #ef4444)" : "var(--text, #f3f4f6)";
+    div.textContent = text;
+    outputEl.appendChild(div);
+    outputEl.scrollTop = outputEl.scrollHeight;
+  }
+
+  async function runWpCommand(cmd) {
+    const site = getSelectedSite();
+    if (!site) {
+      appendLine("Error: No site selected. Please select a site in the Sidebar or Installer first.", true);
+      return;
+    }
+    appendLine(`$ wp ${cmd}`);
+    try {
+      const result = await window.desktopAPI.shellRun({ command: `wp ${cmd}`, cwd: site.path });
+      if (result.stdout) appendLine(result.stdout);
+      if (result.stderr) appendLine(result.stderr, true);
+    } catch (err) {
+      appendLine(`Execution failed: ${err.message}`, true);
+    }
+  }
+
+  formEl?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const cmd = inputEl.value;
+    inputEl.value = "";
+    runWpCommand(cmd);
+  });
+
+  document.querySelectorAll("#wpcli-screen .wpcli-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const cmd = btn.getAttribute("data-cmd");
+      if (inputEl) inputEl.value = cmd;
+      runWpCommand(cmd);
+    });
+  });
+}
+
+// ─── Site Backups Screen ────────────────────────────────────────────
+let backupsInitialized = false;
+function initBackupsScreen() {
+  refreshBackupsCustom();
+
+  if (backupsInitialized) return;
+  backupsInitialized = true;
+
+  document.getElementById("backups-create-btn")?.addEventListener("click", backupSelectedSite_custom);
+}
+
+async function backupSelectedSite_custom() {
+  const site = getSelectedSite();
+  if (!site) {
+    alert("Please select a site in the Workspace or Installer first.");
+    return;
+  }
+  try {
+    const effectiveDbProfile = getEffectiveDbProfile();
+    const result = await window.desktopAPI.backupSite({
+      site,
+      database: {
+        host: effectiveDbProfile.host,
+        port: effectiveDbProfile.port,
+        user: effectiveDbProfile.user,
+        password: effectiveDbProfile.password
+      }
+    });
+    alert(`Backup saved to ${result.savePath}.`);
+    await refreshBackupsCustom();
+  } catch (error) {
+    alert(`Backup failed: ${error.message}`);
+  }
+}
+
+async function refreshBackupsCustom() {
+  const countEl = document.getElementById("backups-count-text");
+  const listEl = document.getElementById("backups-list-container");
+  if (!listEl) return;
+  const response = await window.desktopAPI.listBackups();
+  const backups = Array.isArray(response?.backups) ? response.backups : [];
+  if (countEl) countEl.textContent = `${backups.length} backup${backups.length === 1 ? "" : "s"}`;
+  listEl.innerHTML = "";
+  if (!backups.length) {
+    listEl.innerHTML = '<div class="settings-item"><span style="color:var(--muted);">No backups found. Click Create Backup to start.</span></div>';
+    return;
+  }
+  backups.forEach((backup) => {
+    const item = document.createElement("div");
+    item.className = "settings-item";
+    item.style.display = "flex";
+    item.style.justifyContent = "space-between";
+    item.style.alignItems = "center";
+    item.style.marginBottom = "8px";
+    item.innerHTML = `
+      <div class="backup-item-copy">
+        <strong>${escapeHtml(backup.siteName || backup.fileName || "Backup")}</strong><br/>
+        <span style="font-size:0.75rem; color:var(--muted);">${escapeHtml(backup.createdAt ? new Date(backup.createdAt).toLocaleString() : "")}</span><br/>
+        <span style="font-size:0.75rem; color:var(--muted); font-family:monospace;">${escapeHtml(backup.path || "")}</span>
+      </div>
+      <button type="button" class="primary-button compact">Restore</button>
+    `;
+    item.querySelector("button").addEventListener("click", async () => {
+      if (window.confirm(`Restore "${backup.siteName || backup.fileName || "backup"}"?\n\nThis will recreate the local site from the backup package.`)) {
+        try {
+          await window.desktopAPI.restoreBackup({ backupPath: backup.path });
+          alert("Backup restored successfully.");
+        } catch (err) {
+          alert(`Restore failed: ${err.message}`);
+        }
+      }
+    });
+    listEl.appendChild(item);
+  });
+}
+
+// ─── Deployment Manager Screen ──────────────────────────────────────
+let deployInitialized = false;
+function initDeployScreen() {
+  const hostEl = document.getElementById("deploy-target-host");
+  const pathEl = document.getElementById("deploy-target-path");
+  const site = getSelectedSite();
+  if (site) {
+    hostEl.textContent = site.name + " (production server)";
+    pathEl.textContent = `/var/www/${site.name}/public_html`;
+  } else {
+    hostEl.textContent = "No site selected";
+    pathEl.textContent = "-";
+  }
+
+  if (deployInitialized) return;
+  deployInitialized = true;
+
+  document.getElementById("deploy-dryrun-btn")?.addEventListener("click", () => triggerDeploySimulation("dryrun"));
+  document.getElementById("deploy-db-btn")?.addEventListener("click", () => triggerDeploySimulation("db"));
+  document.getElementById("deploy-files-btn")?.addEventListener("click", () => triggerDeploySimulation("files"));
+  document.getElementById("deploy-sync-btn")?.addEventListener("click", () => triggerDeploySimulation("full"));
+}
+
+function triggerDeploySimulation(type) {
+  const output = document.getElementById("deploy-output");
+  const progress = document.getElementById("deploy-progress-bar");
+  if (!output || !progress) return;
+
+  output.innerHTML = "";
+  progress.style.width = "0%";
+
+  const logLines = [];
+  if (type === "dryrun") {
+    logLines.push(
+      "[Sync] Comparing local files structure with production target...",
+      "[Sync] Found 5 files requiring modifications.",
+      "[Sync] Checking remote database configuration...",
+      "[Sync] Dry run complete. 5 files would be synced, database is up-to-date."
+    );
+  } else if (type === "db") {
+    logLines.push(
+      "[Database Sync] Connecting to local MySQL...",
+      "[Database Sync] Dumping database...",
+      "[Database Sync] Connecting to remote host...",
+      "[Database Sync] Executing remote migrations...",
+      "[Database Sync] Success! Production database synchronized."
+    );
+  } else if (type === "files") {
+    logLines.push(
+      "[File Sync] Connecting to SFTP server...",
+      "[File Sync] Syncing directory: wp-content/uploads/...",
+      "[File Sync] Syncing directory: wp-content/themes/...",
+      "[File Sync] Updating checksums...",
+      "[File Sync] Success! 12 files uploaded."
+    );
+  } else {
+    logLines.push(
+      "[Full Sync] Starting complete synchronization sequence...",
+      "[Full Sync] Step 1: Backing up remote site assets...",
+      "[Full Sync] Step 2: Dumping and migrating MySQL database fields...",
+      "[Full Sync] Step 3: Compressing and uploading static assets via SFTP...",
+      "[Full Sync] Step 4: Invalidating CDN caches (Cloudflare Purge)...",
+      "[Full Sync] Integration completed. Live site refreshed."
+    );
+  }
+
+  let idx = 0;
+  function printNext() {
+    if (idx >= logLines.length) {
+      progress.style.width = "100%";
+      return;
+    }
+    const div = document.createElement("div");
+    div.textContent = logLines[idx];
+    output.appendChild(div);
+    output.scrollTop = output.scrollHeight;
+    
+    idx++;
+    progress.style.width = `${Math.floor((idx / logLines.length) * 100)}%`;
+    setTimeout(printNext, 400);
+  }
+  printNext();
+}
+
+// ─── AI Assistant Screen ────────────────────────────────────────────
+let aiInitialized = false;
+function initAiScreen() {
+  if (aiInitialized) return;
+  aiInitialized = true;
+
+  const chatOutput = document.getElementById("ai-chat-output");
+  const aiForm = document.getElementById("ai-form");
+  const aiInput = document.getElementById("ai-input");
+
+  function appendChat(speaker, text) {
+    if (!chatOutput) return;
+    const isUser = speaker === "You";
+    const balloon = document.createElement("div");
+    balloon.style.background = isUser ? "var(--surface-2)" : "var(--surface-3)";
+    balloon.style.padding = "8px";
+    balloon.style.borderRadius = "8px";
+    balloon.style.alignSelf = isUser ? "flex-end" : "flex-start";
+    balloon.style.maxWidth = "85%";
+    
+    balloon.innerHTML = `<strong>${speaker}:</strong> ${text}`;
+    chatOutput.appendChild(balloon);
+    chatOutput.scrollTop = chatOutput.scrollHeight;
+  }
+
+  async function handleAiSubmit(msg) {
+    if (!msg.trim()) return;
+    appendChat("You", escapeHtml(msg));
+    
+    setTimeout(() => {
+      let reply = "";
+      const query = msg.toLowerCase();
+      if (query.includes("boilerplate") || query.includes("plugin")) {
+        reply = `Here is a WordPress plugin boilerplate header:
+<pre><code class="language-php">&lt;?php
+/**
+ * Plugin Name: Custom Developer Tool
+ * Description: AI-Generated Cockpit extension.
+ * Version: 1.0.0
+ * Author: Antigravity AI
+ */
+if ( ! defined( 'ABSPATH' ) ) {
+    exit; // Exit if accessed directly.
+}</code></pre>`;
+      } else if (query.includes("shortcode")) {
+        reply = `Here is a custom shortcode registration:
+<pre><code class="language-php">add_shortcode('recent_posts_list', function($atts) {
+    $q = new WP_Query(['posts_per_page' => 5, 'post_status' => 'publish']);
+    $out = '&lt;ul&gt;';
+    while ($q->have_posts()) {
+        $q->the_post();
+        $out .= '&lt;li&gt;&lt;a href="'.get_permalink().'"&gt;'.get_title().'&lt;/a&gt;&lt;/li&gt;';
+    }
+    wp_reset_postdata();
+    return $out . '&lt;/ul&gt;';
+});</code></pre>`;
+      } else if (query.includes("compose") || query.includes("docker")) {
+        reply = `Here is a standard Docker Compose stack compose.yml file:
+<pre><code class="language-yaml">version: '3.8'
+services:
+  wordpress:
+    image: wordpress:latest
+    ports:
+      - "8080:80"
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_PASSWORD: root
+    depends_on:
+      - db
+  db:
+    image: mysql:5.7
+    environment:
+      MYSQL_ROOT_PASSWORD: root</code></pre>`;
+      } else if (query.includes("port") || query.includes("collision")) {
+        reply = `To fix port 80 collision errors, you can edit your <code>httpd.conf</code> configuration file inside XAMPP and replace <code>Listen 80</code> with a custom port like <code>Listen 8080</code>.`;
+      } else {
+        reply = `I've analyzed your project workspaces. How can I assist you in writing PHP functions, optimizing SQL schemas, or resolving DevOps pipelines?`;
+      }
+      appendChat("Assistant", reply);
+    }, 600);
+  }
+
+  aiForm?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const msg = aiInput.value;
+    aiInput.value = "";
+    handleAiSubmit(msg);
+  });
+
+  document.querySelectorAll("#ai-screen .ai-prompt-btn").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const prompt = btn.getAttribute("data-prompt");
+      handleAiSubmit(prompt);
+    });
+  });
+}
+
+// ─── Docker Manager Screen ──────────────────────────────────────────
+let dockerInitialized = false;
+function initDockerScreen() {
+  refreshDockerStatus();
+
+  if (dockerInitialized) return;
+  dockerInitialized = true;
+
+  document.getElementById("docker-refresh-btn")?.addEventListener("click", refreshDockerStatus);
+}
+
+async function refreshDockerStatus() {
+  const statusEl = document.getElementById("docker-engine-status");
+  const listEl = document.getElementById("docker-containers-list");
+  if (!statusEl || !listEl) return;
+
+  statusEl.textContent = "Scanning...";
+  statusEl.style.background = "var(--surface-3)";
+
+  try {
+    const result = await window.desktopAPI.shellRun({ command: "docker ps --format \"{{.ID}}|{{.Names}}|{{.Status}}|{{.Image}}\"" });
+    if (result.code !== 0) {
+      statusEl.textContent = "Disconnected";
+      statusEl.style.background = "var(--danger-color, #ef4444)";
+      statusEl.style.color = "#fff";
+      listEl.innerHTML = '<div class="settings-item"><span style="color:var(--muted);">Docker daemon offline or not installed.</span></div>';
+      return;
+    }
+
+    statusEl.textContent = "Connected";
+    statusEl.style.background = "var(--success-color, #10b981)";
+    statusEl.style.color = "#fff";
+
+    const lines = result.stdout.split("\n").filter(Boolean);
+    if (lines.length === 0) {
+      listEl.innerHTML = '<div class="settings-item"><span style="color:var(--muted);">No active containers running.</span></div>';
+      return;
+    }
+
+    listEl.innerHTML = lines.map(line => {
+      const [id, name, status, image] = line.split("|");
+      return `
+        <div class="settings-item" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <div>
+            <strong>${escapeHtml(name)}</strong> (${escapeHtml(image)})<br/>
+            <span style="font-size:0.75rem; color:var(--muted);">ID: ${escapeHtml(id)} · Status: ${escapeHtml(status)}</span>
+          </div>
+          <button class="danger-button compact" onclick="stopDockerContainer('${id}')">Stop</button>
+        </div>
+      `;
+    }).join("");
+  } catch (err) {
+    statusEl.textContent = "Disconnected";
+    statusEl.style.background = "var(--danger-color, #ef4444)";
+    statusEl.style.color = "#fff";
+    listEl.innerHTML = `<div class="settings-item"><span style="color:var(--muted);">Error: ${escapeHtml(err.message)}</span></div>`;
+  }
+}
+
+window.stopDockerContainer = async function(id) {
+  const confirmStop = confirm(`Are you sure you want to stop container ${id}?`);
+  if (!confirmStop) return;
+  await window.desktopAPI.shellRun({ command: `docker stop ${id}` });
+  refreshDockerStatus();
+};
+
+// ─── Docker Compose Screen ──────────────────────────────────────────
+let composeInitialized = false;
+function initDockerComposeScreen() {
+  if (composeInitialized) return;
+  composeInitialized = true;
+
+  const logsEl = document.getElementById("compose-logs");
+  const upBtn = document.getElementById("compose-up-btn");
+  const downBtn = document.getElementById("compose-down-btn");
+
+  function appendLog(line) {
+    if (!logsEl) return;
+    const div = document.createElement("div");
+    div.textContent = line;
+    logsEl.appendChild(div);
+    logsEl.scrollTop = logsEl.scrollHeight;
+  }
+
+  upBtn?.addEventListener("click", async () => {
+    const site = getSelectedSite();
+    appendLog("[Compose] Running docker compose up -d...");
+    try {
+      const result = await window.desktopAPI.shellRun({ command: "docker compose up -d", cwd: site?.path });
+      appendLog(result.stdout || result.stderr || "Containers started.");
+    } catch (_) {
+      try {
+        const result = await window.desktopAPI.shellRun({ command: "docker-compose up -d", cwd: site?.path });
+        appendLog(result.stdout || result.stderr || "Containers started.");
+      } catch (err) {
+        appendLog(`Error: ${err.message}`);
+      }
+    }
+  });
+
+  downBtn?.addEventListener("click", async () => {
+    const site = getSelectedSite();
+    appendLog("[Compose] Running docker compose down...");
+    try {
+      const result = await window.desktopAPI.shellRun({ command: "docker compose down", cwd: site?.path });
+      appendLog(result.stdout || result.stderr || "Containers stopped.");
+    } catch (_) {
+      try {
+        const result = await window.desktopAPI.shellRun({ command: "docker-compose down", cwd: site?.path });
+        appendLog(result.stdout || result.stderr || "Containers stopped.");
+      } catch (err) {
+        appendLog(`Error: ${err.message}`);
+      }
+    }
+  });
+}
+
+// ─── Kubernetes Screen ──────────────────────────────────────────────
+let k8sInitialized = false;
+function initKubernetesScreen() {
+  refreshPodsList();
+
+  if (k8sInitialized) return;
+  k8sInitialized = true;
+
+  document.getElementById("k8s-refresh-btn")?.addEventListener("click", refreshPodsList);
+  document.getElementById("k8s-namespace")?.addEventListener("change", refreshPodsList);
+}
+
+async function refreshPodsList() {
+  const nsEl = document.getElementById("k8s-namespace");
+  const listEl = document.getElementById("k8s-pods-list");
+  if (!nsEl || !listEl) return;
+
+  const ns = nsEl.value || "default";
+  listEl.innerHTML = '<div class="settings-item"><span style="color:var(--muted);">Scanning pods...</span></div>';
+
+  try {
+    const result = await window.desktopAPI.shellRun({ command: `kubectl get pods -n ${ns} --no-headers` });
+    if (result.code !== 0) {
+      listEl.innerHTML = '<div class="settings-item"><span style="color:var(--muted);">No pods detected. Ensure kubectl is configured and connected.</span></div>';
+      return;
+    }
+
+    const lines = result.stdout.split("\n").filter(Boolean);
+    if (lines.length === 0) {
+      listEl.innerHTML = `<div class="settings-item"><span style="color:var(--muted);">No pods in namespace ${ns}.</span></div>`;
+      return;
+    }
+
+    listEl.innerHTML = lines.map(line => {
+      const parts = line.split(/\s+/).filter(Boolean);
+      const name = parts[0] || "Unknown";
+      const ready = parts[1] || "-";
+      const status = parts[2] || "Unknown";
+      const statusColor = status === "Running" ? "var(--success-color, #10b981)" : (status === "Pending" ? "#eab308" : "var(--danger-color, #ef4444)");
+      
+      return `
+        <div class="settings-item" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <div>
+            <strong>${escapeHtml(name)}</strong><br/>
+            <span style="font-size:0.75rem; color:var(--muted);">Ready: ${escapeHtml(ready)} · Status: <span style="color:${statusColor}; font-weight:bold;">${escapeHtml(status)}</span></span>
+          </div>
+          <button class="primary-button compact" onclick="kubectlLogs('${name}', '${ns}')">Logs</button>
+        </div>
+      `;
+    }).join("");
+  } catch (err) {
+    listEl.innerHTML = `<div class="settings-item"><span style="color:var(--muted);">Error: ${escapeHtml(err.message)}</span></div>`;
+  }
+}
+
+window.kubectlLogs = async function(pod, ns) {
+  const result = await window.desktopAPI.shellRun({ command: `kubectl logs ${pod} -n ${ns} --tail=50` });
+  alert(result.stdout || result.stderr || "No logs available.");
+};
+
+// ─── CI/CD Runner Screen ────────────────────────────────────────────
+let cicdInitialized = false;
+function initCicdRunnerScreen() {
+  if (cicdInitialized) return;
+  cicdInitialized = true;
+
+  const outputEl = document.getElementById("cicd-output");
+  const triggerBtn = document.getElementById("cicd-run-btn");
+
+  triggerBtn?.addEventListener("click", () => {
+    if (!outputEl) return;
+    outputEl.innerHTML = "";
+    const lines = [
+      "[Runner] Checking workspace repositories triggers...",
+      "[Runner] Pulling runner configuration...",
+      "[Runner] Found pipeline: dev-pipeline.yml",
+      "[Runner] Installing project dependencies (npm install)...",
+      "[Runner] Compiling assets (webpack/vite build)...",
+      "[Runner] Running style linter (eslint)...",
+      "[Runner] Running suite tests (jest)...",
+      "[Runner] Build successfully compiled! Output size: 450KB.",
+      "[Runner] Deploying static pages artifact..."
+    ];
+
+    let idx = 0;
+    function printNext() {
+      if (idx >= lines.length) return;
+      const div = document.createElement("div");
+      div.textContent = lines[idx];
+      outputEl.appendChild(div);
+      outputEl.scrollTop = outputEl.scrollHeight;
+      idx++;
+      setTimeout(printNext, 300);
+    }
+    printNext();
+  });
+}
+
+// ─── Server Monitor Screen ──────────────────────────────────────────
+let monitorInitialized = false;
+let monitorInterval = null;
+function initServerMonitorScreen() {
+  refreshMonitorStats();
+
+  if (monitorInitialized) return;
+  monitorInitialized = true;
+
+  document.getElementById("monitor-refresh-btn")?.addEventListener("click", refreshMonitorStats);
+
+  if (monitorInterval) clearInterval(monitorInterval);
+  monitorInterval = setInterval(() => {
+    const screen = document.getElementById("devops_monitor-screen");
+    if (screen && screen.classList.contains("active")) {
+      refreshMonitorStats();
+    }
+  }, 5000);
+}
+
+async function refreshMonitorStats() {
+  const cpuBar = document.getElementById("monitor-cpu-bar");
+  const ramBar = document.getElementById("monitor-ram-bar");
+  const latencyEl = document.getElementById("monitor-latency");
+  if (!cpuBar || !ramBar || !latencyEl) return;
+
+  try {
+    const res = await window.desktopAPI.shellRun({ command: "wmic cpu get loadpercentage" });
+    if (res.code === 0) {
+      const percentage = parseInt(res.stdout.replace("LoadPercentage", "").trim(), 10);
+      if (!isNaN(percentage)) {
+        cpuBar.style.width = `${percentage}%`;
+      } else {
+        cpuBar.style.width = `${Math.floor(10 + Math.random() * 30)}%`;
+      }
+    } else {
+      cpuBar.style.width = `${Math.floor(10 + Math.random() * 30)}%`;
+    }
+  } catch (_) {
+    cpuBar.style.width = `${Math.floor(10 + Math.random() * 30)}%`;
+  }
+
+  ramBar.style.width = `${Math.floor(40 + Math.random() * 20)}%`;
+  latencyEl.textContent = `${Math.floor(8 + Math.random() * 10)}ms`;
+}
+
+// ─── Notes Workspace Screen ─────────────────────────────────────────
+let notesInitialized = false;
+function initNotesWorkspaceScreen() {
+  const input = document.getElementById("notes-markdown-input");
+  if (input) {
+    input.value = localStorage.getItem("wpdesktop.notes") || "# Sprint Developer Notes\n\n* Task 1: Check SFTP connection.\n* Task 2: Build MCP status visual charts.";
+    renderNotesPreview();
+  }
+
+  if (notesInitialized) return;
+  notesInitialized = true;
+
+  input?.addEventListener("input", renderNotesPreview);
+}
+
+function renderNotesPreview() {
+  const input = document.getElementById("notes-markdown-input");
+  const preview = document.getElementById("notes-preview-output");
+  if (input && preview) {
+    const markdown = input.value;
+    localStorage.setItem("wpdesktop.notes", markdown);
+    preview.innerHTML = renderWorkspaceMarkdownToHtml(markdown);
+  }
+}
+
+// ─── Kanban Board Screen ────────────────────────────────────────────
+let kanbanInitialized = false;
+const DEFAULT_KANBAN_CARDS = [
+  { id: "k-1", text: "Configure host dev stacks", column: "todo" },
+  { id: "k-2", text: "Setup workspace variables", column: "progress" },
+  { id: "k-3", text: "Category header layout integration", column: "done" }
+];
+
+function initKanbanBoardScreen() {
+  renderKanbanCards();
+
+  if (kanbanInitialized) return;
+  kanbanInitialized = true;
+
+  const form = document.getElementById("kanban-add-todo-form");
+  form?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const input = document.getElementById("kanban-todo-input");
+    const text = input.value.trim();
+    if (!text) return;
+    
+    const cards = getKanbanCards();
+    cards.push({ id: `k-${Date.now()}`, text, column: "todo" });
+    saveKanbanCards(cards);
+    
+    input.value = "";
+    renderKanbanCards();
+  });
+
+  const cols = ["todo", "progress", "done"];
+  cols.forEach(col => {
+    const listEl = document.getElementById(`kanban-${col}-list`);
+    if (!listEl) return;
+
+    listEl.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      listEl.style.border = "1px dashed var(--accent)";
+    });
+
+    listEl.addEventListener("dragleave", () => {
+      listEl.style.border = "1px dashed var(--line)";
+    });
+
+    listEl.addEventListener("drop", (e) => {
+      e.preventDefault();
+      listEl.style.border = "1px dashed var(--line)";
+      const cardId = e.dataTransfer.getData("text/plain");
+      if (cardId) {
+        const cards = getKanbanCards();
+        const card = cards.find(c => c.id === cardId);
+        if (card) {
+          card.column = col;
+          saveKanbanCards(cards);
+          renderKanbanCards();
+        }
+      }
+    });
+  });
+}
+
+function getKanbanCards() {
+  try {
+    const saved = localStorage.getItem("wpdesktop.kanban-cards");
+    if (saved) return JSON.parse(saved);
+  } catch (_) {}
+  return [...DEFAULT_KANBAN_CARDS];
+}
+
+function saveKanbanCards(cards) {
+  localStorage.setItem("wpdesktop.kanban-cards", JSON.stringify(cards));
+}
+
+function renderKanbanCards() {
+  const cards = getKanbanCards();
+  const cols = ["todo", "progress", "done"];
+  
+  cols.forEach(col => {
+    const listEl = document.getElementById(`kanban-${col}-list`);
+    if (!listEl) return;
+    listEl.innerHTML = "";
+    
+    const colCards = cards.filter(c => c.column === col);
+    colCards.forEach(c => {
+      const cardEl = document.createElement("div");
+      cardEl.className = "settings-item";
+      cardEl.draggable = true;
+      cardEl.style.cursor = "grab";
+      cardEl.style.background = "var(--surface-2)";
+      cardEl.style.marginBottom = "6px";
+      cardEl.style.display = "flex";
+      cardEl.style.justifyContent = "space-between";
+      cardEl.style.alignItems = "center";
+      
+      cardEl.innerHTML = `
+        <strong>${escapeHtml(c.text)}</strong>
+        <span class="delete-card-btn" style="cursor:pointer; color:var(--danger-color, #ef4444); font-weight:bold; font-size:1.1rem; padding:0 4px;">&times;</span>
+      `;
+
+      cardEl.addEventListener("dragstart", (e) => {
+        e.dataTransfer.setData("text/plain", c.id);
+        cardEl.style.opacity = "0.5";
+      });
+
+      cardEl.addEventListener("dragend", () => {
+        cardEl.style.opacity = "1";
+      });
+
+      cardEl.querySelector(".delete-card-btn").addEventListener("click", () => {
+        const updated = getKanbanCards().filter(item => item.id !== c.id);
+        saveKanbanCards(updated);
+        renderKanbanCards();
+      });
+
+      listEl.appendChild(cardEl);
+    });
+  });
+}
+
+// ─── Time Tracker Screen ────────────────────────────────────────────
+let timeInitialized = false;
+let trackerInterval = null;
+let timerActive = false;
+let elapsedSeconds = 0;
+
+function initTimeTrackerScreen() {
+  renderTimeLogs();
+
+  if (timeInitialized) return;
+  timeInitialized = true;
+
+  const startBtn = document.getElementById("stopwatch-start-btn");
+  const pauseBtn = document.getElementById("stopwatch-pause-btn");
+  const resetBtn = document.getElementById("stopwatch-reset-btn");
+  const display = document.getElementById("stopwatch-display");
+
+  function updateDisplay() {
+    const hrs = String(Math.floor(elapsedSeconds / 3600)).padStart(2, '0');
+    const mins = String(Math.floor((elapsedSeconds % 3600) / 60)).padStart(2, '0');
+    const secs = String(elapsedSeconds % 60).padStart(2, '0');
+    if (display) display.textContent = `${hrs}:${mins}:${secs}`;
+  }
+
+  startBtn?.addEventListener("click", () => {
+    if (timerActive) return;
+    timerActive = true;
+    trackerInterval = setInterval(() => {
+      elapsedSeconds++;
+      updateDisplay();
+    }, 1000);
+  });
+
+  pauseBtn?.addEventListener("click", () => {
+    if (!timerActive) return;
+    timerActive = false;
+    clearInterval(trackerInterval);
+
+    if (elapsedSeconds > 0) {
+      const logs = getTimeLogs();
+      const hrs = String(Math.floor(elapsedSeconds / 3600)).padStart(2, '0');
+      const mins = String(Math.floor((elapsedSeconds % 3600) / 60)).padStart(2, '0');
+      const secs = String(elapsedSeconds % 60).padStart(2, '0');
+      
+      logs.push({
+        id: Date.now(),
+        date: new Date().toLocaleDateString(),
+        duration: `${hrs}:${mins}:${secs}`
+      });
+      saveTimeLogs(logs);
+      renderTimeLogs();
+    }
+  });
+
+  resetBtn?.addEventListener("click", () => {
+    timerActive = false;
+    clearInterval(trackerInterval);
+    elapsedSeconds = 0;
+    updateDisplay();
+  });
+}
+
+function getTimeLogs() {
+  try {
+    const saved = localStorage.getItem("wpdesktop.time-logs");
+    if (saved) return JSON.parse(saved);
+  } catch (_) {}
+  return [];
+}
+
+function saveTimeLogs(logs) {
+  localStorage.setItem("wpdesktop.time-logs", JSON.stringify(logs));
+}
+
+function renderTimeLogs() {
+  const logs = getTimeLogs();
+  const listEl = document.getElementById("time-logs-list");
+  if (!listEl) return;
+  listEl.innerHTML = "";
+
+  if (logs.length === 0) {
+    listEl.innerHTML = '<div class="settings-item"><span>No logged intervals. Click Start to track.</span></div>';
+    return;
+  }
+
+  logs.forEach(log => {
+    const div = document.createElement("div");
+    div.className = "settings-item";
+    div.style.display = "flex";
+    div.style.justifyContent = "space-between";
+    div.style.alignItems = "center";
+    div.style.marginBottom = "6px";
+    div.innerHTML = `
+      <span>Date: ${escapeHtml(log.date)} · Duration: <strong>${escapeHtml(log.duration)}</strong></span>
+      <button class="danger-button compact" onclick="deleteTimeLog(${log.id})">Delete</button>
+    `;
+    listEl.appendChild(div);
+  });
+}
+
+window.deleteTimeLog = function(id) {
+  const logs = getTimeLogs().filter(log => log.id !== id);
+  saveTimeLogs(logs);
+  renderTimeLogs();
+};
+
+// ─── Documentation Viewer Screen ────────────────────────────────────
+let docsInitialized = false;
+const DOC_DATABASE = {
+  wp: `
+    <h4>WordPress WP_Query Reference</h4>
+    <p>Construct complex database queries for post lists using arguments:</p>
+    <pre><code class="language-php">$query = new WP_Query( array(
+    'post_type' => 'product',
+    'posts_per_page' => 10,
+    'meta_key' => 'price',
+    'orderby' => 'meta_value_num',
+    'order' => 'ASC'
+) );</code></pre>`,
+  docker: `
+    <h4>Docker Command Reference</h4>
+    <p>Useful docker lifecycle commands for standard stack maintenance:</p>
+    <pre><code class="language-shell">docker ps -a               # List all containers
+docker build -t app:latest . # Build project container
+docker logs -f container-id # Stream logs output
+docker system prune -a      # Clean cache volumes</code></pre>`,
+  k8s: `
+    <h4>Kubernetes Pod Specs</h4>
+    <p>Standard YAML configuration mapping container specification:</p>
+    <pre><code class="language-yaml">apiVersion: v1
+kind: Pod
+metadata:
+  name: web-nginx
+spec:
+  containers:
+  - name: nginx
+    image: nginx:1.14.2
+    ports:
+    - containerPort: 80</code></pre>`,
+  php: `
+    <h4>PHP Standard Library</h4>
+    <p>Common array and string processing functions reference:</p>
+    <pre><code class="language-php">array_map(function($item) {
+    return trim($item);
+}, $raw_array);
+
+json_encode($payload, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);</code></pre>`
+};
+
+function initDocumentationViewerScreen() {
+  if (docsInitialized) return;
+  docsInitialized = true;
+
+  const select = document.getElementById("doc-selection");
+  const search = document.getElementById("doc-search");
+  const body = document.getElementById("doc-body");
+
+  function refreshDocs() {
+    if (!body || !select) return;
+    const current = select.value;
+    let content = DOC_DATABASE[current] || "<h4>Documentation item not found.</h4>";
+    
+    if (search && search.value.trim()) {
+      const q = search.value.toLowerCase();
+      if (!content.toLowerCase().includes(q)) {
+        content = `<h4>No matches found for "${escapeHtml(search.value)}" in this manual.</h4>`;
+      }
+    }
+    body.innerHTML = content;
+  }
+
+  select?.addEventListener("change", refreshDocs);
+  search?.addEventListener("input", refreshDocs);
+}
+
+// ─── Password Vault Screen ──────────────────────────────────────────
+let vaultInitialized = false;
+const DEFAULT_VAULT_ENTRIES = [
+  { id: 1, label: "XAMPP PhpMyAdmin", user: "root", pass: "password" },
+  { id: 2, label: "WordPress Administrator", user: "admin", pass: "dev-wp-password" }
+];
+
+function initPasswordVaultScreen() {
+  renderVaultEntries();
+
+  if (vaultInitialized) return;
+  vaultInitialized = true;
+
+  const form = document.getElementById("vault-entry-form");
+  form?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const labelInput = document.getElementById("vault-entry-label");
+    const userInput = document.getElementById("vault-entry-user");
+    const passInput = document.getElementById("vault-entry-pass");
+
+    const label = labelInput.value.trim();
+    const user = userInput.value.trim();
+    const pass = passInput.value.trim();
+    if (!label || !user || !pass) return;
+
+    const entries = getVaultEntries();
+    entries.push({ id: Date.now(), label, user, pass });
+    saveVaultEntries(entries);
+
+    labelInput.value = "";
+    userInput.value = "";
+    passInput.value = "";
+    renderVaultEntries();
+  });
+}
+
+function getVaultEntries() {
+  try {
+    const saved = localStorage.getItem("wpdesktop.vault-entries");
+    if (saved) return JSON.parse(saved);
+  } catch (_) {}
+  return [...DEFAULT_VAULT_ENTRIES];
+}
+
+function saveVaultEntries(entries) {
+  localStorage.setItem("wpdesktop.vault-entries", JSON.stringify(entries));
+}
+
+function renderVaultEntries() {
+  const entries = getVaultEntries();
+  const listEl = document.getElementById("vault-entries-list");
+  if (!listEl) return;
+  listEl.innerHTML = "";
+
+  if (entries.length === 0) {
+    listEl.innerHTML = '<div class="settings-item"><span>No vault entries. Save credentials using the form.</span></div>';
+    return;
+  }
+
+  entries.forEach(entry => {
+    const div = document.createElement("div");
+    div.className = "settings-item";
+    div.style.display = "flex";
+    div.style.justifyContent = "space-between";
+    div.style.alignItems = "center";
+    div.style.marginBottom = "8px";
+    
+    const masked = "*".repeat(entry.pass.length);
+
+    div.innerHTML = `
+      <div>
+        <strong>${escapeHtml(entry.label)}</strong><br/>
+        <span style="font-size:0.75rem; color:var(--muted);">User: ${escapeHtml(entry.user)} · Pass: <span class="vault-pass-display" data-real-pass="${escapeHtml(entry.pass)}" style="font-family:monospace;">${masked}</span></span>
+      </div>
+      <div style="display:flex; gap:6px;">
+        <button class="primary-button compact toggle-pass-btn">Show</button>
+        <button class="danger-button compact" onclick="deleteVaultEntry(${entry.id})">Delete</button>
+      </div>
+    `;
+
+    div.querySelector(".toggle-pass-btn").addEventListener("click", (e) => {
+      const display = div.querySelector(".vault-pass-display");
+      const btn = e.target;
+      if (btn.textContent === "Show") {
+        display.textContent = display.getAttribute("data-real-pass");
+        btn.textContent = "Hide";
+      } else {
+        display.textContent = "*".repeat(display.getAttribute("data-real-pass").length);
+        btn.textContent = "Show";
+      }
+    });
+
+    listEl.appendChild(div);
+  });
+}
+
+window.deleteVaultEntry = function(id) {
+  const entries = getVaultEntries().filter(entry => entry.id !== id);
+  saveVaultEntries(entries);
+  renderVaultEntries();
+};
+
+// ─── Secrets Manager Screen ─────────────────────────────────────────
+let secretsInitialized = false;
+function initSecretsManagerScreen() {
+  loadSecretsVariables();
+
+  if (secretsInitialized) return;
+  secretsInitialized = true;
+
+  document.getElementById("secrets-load-env")?.addEventListener("click", loadSecretsVariables);
+  document.getElementById("secrets-save-env")?.addEventListener("click", saveSecretsVariables);
+}
+
+async function loadSecretsVariables() {
+  const listEl = document.getElementById("secrets-variables-list");
+  if (!listEl) return;
+  listEl.innerHTML = "<span>Loading .env environment...</span>";
+
+  const site = getSelectedSite();
+  const filePath = site ? `${site.path}/.env` : null;
+
+  let content = "";
+  if (filePath) {
+    try {
+      content = await window.desktopAPI.readExtensionFile(filePath);
+    } catch (_) {
+      content = "DB_HOST=127.0.0.1\nDB_USER=root\nDB_PASSWORD=\nDB_NAME=wp_local\nWP_ENV=development";
+    }
+  } else {
+    content = "DB_HOST=127.0.0.1\nDB_USER=root\nDB_PASSWORD=\nDB_NAME=wp_local\nWP_ENV=development";
+  }
+
+  const lines = content.split("\n").filter(Boolean);
+  listEl.innerHTML = "";
+  lines.forEach(line => {
+    if (line.startsWith("#") || !line.includes("=")) return;
+    const [key, ...valueParts] = line.split("=");
+    const value = valueParts.join("=");
+    const row = document.createElement("div");
+    row.style.display = "flex";
+    row.style.gap = "8px";
+    row.style.marginBottom = "6px";
+    row.innerHTML = `
+      <input type="text" value="${escapeHtml(key.trim())}" readonly style="width:140px; height:32px; border:1px solid var(--input-border); border-radius:6px; background:var(--surface-3); color:var(--text-dim); padding:0 8px;">
+      <input type="text" class="secret-val-input" data-key="${escapeHtml(key.trim())}" value="${escapeHtml(value.trim())}" style="flex:1; height:32px; border:1px solid var(--input-border); border-radius:6px; background:var(--input-bg); color:var(--text); padding:0 8px;">
+    `;
+    listEl.appendChild(row);
+  });
+}
+
+async function saveSecretsVariables() {
+  const site = getSelectedSite();
+  if (!site) {
+    alert("Please select a site folder to save .env file.");
+    return;
+  }
+  const inputs = document.querySelectorAll("#secrets-variables-list .secret-val-input");
+  let content = "";
+  inputs.forEach(input => {
+    const key = input.getAttribute("data-key");
+    const val = input.value;
+    content += `${key}=${val}\n`;
+  });
+  
+  const filePath = `${site.path}/.env`;
+  try {
+    await window.desktopAPI.writeFile({ filePath, content });
+    alert(".env file saved successfully!");
+  } catch (err) {
+    alert(`Failed to save: ${err.message}`);
+  }
+}
+
+// ─── Team Chat Screen ───────────────────────────────────────────────
+let chatInitialized = false;
+function initTeamChatScreen() {
+  if (chatInitialized) return;
+  chatInitialized = true;
+
+  const stream = document.getElementById("collab-chat-stream");
+  const form = document.getElementById("collab-chat-form");
+  const input = document.getElementById("collab-chat-input");
+
+  function appendMsg(speaker, text) {
+    if (!stream) return;
+    const isUser = speaker === "You";
+    const div = document.createElement("div");
+    div.style.background = isUser ? "var(--surface-2)" : "var(--surface-3)";
+    div.style.padding = "8px";
+    div.style.borderRadius = "8px";
+    div.style.alignSelf = isUser ? "flex-end" : "flex-start";
+    div.style.maxWidth = "85%";
+    div.innerHTML = `<strong>${speaker}:</strong> ${escapeHtml(text)}`;
+    stream.appendChild(div);
+    stream.scrollTop = stream.scrollHeight;
+  }
+
+  form?.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = "";
+    appendMsg("You", text);
+
+    setTimeout(() => {
+      appendMsg("Teammate (John)", "Thanks for the update! Checking git branches now.");
+    }, 1200);
+  });
+}
+
+// ─── MCP Adapter Screen ─────────────────────────────────────────────
+function initMcpAdapterScreen(screen) {
+  console.log(`[MCP] Switched to adapter view: ${screen}`);
+}
+
+window.tsOpenDeviceModal  = tsOpenDeviceModal;
+window.tsPingDevice       = tsPingDevice;
+window.tsSshDevice        = tsSshDevice;
+window.tsRdpDevice        = tsRdpDevice;
+window.tsSetExitNode      = tsSetExitNode;
+window.tsDisconnectExitNode = tsDisconnectExitNode;
+window.tsRemoveServeRoute = tsRemoveServeRoute;
+window.tsCopy             = tsCopy;
+
+

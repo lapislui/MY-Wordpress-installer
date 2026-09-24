@@ -1,4 +1,3 @@
-
 (function () {
   const noop = () => {};
   const asyncNull = () => Promise.resolve(null);
@@ -6,7 +5,10 @@
   const asyncVoid = () => Promise.resolve();
 
   const defaultSettings = {
+    localServerType: "xampp",
+    localServerLabel: "XAMPP",
     xamppRootPath: "",
+    laragonRootPath: "",
     htdocsPath: "",
     dbUser: "root",
     dbPassword: "",
@@ -22,8 +24,12 @@
     browserExtensions: [],
     effectiveDbProfile: { host: "127.0.0.1", port: "3306", user: "root", password: "" },
     mysqlConfigContent: "",
-    xamppPaths: {
+    serverPaths: {
+      localServerType: "xampp",
+      localServerLabel: "XAMPP",
+      localServerRootPath: "",
       xamppRootPath: "",
+      documentRootName: "htdocs",
       htdocsPath: "",
       controlPanelPath: "",
       apacheStartPath: "",
@@ -35,6 +41,7 @@
       phpMyAdminPath: ""
     }
   };
+  defaultSettings.xamppPaths = defaultSettings.serverPaths;
 
   const defaultVaultInfo = {
     encryptionAvailable: false,
@@ -67,6 +74,7 @@
     browserShowAppMenu: asyncNull,
     browserFindInPage: asyncNull,
     browserUpdateLayout: asyncNull,
+    browserToggleFullscreen: asyncNull,
     browserPickDownloadDirectory: asyncNull,
     browserOpenDownload: asyncNull,
     browserShowDownload: asyncNull,
@@ -104,6 +112,8 @@
     showSiteContextMenu: asyncNull,
 
     getSettings: () => Promise.resolve(defaultSettings),
+    setLocalServerType: asyncNull,
+    setLocalServerRootPath: asyncNull,
     setXamppRootPath: asyncNull,
     setHtdocsPath: asyncNull,
     setLocalSessionSharing: asyncNull,
@@ -130,6 +140,7 @@
     onBrowserState: noop,
     onBrowserNotice: noop,
     onBrowserMenuCommand: noop,
+    onPromptSaveCredentials: noop,
     onBrowserDownloadComplete: noop,
     onBrowserBookmarkEdit: noop,
     onBrowserBookmarkFolderEdit: noop,
@@ -139,6 +150,7 @@
     onBrowserBookmarkCreateFolderAndMove: noop,
     onBrowserOpenUrl: noop,
     onBrowserFocus: noop,
-    onSitesChanged: noop
+    onSitesChanged: noop,
+    onBrowserFullscreenChanged: noop
   };
 })();

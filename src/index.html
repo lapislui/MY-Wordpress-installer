@@ -23,29 +23,40 @@
         </button>
       </div>
 
-      <nav class="nav">
+      <!-- Released Featured Section -->
+      <div class="sidebar-category-header" style="cursor: default; margin-top: 12px; pointer-events: none;">Released Featured</div>
+      <nav class="nav" id="released-sidebar-nav" style="padding-top: 2px; padding-bottom: 8px;">
         <button class="nav-button active" data-screen="browser">
           <span class="nav-button-short">🌐</span>
-          <span class="nav-button-label">🌐Browser</span>
+          <span class="nav-button-label">🌐 Browser</span>
+        </button>
+        <button class="nav-button" data-screen="sftp">
+          <span class="nav-button-short">🔐</span>
+          <span class="nav-button-label">🔐 SFTP</span>
+        </button>
+        <button class="nav-button" data-screen="editor">
+          <span class="nav-button-short">📝</span>
+          <span class="nav-button-label">📝 Editor</span>
         </button>
         <button class="nav-button" data-screen="installer">
           <span class="nav-button-short">📥</span>
-          <span class="nav-button-label">📥Installer</span>
+          <span class="nav-button-label">📥 Installer</span>
         </button>
         <button class="nav-button" data-screen="workspace">
           <span class="nav-button-short">💻</span>
-          <span class="nav-button-label">💻Workspace</span>
+          <span class="nav-button-label">💻 Workspace</span>
         </button>
         <button class="nav-button" data-screen="settings">
           <span class="nav-button-short">⚙️</span>
-          <span class="nav-button-label">⚙️Settings</span>
-        </button>
-        <div class="sidebar-divider"></div>
-        <button id="theme-toggle-button" class="theme-toggle-button" type="button" title="Toggle theme">
-          <span class="theme-toggle-icon" id="theme-toggle-icon">☀️</span>
-          <span class="theme-toggle-label" id="theme-toggle-label">Light theme</span>
+          <span class="nav-button-label">⚙️ Settings</span>
         </button>
       </nav>
+
+      <div class="sidebar-divider"></div>
+      <button id="theme-toggle-button" class="theme-toggle-button" type="button" title="Toggle theme">
+        <span class="theme-toggle-icon" id="theme-toggle-icon">☀️</span>
+        <span class="theme-toggle-label" id="theme-toggle-label">Light theme</span>
+      </button>
 
       <section class="sidebar-note">
         <h2>Session rules</h2>
@@ -120,6 +131,30 @@
               <div class="bookmark-modal-actions-right">
                 <button id="bookmark-folder-cancel-button" type="button">Cancel</button>
                 <button id="bookmark-folder-create-button" type="button" class="primary-button">Create</button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div id="password-save-modal" class="password-save-modal hidden">
+          <div class="password-save-card">
+            <div class="password-save-head">
+              <strong>Save password?</strong>
+              <button id="close-password-save-button" type="button" class="bookmark-modal-close">x</button>
+            </div>
+            <div class="password-save-body">
+              <div class="field">
+                <span>Username</span>
+                <div id="password-save-username" class="password-save-display"></div>
+              </div>
+              <div class="field">
+                <span>Password</span>
+                <div class="password-save-display">••••••••</div>
+              </div>
+            </div>
+            <div class="password-save-actions">
+              <button id="password-never-save-button" type="button">Never</button>
+              <div class="password-save-actions-right">
+                <button id="password-save-confirm-button" type="button" class="primary-button">Save</button>
               </div>
             </div>
           </div>
@@ -300,6 +335,170 @@
         </div>
       </section>
 
+      <section class="screen" id="sftp-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Remote access</span>
+              <h1>Public SFTP server</h1>
+              <p>Connect and manage files on a public SFTP server.</p>
+            </div>
+          </header>
+
+          <div class="settings-grid">
+            <div class="settings-card settings-card-wide">
+              <div class="card-header">
+                <div>
+                  <span class="eyebrow">Connection settings</span>
+                  <h3>Connect to SFTP server</h3>
+                </div>
+              </div>
+
+              <div class="form-grid four-up">
+                <label class="field">
+                  <span>Host</span>
+                  <input id="sftp-host" type="text" placeholder="ftp.example.com">
+                </label>
+                <label class="field">
+                  <span>Port</span>
+                  <input id="sftp-port" type="number" value="22" min="1" max="65535">
+                </label>
+                <label class="field">
+                  <span>Username</span>
+                  <input id="sftp-username" type="text" placeholder="your_username">
+                </label>
+                <label class="field">
+                  <span>Authentication</span>
+                  <select id="sftp-auth-type">
+                    <option value="password">Password</option>
+                    <option value="key">Private key</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Password</span>
+                  <input id="sftp-password" type="password" placeholder="Your password">
+                </label>
+                <label class="field">
+                  <span>Private key</span>
+                  <div class="picker-row">
+                    <input id="sftp-key-path" type="text" readonly placeholder="Not selected">
+                    <button id="sftp-key-select-button" type="button">Choose</button>
+                  </div>
+                </label>
+                <label class="field">
+                  <span>Remote directory</span>
+                  <input id="sftp-remote-dir" type="text" placeholder="/home/user/public_html" value="/">
+                </label>
+              </div>
+
+              <div class="button-row compact">
+                <button id="sftp-test-connection-button" type="button" class="primary-button">Test connection</button>
+              </div>
+
+              <div id="sftp-config-status" class="settings-note">Enter your SFTP server details and test the connection.</div>
+            </div>
+
+            <div class="settings-card settings-card-wide">
+              <div class="card-header">
+                <div>
+                  <span class="eyebrow">Optional</span>
+                  <h3>Link to local site (for transfers)</h3>
+                </div>
+              </div>
+
+              <label class="field">
+                <span>Local site for syncing</span>
+                <select id="sftp-site-select"></select>
+              </label>
+
+              <label class="field">
+                <span>Remote subpath</span>
+                <input id="sftp-subpath" type="text" placeholder="Optional remote subfolder">
+              </label>
+
+              <div class="button-row compact">
+                <button id="sftp-save-config-button" type="button" class="primary-button">Save config</button>
+                <button id="sftp-upload-button" type="button">Upload local → remote</button>
+                <button id="sftp-download-button" type="button">Download remote → local</button>
+              </div>
+
+              <div id="sftp-progress-card" class="status-card">
+                <strong>Transfer progress</strong>
+                <p id="sftp-progress-status">Idle.</p>
+                <ul id="sftp-progress-lines" class="log-list"></ul>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="screen" id="editor-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Code editor</span>
+              <h1>Open and edit files</h1>
+              <p>Edit WordPress files locally or from remote SFTP servers with a built-in editor.</p>
+            </div>
+          </header>
+
+          <div class="settings-grid">
+            <div class="settings-card settings-card-wide">
+              <div class="card-header">
+                <div>
+                  <span class="eyebrow">File browser</span>
+                  <h3>Remote SFTP files</h3>
+                </div>
+              </div>
+
+              <label class="field">
+                <span>Remote directory path</span>
+                <div class="picker-row">
+                  <input id="code-editor-remote-path" type="text" placeholder="/home/user/public_html" value="/">
+                  <button id="code-editor-browse-button" type="button">Browse</button>
+                </div>
+              </label>
+
+              <div id="code-editor-file-list-container" class="status-card" style="display: none; max-height: 250px; overflow-y: auto;">
+                <strong>Files in directory</strong>
+                <ul id="code-editor-file-list" class="log-list"></ul>
+              </div>
+
+              <div id="code-editor-remote-status" class="settings-note">Test a remote SFTP connection in the SFTP tab to browse and edit remote files.</div>
+            </div>
+
+            <div class="settings-card settings-card-wide">
+              <div class="card-header">
+                <div>
+                  <span class="eyebrow">File editor</span>
+                  <h3>Open and save files</h3>
+                </div>
+              </div>
+
+              <div class="form-grid four-up">
+                <label class="field">
+                  <span>File path</span>
+                  <div class="picker-row">
+                    <input id="code-editor-path" type="text" readonly placeholder="No file opened">
+                    <button id="code-editor-open-button" type="button">Open file</button>
+                  </div>
+                </label>
+              </div>
+
+              <div class="button-row compact">
+                <button id="code-editor-save-button" type="button" class="primary-button">Save file</button>
+                <button id="code-editor-save-as-button" type="button">Save as...</button>
+              </div>
+
+              <div id="code-editor-status" class="settings-note">Open a local file to begin editing.</div>
+
+              <div id="code-editor-monaco" class="monaco-editor-container hidden" style="height: 520px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden;"></div>
+              <textarea id="code-editor-textarea" class="config-editor" spellcheck="false" placeholder="Open a file to edit it" style="min-height: 520px;"></textarea>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section class="screen" id="installer-screen">
         <div class="local-shell">
           <aside class="sites-sidebar">
@@ -312,9 +511,9 @@
             </div>
             <div class="htdocs-config">
               <label class="field">
-                <span>XAMPP htdocs</span>
+                <span>Document root</span>
                 <div class="picker-row">
-                  <input id="htdocs-path" type="text" placeholder="Pick your XAMPP htdocs folder" readonly>
+                  <input id="htdocs-path" type="text" placeholder="Pick your local server document root" readonly>
                   <button id="pick-htdocs-button" type="button">Set</button>
                 </div>
               </label>
@@ -448,7 +647,7 @@
                     </div>
                   </div>
 
-                  <p class="panel-copy">These MySQL details are loaded from XAMPP MySQL settings. Edit <code>my.ini</code> and DB credentials from the Settings screen.</p>
+                  <p class="panel-copy">These MySQL details are loaded from your selected local server settings. Edit <code>my.ini</code> and DB credentials from the Settings screen.</p>
 
                   <div class="button-row compact">
                     <button id="open-phpmyadmin-button" type="button">Open phpMyAdmin</button>
@@ -495,11 +694,11 @@
           <header class="settings-hero">
             <div>
               <span class="eyebrow">Environment</span>
-              <h1>XAMPP settings</h1>
-              <p>Manage the root folder and jump straight to Apache, PHP, MySQL, and phpMyAdmin files.</p>
+              <h1>Local server settings</h1>
+              <p>Switch between XAMPP and Laragon, then jump straight to Apache, PHP, MySQL, and phpMyAdmin files.</p>
             </div>
             <div class="button-row compact">
-              <button id="pick-xampp-root-button" type="button" class="primary-button">Set XAMPP Root</button>
+              <button id="pick-xampp-root-button" type="button" class="primary-button">Set server root</button>
               <button id="settings-pick-htdocs-button" type="button">Set htdocs</button>
             </div>
           </header>
@@ -514,17 +713,25 @@
               </div>
 
               <label class="field">
-                <span>XAMPP root</span>
+                <span>Server stack</span>
+                <select id="local-server-type">
+                  <option value="xampp">XAMPP</option>
+                  <option value="laragon">Laragon</option>
+                </select>
+              </label>
+
+              <label class="field">
+                <span>Server root</span>
                 <div class="picker-row">
-                  <input id="settings-xampp-root" type="text" placeholder="Pick your XAMPP root folder" readonly>
+                  <input id="settings-xampp-root" type="text" placeholder="Pick your local server root folder" readonly>
                   <button id="open-xampp-root-button" type="button">Open</button>
                 </div>
               </label>
 
               <label class="field">
-                <span>htdocs</span>
+                <span>Document root</span>
                 <div class="picker-row">
-                  <input id="settings-htdocs-path" type="text" placeholder="Pick your XAMPP htdocs folder" readonly>
+                  <input id="settings-htdocs-path" type="text" placeholder="Pick your local server document root" readonly>
                   <button id="open-settings-htdocs-button" type="button">Open</button>
                 </div>
               </label>
@@ -573,7 +780,7 @@
                 </div>
                 <div class="settings-item">
                   <div class="settings-item-copy">
-                    <strong>XAMPP control panel</strong>
+                    <strong>Control panel</strong>
                     <span id="settings-control-panel">Not found</span>
                   </div>
                   <button id="open-control-panel-button" type="button">Open</button>
@@ -602,6 +809,7 @@
 
               <label class="field">
                 <span>my.ini content</span>
+                <div id="settings-mysql-monaco" class="monaco-editor-container hidden" style="height: 300px; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden;"></div>
                 <textarea id="settings-mysql-editor" class="config-editor" spellcheck="false" placeholder="MySQL config file content will appear here"></textarea>
               </label>
 
@@ -610,7 +818,7 @@
               </div>
 
               <div class="settings-note">
-                Host and port are parsed from <code>my.ini</code>. User and password are stored in app settings and used together with the XAMPP MySQL config.
+                Host and port are parsed from <code>my.ini</code>. User and password are stored in app settings and used together with the selected local server MySQL config.
               </div>
             </div>
 
@@ -736,6 +944,183 @@
 
               <div class="settings-note">
                 Dark theme uses the red accent family and light theme uses the purple accent family by default. Change the base hex colors here and the rest of the accent shades are derived automatically.
+              </div>
+            </div>
+
+            <div class="settings-card settings-card-wide">
+              <div class="card-header">
+                <div>
+                  <span class="eyebrow">Cloud Synchronization</span>
+                  <h3>Account Sync Settings</h3>
+                </div>
+              </div>
+
+              <div class="settings-list">
+                <div class="settings-item">
+                  <div class="settings-item-copy">
+                    <strong>Google Account</strong>
+                    <span id="sync-google-status">Not connected</span>
+                  </div>
+                  <div class="button-row compact">
+                    <button id="sync-google-btn" type="button" class="primary-button">Link Google Account</button>
+                  </div>
+                </div>
+
+                <div class="settings-item">
+                  <div class="settings-item-copy">
+                    <strong>Microsoft Account</strong>
+                    <span id="sync-microsoft-status">Not connected</span>
+                  </div>
+                  <div class="button-row compact">
+                    <button id="sync-microsoft-btn" type="button" class="primary-button">Link Microsoft Account</button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-note">
+                Connecting your accounts will automatically synchronize your Notes, Kanban Tasks, Calendar Events, Secret Vault entries, and Backups to Keep, OneNote, Drive, Planner, and Azure.
+              </div>
+            </div>
+
+            <div class="settings-card settings-card-wide">
+              <div class="card-header">
+                <div>
+                  <span class="eyebrow">Beta features</span>
+                  <h3>Manage Beta Tools & Sidebar</h3>
+                </div>
+              </div>
+
+              <div class="settings-list">
+                <div class="settings-item">
+                  <div class="settings-item-copy">
+                    <strong>Enable Beta Features Section</strong>
+                    <span>Display the "Beta Features" section in the sidebar, which contains advanced development tools, DevOps suites, and MCP integration tools.</span>
+                  </div>
+                  <div style="display: flex; align-items: center;">
+                    <input type="checkbox" id="settings-beta-enabled" style="width: 18px; height: 18px; margin: 0; accent-color: var(--accent); cursor: pointer;">
+                  </div>
+                </div>
+              </div>
+
+              <div id="beta-tools-management-heading" class="settings-note" style="margin-top: 14px; margin-bottom: 8px; font-weight: 600; color: var(--text);">
+                Manage Custom Categories:
+              </div>
+
+              <div style="display: flex; gap: 8px; margin-bottom: 12px;">
+                <input type="text" id="beta-category-name-input" placeholder="Enter category name" style="flex: 1; padding: 6px 8px; background: var(--input-bg); border: 1px solid var(--input-border); border-radius: 4px; color: var(--text); font-size: 0.9rem;">
+                <button id="beta-category-add-button" type="button" class="primary-button" style="padding: 6px 12px;">Add Category</button>
+              </div>
+
+              <div id="beta-categories-list" style="display: grid; gap: 8px; margin-bottom: 16px;">
+                <!-- Categories managed by CRUD system -->
+              </div>
+
+              <div id="beta-tools-management-heading" class="settings-note" style="margin-top: 14px; margin-bottom: 8px; font-weight: 600; color: var(--text);">
+                Assign tools to categories or show all:
+              </div>
+
+              <div class="form-grid" id="beta-tools-checkboxes" style="margin-top: 8px; gap: 10px; display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));">
+                <!-- Checkboxes dynamically generated by renderer.js -->
+              </div>
+            </div>
+
+            <div class="settings-card settings-card-wide">
+              <div class="card-header">
+                <div>
+                  <span class="eyebrow">App Extensions</span>
+                  <h3>Custom scripts & plugins</h3>
+                </div>
+              </div>
+
+              <div class="button-row compact">
+                <button id="load-app-extension-button" type="button" class="primary-button">Load extension (.js)</button>
+              </div>
+
+              <div class="settings-note">
+                Load custom JavaScript extensions to enhance the Monaco Editor, listen to app events, and automate local workflows.
+              </div>
+
+              <div id="app-extensions-list" class="settings-list"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="screen" id="mcp-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Integrations</span>
+              <h1>Model Context Protocol (MCP)</h1>
+              <p>Expose active browser tabs, local sites workspace, and SFTP features to external IDEs like Cursor, VS Code, and Codex.</p>
+            </div>
+          </header>
+
+          <div class="settings-grid">
+            <div class="settings-card settings-card-wide">
+              <div class="card-header">
+                <div>
+                  <span class="eyebrow">Server status</span>
+                  <h3>Hosted MCP Server</h3>
+                </div>
+              </div>
+
+              <div class="settings-list">
+                <div class="settings-item">
+                  <div class="settings-item-copy">
+                    <strong>Status</strong>
+                    <span id="mcp-status-text">Stopped</span>
+                  </div>
+                  <div class="button-row compact">
+                    <button id="mcp-toggle-button" type="button" class="primary-button">Start server</button>
+                  </div>
+                </div>
+                <div class="settings-item">
+                  <div class="settings-item-copy">
+                    <strong>Endpoint (Streamable HTTP)</strong>
+                    <span id="mcp-endpoint-text">-</span>
+                  </div>
+                </div>
+                <div class="settings-item">
+                  <div class="settings-item-copy">
+                    <strong>Active sessions</strong>
+                    <span id="mcp-sessions-count">0 active connections</span>
+                  </div>
+                </div>
+                <div id="mcp-error-item" class="settings-item hidden">
+                  <div class="settings-item-copy">
+                    <strong>Last Error</strong>
+                    <span id="mcp-error-text" style="color: var(--danger-color);">-</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="settings-card settings-card-wide">
+              <div class="card-header">
+                <div>
+                  <span class="eyebrow">Configuration</span>
+                  <h3>Network Settings</h3>
+                </div>
+              </div>
+
+              <div class="form-grid four-up">
+                <label class="field">
+                  <span>Host</span>
+                  <input id="mcp-host" type="text" value="127.0.0.1">
+                </label>
+                <label class="field">
+                  <span>Port</span>
+                  <input id="mcp-port" type="number" value="3789" min="1024" max="65535">
+                </label>
+              </div>
+
+              <div class="button-row compact">
+                <button id="mcp-save-config-button" type="button" class="primary-button">Save configuration</button>
+              </div>
+
+              <div id="mcp-config-status" class="settings-note">
+                Configure the host and port for your local MCP server.
               </div>
             </div>
           </div>
@@ -915,6 +1300,7 @@
                 </label>
                 <label class="field" id="workspace-notes-editor-shell">
                   <span>Working notes</span>
+                  <div id="workspace-notes-monaco" class="monaco-editor-container hidden" style="height: 300px; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden;"></div>
                   <textarea id="workspace-notes" class="workspace-notes" placeholder="Record plugin decisions, content blockers, credentials needed, launch notes, and client requests."></textarea>
                 </label>
                 <div id="workspace-notes-preview" class="workspace-notes-preview hidden" aria-live="polite"></div>
@@ -961,9 +1347,1634 @@
               </section>
             </div>
           </section>
+      </section>
+
+      <section class="screen" id="meeting-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Collaboration</span>
+              <h1>Online P2P meeting</h1>
+              <p>Host screen-sharing and audio/video calls between two WP Desktop users.</p>
+            </div>
+          </header>
+
+          <!-- Meet Setup Screen -->
+          <div id="meet-setup-panel" class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header">
+                <div>
+                  <span class="eyebrow">1. Device preview</span>
+                  <h3>Check camera and mic</h3>
+                </div>
+              </div>
+              <div class="meeting-preview-stage">
+                <video id="meet-setup-preview" autoplay playsinline muted></video>
+                <div id="meet-preview-fallback" class="meeting-video-fallback">Camera Off</div>
+              </div>
+              <div class="form-grid">
+                <label class="field">
+                  <span>Camera</span>
+                  <select id="meet-camera-select">
+                    <option value="">Default Camera</option>
+                  </select>
+                </label>
+                <label class="field">
+                  <span>Microphone</span>
+                  <select id="meet-mic-select">
+                    <option value="">Default Microphone</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+
+            <div class="settings-card">
+              <div class="card-header">
+                <div>
+                  <span class="eyebrow">2. Join or Create</span>
+                  <h3>Select Connection Mode</h3>
+                </div>
+              </div>
+
+              <div class="meet-mode-selector">
+                <button id="meet-mode-btn-cloud" class="meet-tab-btn active" type="button">Cloud Mode (Easy)</button>
+                <button id="meet-mode-btn-manual" class="meet-tab-btn" type="button">Manual P2P (Serverless)</button>
+              </div>
+
+              <!-- Cloud Mode Form -->
+              <div id="meet-form-cloud" class="meet-mode-form-panel">
+                <label class="field">
+                  <span>Room ID / Secret Code</span>
+                  <input id="meet-cloud-room" type="text" placeholder="Enter a room code (e.g. acme-qa)">
+                </label>
+                <div class="button-row compact">
+                  <button id="meet-cloud-start-btn" type="button" class="primary-button">Create/Join Room</button>
+                </div>
+                <div class="settings-note">
+                  Both participants must enter the exact same Room ID to find and connect to each other.
+                </div>
+              </div>
+
+              <!-- Manual Mode Form -->
+              <div id="meet-form-manual" class="meet-mode-form-panel hidden">
+                <div class="button-row compact">
+                  <button id="meet-manual-init-btn" type="button" class="primary-button">Start as Host</button>
+                  <button id="meet-manual-join-btn" type="button">Start as Joiner</button>
+                </div>
+                
+                <div id="meet-manual-stage-host" class="hidden">
+                  <label class="field">
+                    <span>Your Connection Code (Copy this and send to peer)</span>
+                    <textarea id="meet-manual-offer" readonly placeholder="Generating code..."></textarea>
+                  </label>
+                  <label class="field">
+                    <span>Paste Peer's Response Code</span>
+                    <textarea id="meet-manual-answer" placeholder="Paste response code here"></textarea>
+                  </label>
+                  <div class="button-row compact">
+                    <button id="meet-manual-connect-btn" type="button" class="primary-button">Establish Connection</button>
+                  </div>
+                </div>
+
+                <div id="meet-manual-stage-joiner" class="hidden">
+                  <label class="field">
+                    <span>Paste Host's Connection Code</span>
+                    <textarea id="meet-manual-join-offer" placeholder="Paste host code here"></textarea>
+                  </label>
+                  <label class="field">
+                    <span>Your Response Code (Copy this and send to host)</span>
+                    <textarea id="meet-manual-join-answer" readonly placeholder="Waiting for host code..."></textarea>
+                  </label>
+                  <div class="button-row compact">
+                    <button id="meet-manual-generate-answer-btn" type="button" class="primary-button">Generate Response</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Active Call Screen -->
+          <div id="meet-call-panel" class="meet-call-layout hidden">
+            <div class="meet-call-status-bar">
+              <span id="meet-status-indicator" class="status-badge connecting">Connecting...</span>
+              <span id="meet-room-label">Room: -</span>
+            </div>
+
+            <div class="meet-video-grid">
+              <div class="meet-video-wrapper remote">
+                <video id="meet-remote-video" autoplay playsinline></video>
+                <div id="meet-remote-fallback" class="meeting-video-fallback">Waiting for remote participant...</div>
+                <div class="meet-video-label">Remote User</div>
+              </div>
+              <div class="meet-video-wrapper local">
+                <video id="meet-local-video" autoplay playsinline muted></video>
+                <div id="meet-local-fallback" class="meeting-video-fallback">Camera Off</div>
+                <div class="meet-video-label">You (Self)</div>
+              </div>
+            </div>
+
+            <div class="meet-controls-container">
+              <button id="meet-toggle-audio" class="meet-ctrl-btn" type="button" title="Mute/Unmute Mic">🎤</button>
+              <button id="meet-toggle-video" class="meet-ctrl-btn" type="button" title="Camera On/Off">📷</button>
+              <button id="meet-toggle-share" class="meet-ctrl-btn" type="button" title="Share Screen">🖥️</button>
+              <button id="meet-hangup" class="meet-ctrl-btn danger" type="button" title="Hang Up">🚫</button>
+            </div>
+          </div>
+
         </div>
       </section>
+
+      <!-- ═══════════════════════════════════════════════════════════ -->
+      <!-- TAILSCALE SCREEN                                            -->
+      <!-- ═══════════════════════════════════════════════════════════ -->
+      <section class="screen" id="tailscale-screen">
+        <div class="settings-shell">
+          <header class="settings-hero ts-hero">
+            <div>
+              <span class="eyebrow">Network</span>
+              <h1>Tailscale Admin</h1>
+              <p>Manage your tailnet — devices, exit nodes, serve, funnel, and more.</p>
+            </div>
+            <div class="button-row compact ts-hero-actions">
+              <span id="ts-status-pill" class="ts-status-pill ts-status-unknown">Detecting...</span>
+              <button id="ts-refresh-button" type="button">↺ Refresh</button>
+              <button id="ts-login-button" type="button" class="primary-button">Login</button>
+              <button id="ts-logout-button" type="button">Logout</button>
+              <button id="ts-admin-console-button" type="button">Admin Console ↗</button>
+            </div>
+          </header>
+
+          <!-- Inner tab navigation -->
+          <nav class="ts-tab-nav">
+            <button class="ts-tab-btn active" data-ts-tab="dashboard">📊 Dashboard</button>
+            <button class="ts-tab-btn" data-ts-tab="devices">💻 Devices</button>
+            <button class="ts-tab-btn" data-ts-tab="exitnodes">🚀 Exit Nodes</button>
+            <button class="ts-tab-btn" data-ts-tab="serve">🌐 Serve</button>
+            <button class="ts-tab-btn" data-ts-tab="funnel">📡 Funnel</button>
+            <button class="ts-tab-btn" data-ts-tab="files">📁 Files</button>
+            <button class="ts-tab-btn" data-ts-tab="netcheck">🔍 Netcheck</button>
+            <button class="ts-tab-btn" data-ts-tab="dns">🌍 DNS</button>
+            <button class="ts-tab-btn" data-ts-tab="certs">🔒 Certs</button>
+            <button class="ts-tab-btn" data-ts-tab="console">⌨️ Console</button>
+            <button class="ts-tab-btn" data-ts-tab="system">⚙️ System</button>
+          </nav>
+
+          <!-- ── DASHBOARD TAB ──────────────────────────────── -->
+          <div class="ts-tab-panel active" id="ts-panel-dashboard">
+            <div id="ts-not-installed-banner" class="ts-banner ts-banner-warn hidden">
+              <strong>Tailscale not detected.</strong> Install Tailscale and make sure the CLI is on your PATH, then click Refresh.
+              <a href="https://tailscale.com/download" id="ts-install-link">Download Tailscale ↗</a>
+            </div>
+            <div id="ts-error-banner" class="ts-banner ts-banner-error hidden"></div>
+
+            <div class="ts-metric-grid" id="ts-metric-grid">
+              <div class="ts-metric-card">
+                <span class="ts-metric-label">Online Devices</span>
+                <span class="ts-metric-value" id="ts-metric-online">—</span>
+              </div>
+              <div class="ts-metric-card">
+                <span class="ts-metric-label">Total Devices</span>
+                <span class="ts-metric-value" id="ts-metric-total">—</span>
+              </div>
+              <div class="ts-metric-card">
+                <span class="ts-metric-label">Relayed</span>
+                <span class="ts-metric-value ts-metric-relay" id="ts-metric-relay">—</span>
+              </div>
+              <div class="ts-metric-card">
+                <span class="ts-metric-label">Exit Node</span>
+                <span class="ts-metric-value" id="ts-metric-exitnode">None</span>
+              </div>
+              <div class="ts-metric-card">
+                <span class="ts-metric-label">Tailnet</span>
+                <span class="ts-metric-value ts-metric-sm" id="ts-metric-tailnet">—</span>
+              </div>
+              <div class="ts-metric-card">
+                <span class="ts-metric-label">Account</span>
+                <span class="ts-metric-value ts-metric-sm" id="ts-metric-account">—</span>
+              </div>
+            </div>
+
+            <div class="ts-dashboard-grid">
+              <div class="settings-card">
+                <div class="card-header">
+                  <div><span class="eyebrow">Live Peers</span><h3>Device Status</h3></div>
+                </div>
+                <div id="ts-dashboard-peer-list" class="ts-dashboard-peer-list"></div>
+              </div>
+              <div class="settings-card">
+                <div class="card-header">
+                  <div><span class="eyebrow">Quick Actions</span><h3>Common Tasks</h3></div>
+                </div>
+                <div class="ts-quick-actions">
+                  <button class="ts-quick-btn" id="ts-quick-netcheck">🔍 Run Netcheck</button>
+                  <button class="ts-quick-btn" id="ts-quick-status">📋 Show Status</button>
+                  <button class="ts-quick-btn" id="ts-quick-exitnode">🚀 Exit Nodes</button>
+                  <button class="ts-quick-btn" id="ts-quick-serve">🌐 Manage Serve</button>
+                  <button class="ts-quick-btn" id="ts-quick-funnel">📡 Manage Funnel</button>
+                  <button class="ts-quick-btn" id="ts-quick-console">⌨️ Open Console</button>
+                  <button class="ts-quick-btn" id="ts-quick-admin-console">🔑 Admin Console ↗</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── DEVICES TAB ────────────────────────────────── -->
+          <div class="ts-tab-panel" id="ts-panel-devices">
+            <div class="settings-card settings-card-wide">
+              <div class="card-header">
+                <div><span class="eyebrow">Tailnet</span><h3>All Devices</h3></div>
+                <div class="button-row compact">
+                  <select id="ts-devices-filter" class="ts-filter-select">
+                    <option value="all">All</option>
+                    <option value="online">Online</option>
+                    <option value="relay">Relayed</option>
+                    <option value="offline">Offline</option>
+                  </select>
+                  <input id="ts-devices-search" type="text" placeholder="Search name, IP, OS..." class="ts-search-input">
+                  <select id="ts-devices-sort" class="ts-filter-select">
+                    <option value="name">Sort: Name</option>
+                    <option value="status">Sort: Status</option>
+                    <option value="ip">Sort: IP</option>
+                    <option value="os">Sort: OS</option>
+                  </select>
+                </div>
+              </div>
+              <div id="ts-device-table" class="ts-device-table">
+                <div class="ts-device-table-head">
+                  <span>Device</span>
+                  <span>OS</span>
+                  <span>Tailscale IP</span>
+                  <span>Status</span>
+                  <span>Last Seen</span>
+                  <span>Actions</span>
+                </div>
+                <div id="ts-device-rows" class="ts-device-rows"></div>
+              </div>
+            </div>
+
+            <!-- Device Detail Modal -->
+            <div id="ts-device-modal" class="ts-modal-backdrop hidden">
+              <div class="ts-modal-card">
+                <div class="ts-modal-head">
+                  <h3 id="ts-modal-device-name">Device Details</h3>
+                  <button id="ts-modal-close" type="button" class="icon-button">✕</button>
+                </div>
+                <div id="ts-modal-body" class="ts-modal-body"></div>
+                <div class="ts-modal-actions" id="ts-modal-actions"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── EXIT NODES TAB ─────────────────────────────── -->
+          <div class="ts-tab-panel" id="ts-panel-exitnodes">
+            <div class="settings-card settings-card-wide">
+              <div class="card-header">
+                <div><span class="eyebrow">VPN Routing</span><h3>Exit Node Manager</h3></div>
+                <div class="button-row compact">
+                  <span id="ts-active-exitnode-label" class="ts-label-badge">No exit node active</span>
+                  <button id="ts-disconnect-exitnode" type="button">Disconnect</button>
+                </div>
+              </div>
+              <p class="panel-copy">Route all traffic through a Tailscale exit node. Select a node below to connect.</p>
+              <div id="ts-exitnode-list" class="ts-exitnode-list"></div>
+            </div>
+          </div>
+
+          <!-- ── SERVE TAB ──────────────────────────────────── -->
+          <div class="ts-tab-panel" id="ts-panel-serve">
+            <div class="settings-grid">
+              <div class="settings-card">
+                <div class="card-header">
+                  <div><span class="eyebrow">Tailscale Serve</span><h3>Add Route</h3></div>
+                </div>
+                <div class="form-grid">
+                  <label class="field">
+                    <span>Protocol</span>
+                    <select id="ts-serve-protocol">
+                      <option value="https">HTTPS</option>
+                      <option value="http">HTTP</option>
+                      <option value="tcp">TCP</option>
+                    </select>
+                  </label>
+                  <label class="field">
+                    <span>Port</span>
+                    <input id="ts-serve-port" type="number" placeholder="443" value="443" min="1" max="65535">
+                  </label>
+                  <label class="field">
+                    <span>Target (localhost:port or path)</span>
+                    <input id="ts-serve-target" type="text" placeholder="localhost:3000">
+                  </label>
+                </div>
+                <div class="button-row compact">
+                  <button id="ts-serve-add-btn" type="button" class="primary-button">Add Route</button>
+                </div>
+                <div id="ts-serve-status" class="settings-note">Configure a serve route to expose local services on your tailnet.</div>
+              </div>
+
+              <div class="settings-card settings-card-wide">
+                <div class="card-header">
+                  <div><span class="eyebrow">Active Routes</span><h3>Serve Configuration</h3></div>
+                  <button id="ts-serve-refresh-btn" type="button">Refresh</button>
+                </div>
+                <div id="ts-serve-routes" class="ts-serve-routes"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── FUNNEL TAB ─────────────────────────────────── -->
+          <div class="ts-tab-panel" id="ts-panel-funnel">
+            <div class="settings-card settings-card-wide">
+              <div class="card-header">
+                <div><span class="eyebrow">Public Internet</span><h3>Tailscale Funnel</h3></div>
+                <div class="button-row compact">
+                  <span id="ts-funnel-status-pill" class="ts-status-pill ts-status-unknown">Unknown</span>
+                </div>
+              </div>
+              <p class="panel-copy">Funnel exposes your local services to the public internet through Tailscale's infrastructure. Requires Tailscale serve to be configured first.</p>
+
+              <div class="form-grid">
+                <label class="field">
+                  <span>Port</span>
+                  <input id="ts-funnel-port" type="number" placeholder="443" value="443" min="1" max="65535">
+                </label>
+              </div>
+
+              <div class="button-row compact">
+                <button id="ts-funnel-enable-btn" type="button" class="primary-button">Enable Funnel</button>
+                <button id="ts-funnel-disable-btn" type="button">Disable Funnel</button>
+                <button id="ts-funnel-status-btn" type="button">Check Status</button>
+              </div>
+
+              <div id="ts-funnel-domain-preview" class="ts-funnel-domain hidden">
+                <span class="eyebrow">Public URL</span>
+                <div id="ts-funnel-domain-url" class="ts-funnel-url"></div>
+              </div>
+
+              <div id="ts-funnel-info" class="settings-note">Check funnel status or enable/disable public access above.</div>
+            </div>
+          </div>
+
+          <!-- ── FILES TAB ──────────────────────────────────── -->
+          <div class="ts-tab-panel" id="ts-panel-files">
+            <div class="settings-grid">
+              <div class="settings-card">
+                <div class="card-header">
+                  <div><span class="eyebrow">Tailscale File</span><h3>Send Files</h3></div>
+                </div>
+
+                <label class="field">
+                  <span>Target Device</span>
+                  <select id="ts-file-target-device"><option value="">Select a device...</option></select>
+                </label>
+
+                <label class="field">
+                  <span>File to send</span>
+                  <div class="picker-row">
+                    <input id="ts-file-path" type="text" placeholder="No file selected" readonly>
+                    <button id="ts-file-pick-btn" type="button">Browse</button>
+                  </div>
+                </label>
+
+                <div id="ts-file-drop-zone" class="ts-file-drop-zone">
+                  <span>📂 Drag &amp; drop a file here to send</span>
+                </div>
+
+                <div class="button-row compact">
+                  <button id="ts-file-send-btn" type="button" class="primary-button">Send File</button>
+                </div>
+                <div id="ts-file-status" class="settings-note">Select a device and a file to send.</div>
+              </div>
+
+              <div class="settings-card">
+                <div class="card-header">
+                  <div><span class="eyebrow">History</span><h3>Transfer Log</h3></div>
+                  <button id="ts-file-clear-btn" type="button">Clear</button>
+                </div>
+                <div id="ts-file-history" class="ts-file-history"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── NETCHECK TAB ───────────────────────────────── -->
+          <div class="ts-tab-panel" id="ts-panel-netcheck">
+            <div class="settings-card settings-card-wide">
+              <div class="card-header">
+                <div><span class="eyebrow">Diagnostics</span><h3>Network Check</h3></div>
+                <button id="ts-netcheck-run-btn" type="button" class="primary-button">Run Netcheck</button>
+              </div>
+              <p class="panel-copy">Tests connectivity to DERP relay servers, NAT type detection, and direct connection capability.</p>
+
+              <div id="ts-netcheck-summary" class="ts-netcheck-summary hidden">
+                <div class="ts-metric-grid">
+                  <div class="ts-metric-card">
+                    <span class="ts-metric-label">UDP Available</span>
+                    <span class="ts-metric-value" id="ts-nc-udp">—</span>
+                  </div>
+                  <div class="ts-metric-card">
+                    <span class="ts-metric-label">IPv4</span>
+                    <span class="ts-metric-value" id="ts-nc-ipv4">—</span>
+                  </div>
+                  <div class="ts-metric-card">
+                    <span class="ts-metric-label">IPv6</span>
+                    <span class="ts-metric-value" id="ts-nc-ipv6">—</span>
+                  </div>
+                  <div class="ts-metric-card">
+                    <span class="ts-metric-label">MappingVariesByDestIP</span>
+                    <span class="ts-metric-value" id="ts-nc-nat">—</span>
+                  </div>
+                </div>
+              </div>
+
+              <div id="ts-netcheck-derp" class="ts-derp-grid"></div>
+              <div id="ts-netcheck-status" class="settings-note">Click Run Netcheck to test your network connectivity.</div>
+            </div>
+          </div>
+
+          <!-- ── DNS TAB ───────────────────────────────────── -->
+          <div class="ts-tab-panel" id="ts-panel-dns">
+            <div class="settings-card settings-card-wide">
+              <div class="card-header">
+                <div><span class="eyebrow">MagicDNS</span><h3>DNS Configuration</h3></div>
+                <button id="ts-dns-refresh-btn" type="button">Refresh</button>
+              </div>
+              <div id="ts-dns-info" class="ts-dns-info">
+                <div class="overview-table" id="ts-dns-table">
+                  <div class="overview-row">
+                    <span>MagicDNS</span>
+                    <strong id="ts-dns-magic">—</strong>
+                  </div>
+                  <div class="overview-row">
+                    <span>Tailnet domain</span>
+                    <strong id="ts-dns-domain">—</strong>
+                  </div>
+                </div>
+                <div class="card-header" style="margin-top:16px">
+                  <div><span class="eyebrow">Resolvers</span><h3>Nameservers</h3></div>
+                </div>
+                <div id="ts-dns-nameservers" class="ts-dns-nameservers"></div>
+              </div>
+              <div id="ts-dns-status" class="settings-note">Click Refresh to load DNS configuration.</div>
+            </div>
+          </div>
+
+          <!-- ── CERTS TAB ──────────────────────────────────── -->
+          <div class="ts-tab-panel" id="ts-panel-certs">
+            <div class="settings-card settings-card-wide">
+              <div class="card-header">
+                <div><span class="eyebrow">TLS</span><h3>Certificate Manager</h3></div>
+              </div>
+              <p class="panel-copy">Generate TLS certificates for your Tailscale device's MagicDNS hostname. Requires HTTPS enabled via <code>tailscale serve</code>.</p>
+
+              <div class="form-grid">
+                <label class="field">
+                  <span>Hostname (e.g. device.tail12345.ts.net)</span>
+                  <input id="ts-cert-hostname" type="text" placeholder="device.tail12345.ts.net">
+                </label>
+              </div>
+
+              <div class="button-row compact">
+                <button id="ts-cert-get-btn" type="button" class="primary-button">Get Certificate</button>
+              </div>
+
+              <div id="ts-cert-result" class="hidden">
+                <div class="overview-table" style="margin-top:16px">
+                  <div class="overview-row">
+                    <span>Expiry</span>
+                    <strong id="ts-cert-expiry">—</strong>
+                  </div>
+                  <div class="overview-row">
+                    <span>Cert file</span>
+                    <strong id="ts-cert-path">—</strong>
+                  </div>
+                </div>
+                <div class="button-row compact" style="margin-top:12px">
+                  <button id="ts-cert-open-btn" type="button">Open folder</button>
+                </div>
+              </div>
+
+              <div id="ts-cert-status" class="settings-note">Enter your device's MagicDNS hostname to generate a TLS certificate.</div>
+            </div>
+          </div>
+
+          <!-- ── CONSOLE TAB ────────────────────────────────── -->
+          <div class="ts-tab-panel" id="ts-panel-console">
+            <div class="settings-card settings-card-wide ts-console-card">
+              <div class="card-header">
+                <div><span class="eyebrow">CLI</span><h3>Tailscale Console</h3></div>
+                <div class="button-row compact">
+                  <button id="ts-console-clear-btn" type="button">Clear</button>
+                </div>
+              </div>
+              <p class="panel-copy">Run any <code>tailscale</code> command. History: ↑/↓ arrows. Tab-complete common commands.</p>
+              <div id="ts-console-output" class="ts-console-output" aria-live="polite"></div>
+              <div class="ts-console-input-row">
+                <span class="ts-console-prompt">tailscale&gt;</span>
+                <input id="ts-console-input" type="text" placeholder="status, ping &lt;host&gt;, netcheck, serve status..." autocomplete="off" spellcheck="false">
+                <button id="ts-console-run-btn" type="button" class="primary-button">Run</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- ── SYSTEM TAB ─────────────────────────────────── -->
+          <div class="ts-tab-panel" id="ts-panel-system">
+            <div class="settings-grid">
+              <div class="settings-card">
+                <div class="card-header">
+                  <div><span class="eyebrow">Info</span><h3>System Information</h3></div>
+                  <button id="ts-sysinfo-refresh-btn" type="button">Refresh</button>
+                </div>
+                <div class="overview-table" id="ts-sysinfo-table">
+                  <div class="overview-row">
+                    <span>Tailscale version</span>
+                    <strong id="ts-sys-version">—</strong>
+                  </div>
+                  <div class="overview-row">
+                    <span>CLI path</span>
+                    <strong id="ts-sys-clipath">—</strong>
+                  </div>
+                  <div class="overview-row">
+                    <span>API source</span>
+                    <strong id="ts-sys-apisource">—</strong>
+                  </div>
+                  <div class="overview-row">
+                    <span>Service status</span>
+                    <strong id="ts-sys-service">—</strong>
+                  </div>
+                  <div class="overview-row">
+                    <span>Logged-in account</span>
+                    <strong id="ts-sys-account">—</strong>
+                  </div>
+                  <div class="overview-row">
+                    <span>Tailnet name</span>
+                    <strong id="ts-sys-tailnet">—</strong>
+                  </div>
+                  <div class="overview-row">
+                    <span>Device name</span>
+                    <strong id="ts-sys-device">—</strong>
+                  </div>
+                  <div class="overview-row">
+                    <span>Tailscale IP</span>
+                    <strong id="ts-sys-ip">—</strong>
+                  </div>
+                </div>
+              </div>
+
+              <div class="settings-card">
+                <div class="card-header">
+                  <div><span class="eyebrow">Account</span><h3>Login &amp; Logout</h3></div>
+                </div>
+                <p class="panel-copy">Login opens a browser tab with the Tailscale auth URL. After authenticating, click Refresh to update status.</p>
+                <div class="button-row compact">
+                  <button id="ts-sys-login-btn" type="button" class="primary-button">Login to Tailscale</button>
+                  <button id="ts-sys-logout-btn" type="button" class="danger-button">Logout</button>
+                </div>
+                <div id="ts-sys-login-url" class="settings-note hidden">
+                  <strong>Login URL:</strong> <span id="ts-sys-login-url-text"></span>
+                </div>
+                <div id="ts-sys-status" class="settings-note">Use the buttons above to manage your Tailscale account.</div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </section>
+      <!-- Terminal Screen -->
+      <section class="screen" id="terminal-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Core</span>
+              <h1>Local Terminal</h1>
+              <p>Run host system commands and preset shell queries inside your active workspace.</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Presets</h3></div>
+              <div class="settings-list">
+                <button type="button" class="preset-btn primary-button" data-cmd="git status" style="width:100%; margin-bottom:6px;">git status</button>
+                <button type="button" class="preset-btn primary-button" data-cmd="node -v" style="width:100%; margin-bottom:6px;">node -v</button>
+                <button type="button" class="preset-btn primary-button" data-cmd="php -v" style="width:100%; margin-bottom:6px;">php -v</button>
+                <button type="button" class="preset-btn primary-button" data-cmd="dir" style="width:100%; margin-bottom:6px;">list files</button>
+                <button type="button" class="preset-btn primary-button" data-cmd="docker ps" style="width:100%;">docker ps</button>
+              </div>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>Console Output</h3></div>
+              <div id="terminal-output" class="log-list" style="height:320px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px; overflow-y:auto; margin-bottom:10px;">
+                <div class="terminal-line" style="color:var(--muted);">Terminal initialized. Click preset or type command below.</div>
+              </div>
+              <form id="terminal-form" style="display:flex; gap:8px;">
+                <span style="font-family:monospace; font-weight:700; align-self:center; color:var(--accent);">&gt;</span>
+                <input type="text" id="terminal-input" placeholder="Type a command and press Enter..." autocomplete="off" style="flex:1; height:32px; border:1px solid var(--input-border); border-radius:6px; background:var(--input-bg); color:var(--text); padding:0 8px;">
+                <button id="terminal-clear" type="button" class="secondary-button">Clear</button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Database Screen -->
+      <section class="screen" id="database-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Core</span>
+              <h1>Database Manager</h1>
+              <p>Run SQL queries against local MySQL and PostgreSQL databases.</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Connection</h3></div>
+              <label class="field"><span>Type</span><select id="db-type" class="ssf-select" style="width:100%; height:32px;"><option value="mysql">MySQL</option><option value="postgres">PostgreSQL</option></select></label>
+              <label class="field"><span>Host</span><input id="db-host" type="text" value="127.0.0.1" style="width:100%; height:32px;"></label>
+              <label class="field"><span>Port</span><input id="db-port" type="number" value="3306" style="width:100%; height:32px;"></label>
+              <label class="field"><span>Username</span><input id="db-user" type="text" value="root" style="width:100%; height:32px;"></label>
+              <label class="field"><span>Password</span><input id="db-pass" type="password" value="" style="width:100%; height:32px;"></label>
+              <label class="field"><span>Database</span><input id="db-name" type="text" placeholder="wp_local" style="width:100%; height:32px;"></label>
+              <button id="db-test-btn" type="button" class="primary-button" style="width:100%; margin-top:10px;">Test Connection</button>
+              <div id="db-status-info" class="settings-note" style="margin-top:8px;">Select database type and test connection.</div>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header">
+                <h3>SQL Query Editor</h3>
+                <div class="button-row compact">
+                  <button id="db-tables-btn" type="button">Show Tables</button>
+                  <button id="db-options-btn" type="button">WP Options</button>
+                </div>
+              </div>
+              <textarea id="db-sql-input" class="config-editor" style="min-height:120px;" placeholder="SELECT * FROM wp_options LIMIT 5;"></textarea>
+              <button id="db-run-btn" type="button" class="primary-button" style="margin-top:10px;">Run SQL Query</button>
+              <div id="db-results-container" style="margin-top:15px; overflow-x:auto; background:var(--surface-3); border-radius:8px; padding:10px; border:1px solid var(--line-soft);">
+                <table id="db-results-table" style="width:100%; border-collapse:collapse; font-size:0.85rem; text-align:left;">
+                  <thead><tr style="border-bottom:1px solid var(--line); color:var(--muted);"><th style="padding:6px;">Result Grid</th></tr></thead>
+                  <tbody style="color:var(--text-dim);"><tr style="border-bottom:1px solid var(--line-soft);"><td style="padding:6px;">Execute a query to see rows.</td></tr></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Git Screen -->
+      <section class="screen" id="git-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Core</span>
+              <h1>Git Workspace</h1>
+              <p>Manage git repositories, stage changes, commit logs, and push updates.</p>
+            </div>
+            <div class="button-row compact">
+              <button id="git-refresh-btn" type="button">↺ Refresh Status</button>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Repository Status</h3></div>
+              <div class="settings-list" style="margin-bottom:12px;">
+                <p>Branch: <strong id="git-active-branch" style="color:var(--accent-strong);">unknown</strong></p>
+                <p>Status: <span id="git-clean-pill" class="settings-note" style="display:inline; padding:2px 8px; border-radius:4px; background:var(--surface-3);">Scanning...</span></p>
+              </div>
+              <div class="git-changes-lists" style="display:grid; gap:12px;">
+                <div>
+                  <strong>Unstaged Changes</strong>
+                  <ul id="git-unstaged-list" class="log-list" style="max-height:120px; overflow-y:auto; margin-top:4px;"><li>No changes detected.</li></ul>
+                </div>
+                <div>
+                  <strong>Staged Changes</strong>
+                  <ul id="git-staged-list" class="log-list" style="max-height:120px; overflow-y:auto; margin-top:4px;"><li>No staged files.</li></ul>
+                </div>
+              </div>
+              <button id="git-stage-btn" type="button" class="primary-button" style="width:100%; margin-top:12px;">Stage All Changes</button>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>Commit & Push</h3></div>
+              <label class="field">
+                <span>Commit message</span>
+                <input id="git-msg-input" type="text" placeholder="feat: new module setup" style="width:100%; height:32px;">
+              </label>
+              <div class="button-row compact" style="margin-top:10px;">
+                <button id="git-commit-btn" type="button" class="primary-button">Commit</button>
+                <button id="git-pull-btn" type="button">Pull</button>
+                <button id="git-push-btn" type="button">Push</button>
+              </div>
+              <div style="margin-top:15px;">
+                <strong>Recent Commits</strong>
+                <ul id="git-history-list" class="log-list" style="margin-top:6px; max-height:180px; overflow-y:auto;"><li>No commit history loaded.</li></ul>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- WP-CLI Screen -->
+      <section class="screen" id="wpcli-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Core</span>
+              <h1>WP-CLI Environment</h1>
+              <p>Execute WordPress CLI administration commands directly on the active WordPress folder.</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Commands</h3></div>
+              <div class="settings-list">
+                <button type="button" class="wpcli-btn primary-button" data-cmd="plugin list" style="width:100%; margin-bottom:6px;">Plugin List</button>
+                <button type="button" class="wpcli-btn primary-button" data-cmd="theme list" style="width:100%; margin-bottom:6px;">Theme List</button>
+                <button type="button" class="wpcli-btn primary-button" data-cmd="cache flush" style="width:100%; margin-bottom:6px;">Flush Cache</button>
+                <button type="button" class="wpcli-btn primary-button" data-cmd="transient delete --all" style="width:100%; margin-bottom:6px;">Delete Transients</button>
+                <button type="button" class="wpcli-btn primary-button" data-cmd="core check-update" style="width:100%;">Check Updates</button>
+              </div>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>Output Log</h3></div>
+              <div id="wpcli-output" class="log-list" style="height:320px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px; overflow-y:auto; margin-bottom:10px;">
+                <div class="wpcli-line" style="color:var(--muted);">Select a quick action or input custom WP-CLI command.</div>
+              </div>
+              <form id="wpcli-form" style="display:flex; gap:8px;">
+                <span style="font-family:monospace; font-weight:700; align-self:center; color:var(--accent);">wp</span>
+                <input type="text" id="wpcli-input" placeholder="plugin install contact-form-7 --activate" autocomplete="off" style="flex:1; height:32px; border:1px solid var(--input-border); border-radius:6px; background:var(--input-bg); color:var(--text); padding:0 8px;">
+                <button id="wpcli-run-btn" type="submit" class="primary-button">Run</button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Backups Screen -->
+      <section class="screen" id="backups-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Productivity</span>
+              <h1>Site Backups</h1>
+              <p>Manage local backup archives, create instant backup checkpoints, or restore your sites.</p>
+            </div>
+            <div class="button-row compact">
+              <button id="backups-create-btn" type="button" class="primary-button">Create Backup</button>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Stats</h3></div>
+              <div class="settings-list">
+                <div class="settings-item">
+                  <div class="settings-item-copy">
+                    <strong>Total Backups</strong>
+                    <span id="backups-count-text">0 backups</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>Backup Archives</h3></div>
+              <div id="backups-list-container" class="settings-list">
+                <!-- Backups list will be populated dynamically -->
+                <div class="settings-item"><span style="color:var(--muted);">No backups found. Click Create Backup to start.</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Deploy Screen -->
+      <section class="screen" id="deploy-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">DevOps</span>
+              <h1>Deployment Manager</h1>
+              <p>Sync files and database schemas to production server targets using SFTP settings.</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Target Connection</h3></div>
+              <div class="settings-list">
+                <div class="settings-item"><div class="settings-item-copy"><strong>Deployment Host</strong><span id="deploy-target-host">Not configured (Set SFTP profile)</span></div></div>
+                <div class="settings-item"><div class="settings-item-copy"><strong>Remote Path</strong><span id="deploy-target-path">/</span></div></div>
+              </div>
+              <div class="button-row compact" style="margin-top:15px; display:grid; gap:8px; grid-template-columns:1fr 1fr;">
+                <button id="deploy-dryrun-btn" type="button" class="primary-button">Dry Run</button>
+                <button id="deploy-db-btn" type="button">Push Database</button>
+                <button id="deploy-files-btn" type="button">Push Files</button>
+                <button id="deploy-sync-btn" type="button" class="danger-button">Complete Sync</button>
+              </div>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>Sync Logs & Progress</h3></div>
+              <div class="flat-progress-track" style="margin-bottom:10px;"><div id="deploy-progress-bar" class="flat-progress-bar" style="width:0%;"></div></div>
+              <div id="deploy-output" class="log-list" style="height:280px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px; overflow-y:auto;">
+                <div style="color:var(--muted);">Ready to deploy. Verify remote host details first.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- AI Screen -->
+      <section class="screen" id="ai-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Collaboration</span>
+              <h1>AI Assistant</h1>
+              <p>Generate shortcodes, custom hooks, and fix environment errors right within your developer workspace.</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>WordPress Prompts</h3></div>
+              <div class="settings-list">
+                <button type="button" class="ai-prompt-btn primary-button" data-prompt="Write custom plugin header boilerplate" style="width:100%; margin-bottom:6px; font-size:0.8rem; text-align:left;">Plugin Boilerplate</button>
+                <button type="button" class="ai-prompt-btn primary-button" data-prompt="Create WordPress shortcode showing recent posts" style="width:100%; margin-bottom:6px; font-size:0.8rem; text-align:left;">Recent Posts Shortcode</button>
+                <button type="button" class="ai-prompt-btn primary-button" data-prompt="Write Docker Compose template for Nginx and PHP" style="width:100%; margin-bottom:6px; font-size:0.8rem; text-align:left;">Docker Compose template</button>
+                <button type="button" class="ai-prompt-btn primary-button" data-prompt="Fix Apache port 80 collision error" style="width:100%; font-size:0.8rem; text-align:left;">Port Collision help</button>
+              </div>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>Chat Area</h3></div>
+              <div id="ai-chat-output" class="log-list" style="height:320px; background:var(--surface-3); padding:12px; border-radius:8px; overflow-y:auto; margin-bottom:10px; display:flex; flex-direction:column; gap:8px;">
+                <div style="background:var(--surface-2); padding:8px; border-radius:8px; align-self:flex-start; max-width:85%;"><strong>Assistant:</strong> Hello! Ask me code snippets, docker compose structures, or server setups!</div>
+              </div>
+              <form id="ai-form" style="display:flex; gap:8px;">
+                <input type="text" id="ai-input" placeholder="Type a prompt for the assistant..." autocomplete="off" style="flex:1; height:32px; border:1px solid var(--input-border); border-radius:6px; background:var(--input-bg); color:var(--text); padding:0 8px;">
+                <button id="ai-send-btn" type="submit" class="primary-button">Send</button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- MCP Filesystem Screen -->
+      <section class="screen" id="mcp_filesystem-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Advanced MCP</span>
+              <h1>Filesystem MCP</h1>
+              <p>Interact with local directory permissions and read/write file triggers.</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Tool Registry</h3></div>
+              <div class="settings-list">
+                <div class="settings-item"><span>read_file</span></div>
+                <div class="settings-item"><span>write_file</span></div>
+                <div class="settings-item"><span>list_dir</span></div>
+              </div>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>Filesystem Log</h3></div>
+              <div class="log-list" style="height:280px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px;">
+                <div>[MCP] Filesystem server listening on stdio.</div>
+                <div>[MCP] Directory registry root set to workspace htdocs.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- MCP GitHub Screen -->
+      <section class="screen" id="mcp_github-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Advanced MCP</span>
+              <h1>GitHub MCP</h1>
+              <p>Integrate GitHub repositories issues, branch checks, and push logs.</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Credentials</h3></div>
+              <label class="field"><span>Token</span><input type="password" value="ghp_****************" readonly style="width:100%; height:32px;"></label>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>API Registry Logs</h3></div>
+              <div class="log-list" style="height:280px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px;">
+                <div>[GitHub MCP] Initialized successfully.</div>
+                <div>[GitHub MCP] Listening to repository webhook web events.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- MCP PostgreSQL Screen -->
+      <section class="screen" id="mcp_postgres-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Advanced MCP</span>
+              <h1>PostgreSQL MCP</h1>
+              <p>Run query bridges and inspect schemas on local Postgres servers.</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Exposed Tools</h3></div>
+              <div class="settings-list">
+                <div class="settings-item"><span>pg_list_tables</span></div>
+                <div class="settings-item"><span>pg_query_raw</span></div>
+              </div>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>PostgreSQL Logs</h3></div>
+              <div class="log-list" style="height:280px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px;">
+                <div>[Pg MCP] Loaded postgres adapter successfully.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- MCP MySQL Screen -->
+      <section class="screen" id="mcp_mysql-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Advanced MCP</span>
+              <h1>MySQL MCP</h1>
+              <p>Check MySQL server connections, optimize columns, and index tables.</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Exposed Tools</h3></div>
+              <div class="settings-list">
+                <div class="settings-item"><span>mysql_list_tables</span></div>
+                <div class="settings-item"><span>mysql_query_raw</span></div>
+              </div>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>MySQL MCP Logs</h3></div>
+              <div class="log-list" style="height:280px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px;">
+                <div>[MySQL MCP] Adapter is running. Connected to port 3306.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- MCP Browser Screen -->
+      <section class="screen" id="mcp_browser-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Advanced MCP</span>
+              <h1>Browser Automation MCP</h1>
+              <p>Run Playwright and Puppeteer test runners to automate dashboard actions.</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Playwright Tools</h3></div>
+              <div class="settings-list">
+                <div class="settings-item"><span>browser_click</span></div>
+                <div class="settings-item"><span>browser_navigate</span></div>
+                <div class="settings-item"><span>browser_screenshot</span></div>
+              </div>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>Automation Status</h3></div>
+              <div class="log-list" style="height:280px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px;">
+                <div>[Browser MCP] Headless engine loaded. Playwright instance active.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- MCP Slack Screen -->
+      <section class="screen" id="mcp_slack-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Advanced MCP</span>
+              <h1>Slack MCP</h1>
+              <p>Broadcast dev status, logs, and server stats directly to Slack team spaces.</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Active Webhooks</h3></div>
+              <div class="settings-list">
+                <div class="settings-item"><span>#deployments-feed</span></div>
+                <div class="settings-item"><span>#server-alerts</span></div>
+              </div>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>Slack API Stream</h3></div>
+              <div class="log-list" style="height:280px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px;">
+                <div>[Slack MCP] Slack token authorized. Listening to events.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- MCP Notion Screen -->
+      <section class="screen" id="mcp_notion-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Advanced MCP</span>
+              <h1>Notion MCP</h1>
+              <p>Sync tasks, projects briefs, and client requirements pages from Notion databases.</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Sync Configuration</h3></div>
+              <div class="settings-list">
+                <div class="settings-item"><span>Workspace Database: Active</span></div>
+              </div>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>Notion Pages Cache</h3></div>
+              <div class="log-list" style="height:280px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px;">
+                <div>[Notion MCP] Loaded 12 pages from Notion API. Cache valid.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- MCP Google Drive Screen -->
+      <section class="screen" id="mcp_gdrive-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Advanced MCP</span>
+              <h1>Google Drive MCP</h1>
+              <p>Browse cloud files, synchronize media folders, and manage file assets.</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Google Cloud Settings</h3></div>
+              <div class="settings-list">
+                <div class="settings-item"><span>Drive Connection: Connected</span></div>
+              </div>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>GDrive Sync Logs</h3></div>
+              <div class="log-list" style="height:280px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px;">
+                <div>[Google Drive MCP] Auto-sync active. Syncing images assets.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- MCP Cloudflare Screen -->
+      <section class="screen" id="mcp_cloudflare-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Advanced MCP</span>
+              <h1>Cloudflare MCP</h1>
+              <p>Manage DNS lists, toggle security proxies, and purge deployment caches.</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Active Zone</h3></div>
+              <div class="settings-list">
+                <div class="settings-item"><span>domain.com (Active)</span></div>
+              </div>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>DNS and Cache Purge Logs</h3></div>
+              <div class="log-list" style="height:280px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px;">
+                <div>[Cloudflare MCP] Zone token verified. Purge cache successful.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- DevOps Docker Screen -->
+      <section class="screen" id="devops_docker-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">DevOps</span>
+              <h1>Docker Manager</h1>
+              <p>Monitor local Docker daemon, list containers, check active image lists, and read container logs.</p>
+            </div>
+            <div class="button-row compact">
+              <button id="docker-refresh-btn" type="button" class="primary-button">↺ Refresh Status</button>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Docker Daemon</h3></div>
+              <div class="settings-list">
+                <div class="settings-item"><div class="settings-item-copy"><strong>Docker Engine</strong><span id="docker-engine-status" class="pill success" style="padding:2px 8px;">Connected</span></div></div>
+              </div>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>Active Containers</h3></div>
+              <div class="settings-list" id="docker-containers-list">
+                <div class="settings-item"><span style="color:var(--muted);">No containers running or Docker daemon offline.</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- DevOps Docker Compose Screen -->
+      <section class="screen" id="devops_compose-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">DevOps</span>
+              <h1>Docker Compose</h1>
+              <p>Start, stop, and configure compose stacks inside your working directory.</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Active Stack</h3></div>
+              <div class="settings-list" style="margin-bottom:12px;">
+                <div class="settings-item"><span>compose.yml (Detected)</span></div>
+              </div>
+              <button id="compose-up-btn" type="button" class="primary-button" style="width:100%; margin-bottom:6px;">compose up -d</button>
+              <button id="compose-down-btn" type="button" class="danger-button" style="width:100%;">compose down</button>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>Compose Logs Output</h3></div>
+              <div id="compose-logs" class="log-list" style="height:280px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px; overflow-y:auto;">
+                <div style="color:var(--muted);">Select compose up to view service start logs.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- DevOps Kubernetes Screen -->
+      <section class="screen" id="devops_k8s-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">DevOps</span>
+              <h1>Kubernetes Dashboard</h1>
+              <p>Inspect cluster status, select namespace targets, and browse pods lists.</p>
+            </div>
+            <div class="button-row compact">
+              <button id="k8s-refresh-btn" type="button" class="primary-button">↺ Refresh Pods</button>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Cluster Scope</h3></div>
+              <label class="field"><span>Namespace</span><select id="k8s-namespace" class="ssf-select" style="width:100%; height:32px;"><option value="default">default</option><option value="kube-system">kube-system</option></select></label>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>Namespace Pods</h3></div>
+              <div class="settings-list" id="k8s-pods-list">
+                <div class="settings-item"><span style="color:var(--muted);">No pods detected. Ensure kubectl is configured.</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- DevOps CI/CD Runner Screen -->
+      <section class="screen" id="devops_cicd-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">DevOps</span>
+              <h1>CI/CD Runner</h1>
+              <p>Trigger actions pipelines and inspect runner log scripts in real-time.</p>
+            </div>
+            <div class="button-row compact">
+              <button id="cicd-run-btn" type="button" class="primary-button">Trigger Pipeline</button>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Pipeline Status</h3></div>
+              <div class="settings-list">
+                <div class="settings-item"><span>Last Build: Success</span></div>
+                <div class="settings-item"><span>Runner ID: local-agent-0</span></div>
+              </div>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>Runner Execution Logs</h3></div>
+              <div id="cicd-output" class="log-list" style="height:280px; background:var(--surface-3); font-family:monospace; padding:12px; border-radius:8px; overflow-y:auto;">
+                <div style="color:var(--muted);">Ready to run workflows.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- DevOps Server Monitor Screen -->
+      <section class="screen" id="devops_monitor-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">DevOps</span>
+              <h1>Server Resource Monitor</h1>
+              <p>Real-time monitor of server load, memory allocation, and database connectivity ports.</p>
+            </div>
+            <div class="button-row compact">
+              <button id="monitor-refresh-btn" type="button" class="primary-button">Refresh Stats</button>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Hardware Loads</h3></div>
+              <div style="margin-bottom:12px;">
+                <span>CPU Usage</span>
+                <div class="flat-progress-track" style="margin-top:4px;"><div id="monitor-cpu-bar" class="flat-progress-bar" style="width:25%;"></div></div>
+              </div>
+              <div>
+                <span>RAM Usage</span>
+                <div class="flat-progress-track" style="margin-top:4px;"><div id="monitor-ram-bar" class="flat-progress-bar" style="width:40%;"></div></div>
+              </div>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>Server Health</h3></div>
+              <div class="settings-list">
+                <div class="settings-item"><span>Apache Stack: Active</span></div>
+                <div class="settings-item"><span>MySQL Database: Active</span></div>
+                <div class="settings-item"><span>Localhost Response Time: <strong id="monitor-latency">12ms</strong></span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Productivity Notes Screen -->
+      <section class="screen" id="prod_notes-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Productivity</span>
+              <h1>Notes Workspace</h1>
+              <p>Record notes and specifications in raw markdown with real-time HTML formatting.</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Markdown Editor</h3></div>
+              <textarea id="notes-markdown-input" class="config-editor" style="min-height:360px;" placeholder="# Sprint Notes&#10;&#10;* Task 1..."></textarea>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>HTML Preview</h3></div>
+              <div id="notes-preview-output" style="height:360px; background:var(--surface-3); padding:14px; border-radius:8px; overflow-y:auto; border:1px solid var(--line-soft);">
+                <h1>Sprint Notes</h1><p>Type markdown on the left to view preview here.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Productivity Kanban Screen -->
+      <section class="screen" id="prod_kanban-screen">
+        <div class="settings-shell" style="max-width:100%;">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Productivity</span>
+              <h1>Kanban Board</h1>
+              <p>Organize team activities, developers tasks, and deployment columns.</p>
+            </div>
+          </header>
+          <div style="display:flex; gap:16px; width:100%; overflow-x:auto; padding:8px 0;">
+            <!-- Column To Do -->
+            <div class="settings-card" style="flex:1; min-width:260px;">
+              <div class="card-header"><h3>To Do</h3></div>
+              <div class="kanban-cards-container" id="kanban-todo-list" style="display:grid; gap:8px; min-height:220px; background:var(--surface-3); padding:8px; border-radius:8px; border:1px dashed var(--line);">
+                <div class="settings-item" draggable="true" style="cursor:grab; background:var(--surface-2);"><strong>Setup dev database</strong></div>
+              </div>
+              <form id="kanban-add-todo-form" style="display:flex; gap:6px; margin-top:8px;">
+                <input type="text" id="kanban-todo-input" placeholder="New task..." style="flex:1; height:32px; border:1px solid var(--input-border); border-radius:6px; background:var(--input-bg); color:var(--text); padding:0 8px;">
+                <button type="submit" class="primary-button">Add</button>
+              </form>
+            </div>
+            <!-- Column In Progress -->
+            <div class="settings-card" style="flex:1; min-width:260px;">
+              <div class="card-header"><h3>In Progress</h3></div>
+              <div class="kanban-cards-container" id="kanban-progress-list" style="display:grid; gap:8px; min-height:220px; background:var(--surface-3); padding:8px; border-radius:8px; border:1px dashed var(--line);">
+                <div class="settings-item" draggable="true" style="cursor:grab; background:var(--surface-2);"><strong>Integrate MCP tools</strong></div>
+              </div>
+            </div>
+            <!-- Column Done -->
+            <div class="settings-card" style="flex:1; min-width:260px;">
+              <div class="card-header"><h3>Done</h3></div>
+              <div class="kanban-cards-container" id="kanban-done-list" style="display:grid; gap:8px; min-height:220px; background:var(--surface-3); padding:8px; border-radius:8px; border:1px dashed var(--line);">
+                <div class="settings-item" draggable="true" style="cursor:grab; background:var(--surface-2);"><strong>Sidebar drag-and-drop category headers</strong></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Productivity Time Tracking Screen -->
+      <section class="screen" id="prod_time-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Productivity</span>
+              <h1>Time Tracker</h1>
+              <p>Log your development hours, track billing, and monitor project stopwatch.</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Active Stopwatch</h3></div>
+              <div style="font-size:2.8rem; font-family:monospace; font-weight:700; text-align:center; margin:20px 0; color:var(--accent-strong);" id="stopwatch-display">00:00:00</div>
+              <div class="button-row compact" style="justify-content:center;">
+                <button id="stopwatch-start-btn" type="button" class="primary-button">Start</button>
+                <button id="stopwatch-pause-btn" type="button">Pause</button>
+                <button id="stopwatch-reset-btn" type="button" class="danger-button">Reset</button>
+              </div>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>Time Logs</h3></div>
+              <div class="settings-list" id="time-logs-list">
+                <div class="settings-item"><span>No logged intervals. Click Start to track.</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Productivity Doc Viewer Screen -->
+      <section class="screen" id="prod_docs-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Productivity</span>
+              <h1>Documentation Viewer</h1>
+              <p>Access offline syntax manuals for PHP, WordPress, Docker, Kubernetes, and Tailwind.</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Doc Select</h3></div>
+              <select id="doc-selection" class="ssf-select" style="width:100%; height:32px; margin-bottom:8px;">
+                <option value="wp">WordPress API</option>
+                <option value="docker">Docker Command Reference</option>
+                <option value="k8s">Kubernetes Pod Specs</option>
+                <option value="php">PHP Standard Library</option>
+              </select>
+              <input type="text" id="doc-search" placeholder="Search docs..." style="width:100%; height:32px; border:1px solid var(--input-border); border-radius:6px; background:var(--input-bg); color:var(--text); padding:0 8px;">
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>Documentation View</h3></div>
+              <div id="doc-body" style="height:340px; background:var(--surface-3); border-radius:8px; padding:14px; overflow-y:auto; font-size:0.9rem; line-height:1.4;">
+                <h4>WordPress WP_Query Reference</h4>
+                <p>Use WP_Query class to retrieve posts from the database based on custom taxonomy and category arguments.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Productivity Password Vault Screen -->
+      <section class="screen" id="prod_vault-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Productivity</span>
+              <h1>Password Vault</h1>
+              <p>Locally encrypted credentials vault for server logins, databases, and admin accounts.</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Add Entry</h3></div>
+              <form id="vault-entry-form">
+                <label class="field"><span>Label</span><input id="vault-entry-label" type="text" placeholder="Staging Server SSH" style="width:100%; height:32px;"></label>
+                <label class="field"><span>Username</span><input id="vault-entry-user" type="text" placeholder="admin" style="width:100%; height:32px;"></label>
+                <label class="field"><span>Password</span><input id="vault-entry-pass" type="password" placeholder="••••••••" style="width:100%; height:32px;"></label>
+                <button type="submit" class="primary-button" style="width:100%; margin-top:10px;">Save Entry</button>
+              </form>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>Saved Entries</h3></div>
+              <div class="settings-list" id="vault-entries-list">
+                <div class="settings-item"><span>No vault entries. Save credentials using the form.</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Productivity Secrets Manager Screen -->
+      <section class="screen" id="prod_secrets-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Productivity</span>
+              <h1>Secrets Manager</h1>
+              <p>Configure project `.env` variables and keep API keys separated from source control.</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Environment Presets</h3></div>
+              <button id="secrets-load-env" type="button" class="primary-button" style="width:100%; margin-bottom:8px;">Load Local .env</button>
+              <button id="secrets-save-env" type="button" style="width:100%;">Save Configuration</button>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>Environment Variables</h3></div>
+              <div id="secrets-variables-list" style="display:grid; gap:8px;">
+                <div style="display:flex; gap:8px;">
+                  <input type="text" value="DB_HOST" readonly style="width:140px; height:32px; border:1px solid var(--input-border); border-radius:6px; background:var(--surface-3); color:var(--text-dim); padding:0 8px;">
+                  <input type="text" value="127.0.0.1" style="flex:1; height:32px; border:1px solid var(--input-border); border-radius:6px; background:var(--input-bg); color:var(--text); padding:0 8px;">
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Collaboration Chat Screen -->
+      <section class="screen" id="collab_chat-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Collaboration</span>
+              <h1>Team Chat</h1>
+              <p>Connect with workspace developers and broadcast notifications.</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Channels</h3></div>
+              <div class="settings-list">
+                <button class="ts-tab-btn active" style="width:100%; margin-bottom:4px; text-align:left;">#general</button>
+                <button class="ts-tab-btn" style="width:100%; margin-bottom:4px; text-align:left;">#deployments</button>
+                <button class="ts-tab-btn" style="width:100%; text-align:left;">#devops-monitoring</button>
+              </div>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>Chat Stream</h3></div>
+              <div id="collab-chat-stream" class="log-list" style="height:280px; background:var(--surface-3); padding:12px; border-radius:8px; overflow-y:auto; display:flex; flex-direction:column; gap:8px;">
+                <div style="background:var(--surface-2); padding:8px; border-radius:8px; align-self:flex-start; max-width:85%;"><strong>Teammate (John):</strong> Hey Keval! Did you deploy the PostgreSQL server updates?</div>
+              </div>
+              <form id="collab-chat-form" style="display:flex; gap:8px; margin-top:10px;">
+                <input type="text" id="collab-chat-input" placeholder="Type a message to the team..." autocomplete="off" style="flex:1; height:32px; border:1px solid var(--input-border); border-radius:6px; background:var(--input-bg); color:var(--text); padding:0 8px;">
+                <button type="submit" class="primary-button">Send</button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Collaboration Shared Workspace Screen -->
+      <section class="screen" id="collab_workspace-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Collaboration</span>
+              <h1>Shared Workspace</h1>
+              <p>Inspect active project developers presence and connection details.</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card">
+              <div class="card-header"><h3>Your Identity</h3></div>
+              <div class="settings-list">
+                <div class="settings-item"><div class="settings-item-copy"><strong>User</strong><span>Keval (Online)</span></div></div>
+              </div>
+            </div>
+            <div class="settings-card wide">
+              <div class="card-header"><h3>Active Teammates Presence</h3></div>
+              <div class="settings-list">
+                <div class="settings-item"><div class="settings-item-copy"><strong>John Doe</strong><span style="color:green;">● Active (Docker stack config)</span></div></div>
+                <div class="settings-item"><div class="settings-item-copy"><strong>Jane Smith</strong><span style="color:var(--muted);">○ Offline (2 hours ago)</span></div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Collaboration Activity Feed Screen -->
+      <section class="screen" id="collab_feed-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Collaboration</span>
+              <h1>Workspace Activity Feed</h1>
+              <p>Unified real-time log of workspace actions, server restarts, and git triggers.</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card wide" style="grid-column: span 2;">
+              <div class="card-header"><h3>Activity Logs</h3></div>
+              <ul id="collab-activity-list" class="log-list" style="height:320px; overflow-y:auto;">
+                <li style="border-bottom:1px solid var(--line-soft); padding:8px 0;"><span style="color:var(--muted); font-size:0.75rem;">12:04:12</span> Connected local MySQL database adapter successfully.</li>
+                <li style="border-bottom:1px solid var(--line-soft); padding:8px 0;"><span style="color:var(--muted); font-size:0.75rem;">11:58:33</span> Git status checks completed inside project folder.</li>
+                <li style="border-bottom:1px solid var(--line-soft); padding:8px 0;"><span style="color:var(--muted); font-size:0.75rem;">11:42:01</span> Docker container web-proxy successfully started.</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Collaboration Permissions Screen -->
+      <section class="screen" id="collab_permissions-screen">
+        <div class="settings-shell">
+          <header class="settings-hero">
+            <div>
+              <span class="eyebrow">Collaboration</span>
+              <h1>Site Permissions Manager</h1>
+              <p>Manage application device permissions (camera, microphone, storage read/write).</p>
+            </div>
+          </header>
+          <div class="settings-grid">
+            <div class="settings-card wide" style="grid-column: span 2;">
+              <div class="card-header"><h3>Device Rules</h3></div>
+              <div class="settings-list">
+                <div class="settings-item" style="display:flex; justify-content:space-between; align-items:center;">
+                  <div class="settings-item-copy"><strong>Microphone</strong><span>Allow local audio calls for Meet</span></div>
+                  <input type="checkbox" checked style="width:20px; height:20px; cursor:pointer;">
+                </div>
+                <div class="settings-item" style="display:flex; justify-content:space-between; align-items:center;">
+                  <div class="settings-item-copy"><strong>Camera</strong><span>Allow video streams for Meet</span></div>
+                  <input type="checkbox" checked style="width:20px; height:20px; cursor:pointer;">
+                </div>
+                <div class="settings-item" style="display:flex; justify-content:space-between; align-items:center;">
+                  <div class="settings-item-copy"><strong>Local Storage Access</strong><span>Allow sandbox paths read/write</span></div>
+                  <input type="checkbox" checked style="width:20px; height:20px; cursor:pointer;">
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
     </main>
+
+    <aside id="app-right-sidebar" class="sidebar right-sidebar" aria-label="Developer tools">
+      <div class="sidebar-head right-sidebar-head">
+        <div class="brand">
+          <span class="brand-kicker">Tool Rail</span>
+          <h1>
+            <span class="brand-title-full">Developer Tools</span>
+            <span class="brand-title-short">DT</span>
+          </h1>
+          <p>Open tools in the bottom panel.</p>
+        </div>
+        <button id="right-sidebar-toggle-button" class="sidebar-toggle-button" type="button" aria-label="Collapse right sidebar">
+          <span class="right-sidebar-toggle-glyph">>></span>
+        </button>
+      </div>
+
+      <div id="beta-features-sidebar-wrapper">
+        <div class="sidebar-category-header" style="cursor: default; margin-top: 4px; pointer-events: none;">Beta Features</div>
+        <div class="sidebar-ssf-panel">
+          <div class="ssf-search-row">
+            <input type="text" id="ssf-search-input" placeholder="Search tools..." autocomplete="off">
+            <button id="ssf-config-toggle" class="ssf-icon-btn" type="button" title="Filter & Sort">⚙</button>
+          </div>
+          <div id="ssf-config-row" class="ssf-config-row hidden">
+            <select id="ssf-filter-category" class="ssf-select">
+              <option value="all">All Tools</option>
+              <option value="development">Dev Tools</option>
+              <option value="mcp_tools">MCP Tools</option>
+              <option value="devops">DevOps</option>
+              <option value="productivity">Productivity</option>
+              <option value="collaboration">Collab</option>
+            </select>
+            <select id="ssf-sort-by" class="ssf-select">
+              <option value="custom">Sort: Drag</option>
+              <option value="name">Sort: A-Z</option>
+              <option value="category">Sort: Category</option>
+            </select>
+          </div>
+        </div>
+
+        <nav class="nav" id="sidebar-nav">
+          <!-- Will be dynamically populated -->
+        </nav>
+      </div>
+    </aside>
+
+    <section id="bottom-panel" class="bottom-panel hidden" aria-label="Bottom panel">
+      <div id="bottom-panel-resize-handle" class="bottom-panel-resize-handle" role="separator" aria-orientation="horizontal" aria-label="Resize bottom panel"></div>
+      <header class="bottom-panel-bar">
+        <div class="bottom-panel-title">
+          <span id="bottom-panel-icon" class="bottom-panel-icon">▣</span>
+          <span id="bottom-panel-label">Developer Tools</span>
+        </div>
+        <button id="bottom-panel-close-button" class="icon-button" type="button" title="Close panel" aria-label="Close panel">Close</button>
+      </header>
+      <div id="bottom-panel-body" class="bottom-panel-body"></div>
+    </section>
   </div>
 
   <div id="create-site-modal" class="modal-backdrop hidden">
@@ -1020,7 +3031,7 @@
 
       <div class="installer-service-card">
         <div class="installer-service-head">
-          <strong>XAMPP services</strong>
+          <strong>Local services</strong>
           <span id="installer-service-summary" class="installer-service-summary">Checking Apache and MySQL...</span>
         </div>
         <div class="installer-service-grid">
@@ -1067,6 +3078,7 @@
     </div>
   </div>
 
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <script src="./renderer.js"></script>
   <script>
     (function () {

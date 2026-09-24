@@ -1,7 +1,7 @@
 <?php
 declare(strict_types=1);
 
-$rootDir = 'C:\\Users\\Keval\\Saved Games\\xampp\\htdocs';
+$rootDir = getenv('WP_ROOT_DIR') ?: getenv('LOCAL_SERVER_DOCROOT') ?: 'C:\\xampp\\htdocs';
 $rootUrl = 'http://localhost';
 
 $ignoreExact = [
@@ -480,7 +480,7 @@ a {
 <body>
 <main class="shell">
     <section class="hero">
-        <p class="eyebrow">Local xampp dashboard</p>
+        <p class="eyebrow">Local WordPress dashboard</p>
         <h1>WordPress sites in htdocs</h1>
         <p class="hero-copy">
             A single page for browsing every WordPress install under your local <code>htdocs</code>.

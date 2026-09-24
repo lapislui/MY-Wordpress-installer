@@ -17,3 +17,5 @@ betav3-dist/
 betav3-dist(theme-update)/
 beta-v4-dist(workspace-init)/
 .local/
+old-dist/
+mcp-dist/

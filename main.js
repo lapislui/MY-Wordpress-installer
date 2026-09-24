@@ -1,7 +1,9 @@
 const path = require("path");
 const fs = require("fs");
 const net = require("net");
-const { spawn } = require("child_process");
+const crypto = require("crypto");
+const http = require("http");
+const { spawn, spawnSync } = require("child_process");
 const {
   app,
   BrowserWindow,
@@ -19,11 +21,33 @@ const {
 } = require("electron");
 const mysql = require("mysql2/promise");
 const AdmZip = require("adm-zip");
+const { Client: SshClient, Server: SshServer, utils: ssh2Utils } = require("ssh2");
+const { OPEN_MODE, STATUS_CODE } = ssh2Utils.sftp;
 
 let lastFocusedWindow = null;
 const browserWindows = new Map();
 const configuredBrowserPartitions = new Set();
 const extensionLoadFailures = new Map();
+let localSftpServer = null;
+let localSftpServerState = {
+  running: false,
+  host: "127.0.0.1",
+  port: 2222,
+  rootPath: "",
+  username: "wpdesktop",
+  clients: 0,
+  lastError: ""
+};
+let embeddedMcpRuntime = null;
+let embeddedMcpState = {
+  running: false,
+  host: "127.0.0.1",
+  port: 3789,
+  endpoint: "",
+  sessions: 0,
+  lastError: ""
+};
+const activeSftpConnections = new Map(); // Maps connection IDs to { conn, sftp, config }
 const VAULT_CAPTURE_LOG_PREFIX = "__WP_DESKTOP_SAVE_CREDENTIAL__:";
 const AUTO_ALLOWED_BROWSER_PERMISSIONS = new Set([
   "media",
@@ -100,23 +124,570 @@ function getSettingsPath() {
   return path.join(app.getPath("userData"), "settings.json");
 }
 
+const LOCAL_SERVER_DEFINITIONS = {
+  xampp: {
+    label: "XAMPP",
+    documentRootName: "htdocs",
+    defaultRoots: [
+      "C:\\xampp",
+      "C:\\Users\\Keval\\Saved Games\\xampp"
+    ],
+    controlPanelPatterns: [["xampp-control.exe"]],
+    apacheStartPatterns: [["apache_start.bat"]],
+    apacheStopPatterns: [["apache_stop.bat"]],
+    apacheConfigPatterns: [["apache", "conf", "httpd.conf"]],
+    phpExecutablePatterns: [["php", "php.exe"]],
+    phpConfigPatterns: [
+      ["php", "php.ini"],
+      ["php", "php-development.ini"]
+    ],
+    mysqlConfigPatterns: [
+      ["mysql", "bin", "my.ini"],
+      ["mysql", "data", "my.ini"],
+      ["mysql", "backup", "my.ini"]
+    ],
+    phpMyAdminPatterns: [["phpMyAdmin"]]
+  },
+  laragon: {
+    label: "Laragon",
+    documentRootName: "www",
+    defaultRoots: ["C:\\laragon"],
+    controlPanelPatterns: [["laragon.exe"]],
+    apacheStartPatterns: [],
+    apacheStopPatterns: [],
+    apacheConfigPatterns: [
+      ["bin", "apache", "*", "conf", "httpd.conf"],
+      ["etc", "apache2", "httpd.conf"]
+    ],
+    phpExecutablePatterns: [
+      ["bin", "php", "*", "php.exe"],
+      ["bin", "php", "php.exe"]
+    ],
+    phpConfigPatterns: [
+      ["bin", "php", "*", "php.ini"],
+      ["etc", "php", "php.ini"]
+    ],
+    mysqlConfigPatterns: [
+      ["bin", "mysql", "*", "my.ini"],
+      ["bin", "mysql", "*", "bin", "my.ini"],
+      ["data", "mysql", "my.ini"],
+      ["etc", "mysql", "my.ini"]
+    ],
+    phpMyAdminPatterns: [
+      ["etc", "apps", "phpMyAdmin"],
+      ["etc", "apps", "phpmyadmin"]
+    ]
+  }
+};
+
+function normalizeLocalServerType(value) {
+  return value === "laragon" ? "laragon" : "xampp";
+}
+
+function getSupportedLocalServerTypes() {
+  return Object.keys(LOCAL_SERVER_DEFINITIONS);
+}
+
+function getLocalServerDefinition(type) {
+  return LOCAL_SERVER_DEFINITIONS[normalizeLocalServerType(type)];
+}
+
+function getLocalServerLabel(type) {
+  return getLocalServerDefinition(type).label;
+}
+
+function getActiveLocalServerLabel(settings = getSettings()) {
+  return getLocalServerLabel(settings?.localServerType);
+}
+
+function getLocalServerWebServerLabel(settings = getSettings()) {
+  return `Apache via ${getActiveLocalServerLabel(settings)}`;
+}
+
+function getLocalServerPhpVersionLabel(settings = getSettings()) {
+  return `PHP via ${getActiveLocalServerLabel(settings)}`;
+}
+
+function getLocalServerDatabaseLabel(settings = getSettings()) {
+  return `MySQL via ${getActiveLocalServerLabel(settings)}`;
+}
+
 async function buildSettingsPayload(settings = getSettings()) {
   const apacheRunning = await isApacheRunning();
   const resolvedHtdocsPath = getResolvedHtdocsPath(settings);
+  const localServerType = normalizeLocalServerType(settings.localServerType);
   return {
     ...settings,
+    localServerType,
+    localServerLabel: getLocalServerLabel(localServerType),
     htdocsPath: resolvedHtdocsPath,
     apacheRunning,
     xamppServiceStatus: await getXamppServiceStatus(settings),
-    detectedDbProfile: detectXamppDbProfile(resolvedHtdocsPath),
+    mcpServerStatus: getEmbeddedMcpStatus(settings),
+    detectedDbProfile: detectLocalServerDbProfile(settings),
     effectiveDbProfile: getEffectiveDbProfile(settings),
     mysqlConfigContent: readMysqlConfigContent(settings),
-    xamppPaths: getXamppPathsSummary(settings)
+    serverPaths: getLocalServerPathsSummary(settings),
+    xamppPaths: getLocalServerPathsSummary(settings)
   };
 }
 
 function getBrowserHistoryPath() {
   return path.join(app.getPath("userData"), "browser-history.json");
+}
+
+function getEmbeddedMcpStatus(settings = getSettings()) {
+  const configured = settings.mcpServer || {};
+  return {
+    ...configured,
+    ...embeddedMcpState,
+    running: Boolean(embeddedMcpRuntime?.httpServer?.listening),
+    endpoint: embeddedMcpState.endpoint || `http://${configured.host || "127.0.0.1"}:${configured.port || 3789}/mcp`,
+    sessions: embeddedMcpRuntime?.transports?.size || 0,
+    lastError: embeddedMcpState.lastError || ""
+  };
+}
+
+function getEmbeddedMcpHome() {
+  return path.join(app.getPath("userData"), "mcp");
+}
+
+function getMcpBuildEntryPath() {
+  return path.join(__dirname, "mcp-dist", "mcp", "core", "mcpServerFactory.js");
+}
+
+function ensureEmbeddedMcpBuild() {
+  if (fs.existsSync(getMcpBuildEntryPath())) {
+    return { ok: true };
+  }
+
+  if (app.isPackaged) {
+    return {
+      ok: false,
+      message: "Packaged app is missing mcp-dist. Rebuild the installer with npm run pack:win."
+    };
+  }
+
+  const tscPath = process.platform === "win32"
+    ? path.join(__dirname, "node_modules", ".bin", "tsc.cmd")
+    : path.join(__dirname, "node_modules", ".bin", "tsc");
+  if (!fs.existsSync(tscPath)) {
+    return {
+      ok: false,
+      message: "TypeScript compiler was not found. Run npm install, then npm run mcp:build."
+    };
+  }
+
+  const result = spawnSync(tscPath, ["-p", "tsconfig.mcp.json", "--pretty", "false"], {
+    cwd: __dirname,
+    encoding: "utf8",
+    windowsHide: true
+  });
+
+  if (result.status !== 0 || !fs.existsSync(getMcpBuildEntryPath())) {
+    return {
+      ok: false,
+      message: `MCP build failed: ${result.stderr || result.stdout || "unknown TypeScript error"}`
+    };
+  }
+
+  return { ok: true };
+}
+
+function parseRequestBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => {
+      body += chunk;
+      if (body.length > 10 * 1024 * 1024) {
+        reject(new Error("Request body is too large."));
+        req.destroy();
+      }
+    });
+    req.on("end", () => {
+      if (!body.trim()) {
+        resolve(undefined);
+        return;
+      }
+      try {
+        resolve(JSON.parse(body));
+      } catch (error) {
+        reject(error);
+      }
+    });
+    req.on("error", reject);
+  });
+}
+
+function sendJson(res, statusCode, payload, headers = {}) {
+  res.writeHead(statusCode, {
+    "content-type": "application/json",
+    "access-control-allow-origin": "http://localhost",
+    "access-control-allow-methods": "GET, POST, DELETE, OPTIONS",
+    "access-control-allow-headers": "content-type,mcp-session-id",
+    ...headers
+  });
+  res.end(JSON.stringify(payload, null, 2));
+}
+
+async function startEmbeddedMcpServer(settings = getSettings()) {
+  if (embeddedMcpRuntime?.httpServer?.listening) {
+    return getEmbeddedMcpStatus(settings);
+  }
+  if (settings.mcpServer?.enabled === false) {
+    embeddedMcpState.running = false;
+    embeddedMcpState.lastError = "";
+    return getEmbeddedMcpStatus(settings);
+  }
+
+  let McpServerFactory;
+  let SnapshotStoreClass;
+  let BrowserInspectorClass;
+  let StreamableHTTPServerTransport;
+  let isInitializeRequest;
+  try {
+    const buildResult = ensureEmbeddedMcpBuild();
+    if (!buildResult.ok) {
+      throw new Error(buildResult.message);
+    }
+    ({ createWpDesktopMcpServer: McpServerFactory } = require("./mcp-dist/mcp/core/mcpServerFactory.js"));
+    ({ SnapshotStore: SnapshotStoreClass } = require("./mcp-dist/mcp/core/snapshotStore.js"));
+    ({ BrowserInspector: BrowserInspectorClass } = require("./mcp-dist/mcp/core/browserInspector.js"));
+    ({ StreamableHTTPServerTransport } = require("@modelcontextprotocol/sdk/server/streamableHttp.js"));
+    ({ isInitializeRequest } = require("@modelcontextprotocol/sdk/types.js"));
+  } catch (error) {
+    embeddedMcpState = {
+      ...embeddedMcpState,
+      running: false,
+      lastError: `MCP build output is missing or invalid: ${error.message}`
+    };
+    return getEmbeddedMcpStatus(settings);
+  }
+
+  const host = settings.mcpServer?.host || "127.0.0.1";
+  const configuredPort = Number(settings.mcpServer?.port) || 3789;
+  const store = new SnapshotStoreClass(getEmbeddedMcpHome());
+  const inspector = new BrowserInspectorClass(store);
+  const transports = new Map();
+
+  const httpServer = http.createServer(async (req, res) => {
+    try {
+      if (req.method === "OPTIONS") {
+        sendJson(res, 204, {});
+        return;
+      }
+
+      const requestUrl = new URL(req.url || "/", `http://${req.headers.host || `${host}:${configuredPort}`}`);
+      if (requestUrl.pathname === "/mcp/status" || requestUrl.pathname === "/health") {
+        sendJson(res, 200, getEmbeddedMcpStatus());
+        return;
+      }
+      if (requestUrl.pathname !== "/mcp") {
+        sendJson(res, 404, { error: "Not found. Use /mcp for MCP or /mcp/status for status." });
+        return;
+      }
+
+      const sessionIdHeader = req.headers["mcp-session-id"];
+      const sessionId = Array.isArray(sessionIdHeader) ? sessionIdHeader[0] : sessionIdHeader;
+      let transport = sessionId ? transports.get(sessionId) : null;
+
+      if (req.method === "POST") {
+        const body = await parseRequestBody(req);
+        if (!transport) {
+          if (sessionId || !isInitializeRequest(body)) {
+            sendJson(res, 400, {
+              jsonrpc: "2.0",
+              error: { code: -32000, message: "Bad Request: initialize first or provide a valid MCP session id." },
+              id: null
+            });
+            return;
+          }
+
+          transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => crypto.randomUUID(),
+            enableJsonResponse: true,
+            onsessioninitialized: (newSessionId) => {
+              transports.set(newSessionId, transport);
+            }
+          });
+          transport.onclose = () => {
+            if (transport?.sessionId) {
+              transports.delete(transport.sessionId);
+            }
+          };
+          const mcpServer = McpServerFactory({
+            store,
+            inspector,
+            listTabs: () => {
+              const allTabs = [];
+              for (const win of BrowserWindow.getAllWindows()) {
+                const state = browserWindows.get(win.id);
+                if (state && state.tabs) {
+                  for (const tab of state.tabs) {
+                    allTabs.push({
+                      id: tab.id,
+                      title: tab.title,
+                      url: tab.url,
+                      isLoading: tab.isLoading,
+                      nickname: tab.nickname || undefined
+                    });
+                  }
+                }
+              }
+              return allTabs;
+            },
+            createTab: async (url, mode) => {
+              let win = lastFocusedWindow || BrowserWindow.getAllWindows()[0];
+              if (!win) {
+                win = createWindow({ startupUrl: url });
+              } else {
+                createBrowserTab(win, url, mode || "auto", true);
+              }
+            },
+            closeTab: async (tabId) => {
+              for (const win of BrowserWindow.getAllWindows()) {
+                const state = browserWindows.get(win.id);
+                if (state && state.tabs && state.tabs.some(t => t.id === tabId)) {
+                  closeBrowserTab(win, tabId);
+                  return;
+                }
+              }
+              throw new Error(`Tab ${tabId} not found.`);
+            },
+            navigateTab: async (tabId, url) => {
+              const resolvedUrl = ensureUrl(url);
+              for (const win of BrowserWindow.getAllWindows()) {
+                const state = browserWindows.get(win.id);
+                if (state && state.tabs) {
+                  const tab = state.tabs.find(t => t.id === tabId);
+                  if (tab) {
+                    wcSafeLoadURL(tab.view.webContents, resolvedUrl);
+                    tab.url = resolvedUrl;
+                    emitBrowserState(win);
+                    return;
+                  }
+                }
+              }
+              throw new Error(`Tab ${tabId} not found.`);
+            },
+            executeTabJs: async (tabId, js) => {
+              for (const win of BrowserWindow.getAllWindows()) {
+                const state = browserWindows.get(win.id);
+                if (state && state.tabs) {
+                  const tab = state.tabs.find(t => t.id === tabId);
+                  if (tab) {
+                    return await tab.view.webContents.executeJavaScript(js);
+                  }
+                }
+              }
+              throw new Error(`Tab ${tabId} not found.`);
+            },
+            listSites: () => getSites(),
+            getSftpStatus: () => getLocalSftpStatus(),
+            startSftpServer: async (overrides) => await startLocalSftpServer(overrides),
+            stopSftpServer: async () => await stopLocalSftpServer(),
+            clickElement: async (tabId, selector) => {
+              const res = findTabAcrossAllWindows(tabId);
+              if (!res) throw new Error(`Tab ${tabId} not found.`);
+              const js = `(() => {
+                const element = document.querySelector(${JSON.stringify(selector)});
+                if (!element) {
+                  return { success: false, error: 'Element not found' };
+                }
+                element.click();
+                return { success: true };
+              })()`;
+              return await res.tab.view.webContents.executeJavaScript(js);
+            },
+            fillInput: async (tabId, selector, value) => {
+              const res = findTabAcrossAllWindows(tabId);
+              if (!res) throw new Error(`Tab ${tabId} not found.`);
+              const js = `(() => {
+                const element = document.querySelector(${JSON.stringify(selector)});
+                if (!element) {
+                  return { success: false, error: 'Element not found' };
+                }
+                element.value = ${JSON.stringify(value)};
+                element.dispatchEvent(new Event('input', { bubbles: true }));
+                element.dispatchEvent(new Event('change', { bubbles: true }));
+                return { success: true };
+              })()`;
+              return await res.tab.view.webContents.executeJavaScript(js);
+            },
+            getHtml: async (tabId) => {
+              const res = findTabAcrossAllWindows(tabId);
+              if (!res) throw new Error(`Tab ${tabId} not found.`);
+              return await res.tab.view.webContents.executeJavaScript(`document.documentElement.outerHTML`);
+            },
+            getElementInfo: async (tabId, selector) => {
+              const res = findTabAcrossAllWindows(tabId);
+              if (!res) throw new Error(`Tab ${tabId} not found.`);
+              const js = `(() => {
+                const element = document.querySelector(${JSON.stringify(selector)});
+                if (!element) {
+                  return null;
+                }
+                const rect = element.getBoundingClientRect();
+                const computed = window.getComputedStyle(element);
+                return {
+                  tagName: element.tagName,
+                  id: element.id,
+                  className: element.className,
+                  outerHTML: element.outerHTML.slice(0, 5000),
+                  bounds: {
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.width,
+                    height: rect.height,
+                    top: rect.top,
+                    right: rect.right,
+                    bottom: rect.bottom,
+                    left: rect.left
+                  },
+                  styles: {
+                    display: computed.display,
+                    visibility: computed.visibility,
+                    opacity: computed.opacity,
+                    color: computed.color,
+                    backgroundColor: computed.backgroundColor,
+                    fontFamily: computed.fontFamily,
+                    fontSize: computed.fontSize,
+                    fontWeight: computed.fontWeight
+                  }
+                };
+              })()`;
+              return await res.tab.view.webContents.executeJavaScript(js);
+            },
+            getConsoleLogs: async (tabId) => {
+              const res = findTabAcrossAllWindows(tabId);
+              if (!res) throw new Error(`Tab ${tabId} not found.`);
+              return res.tab.consoleLogs || [];
+            },
+            getNetworkRequests: async (tabId) => {
+              const res = findTabAcrossAllWindows(tabId);
+              if (!res) throw new Error(`Tab ${tabId} not found.`);
+              return res.tab.networkRequests || [];
+            },
+            getPerformanceMetrics: async (tabId) => {
+              const res = findTabAcrossAllWindows(tabId);
+              if (!res) throw new Error(`Tab ${tabId} not found.`);
+              const js = `(() => {
+                const navigation = performance.getEntriesByType('navigation')[0] || {};
+                const paint = performance.getEntriesByType('paint') || [];
+                const fcpEntry = paint.find(entry => entry.name === 'first-contentful-paint');
+                let lcp = 0;
+                try {
+                  const lcpEntries = performance.getEntriesByType('largest-contentful-paint');
+                  if (lcpEntries.length > 0) {
+                    lcp = lcpEntries[lcpEntries.length - 1].startTime;
+                  }
+                } catch (e) {}
+                return {
+                  navigationTiming: {
+                    duration: navigation.duration || 0,
+                    domInteractive: navigation.domInteractive || 0,
+                    domComplete: navigation.domComplete || 0,
+                    loadEventEnd: navigation.loadEventEnd || 0
+                  },
+                  firstContentfulPaint: fcpEntry ? fcpEntry.startTime : 0,
+                  largestContentfulPaint: lcp,
+                  cumulativeLayoutShift: 0
+                };
+              })()`;
+              return await res.tab.view.webContents.executeJavaScript(js);
+            },
+            takeTabScreenshot: async (tabId) => {
+              const res = findTabAcrossAllWindows(tabId);
+              if (!res) throw new Error(`Tab ${tabId} not found.`);
+              const image = await res.tab.view.webContents.capturePage();
+              return image.toPNG().toString("base64");
+            }
+          });
+          await mcpServer.connect(transport);
+        }
+
+        await transport.handleRequest(req, res, body);
+        return;
+      }
+
+      if ((req.method === "GET" || req.method === "DELETE") && transport) {
+        await transport.handleRequest(req, res);
+        return;
+      }
+
+      sendJson(res, 405, { error: "Method not allowed or missing MCP session." }, { allow: "GET, POST, DELETE, OPTIONS" });
+    } catch (error) {
+      embeddedMcpState.lastError = error.message || "Embedded MCP request failed.";
+      if (!res.headersSent) {
+        sendJson(res, 500, {
+          jsonrpc: "2.0",
+          error: { code: -32603, message: "Internal server error" },
+          id: null
+        });
+      }
+    }
+  });
+
+  async function listenOn(port, attemptsLeft = 10) {
+    return await new Promise((resolve, reject) => {
+      const onError = (error) => {
+        httpServer.off("listening", onListening);
+        if (error.code === "EADDRINUSE" && attemptsLeft > 1) {
+          resolve(listenOn(port + 1, attemptsLeft - 1));
+          return;
+        }
+        reject(error);
+      };
+      const onListening = () => {
+        httpServer.off("error", onError);
+        resolve(port);
+      };
+      httpServer.once("error", onError);
+      httpServer.once("listening", onListening);
+      httpServer.listen(port, host);
+    });
+  }
+
+  try {
+    const port = await listenOn(configuredPort);
+    embeddedMcpRuntime = { httpServer, store, inspector, transports };
+    embeddedMcpState = {
+      running: true,
+      host,
+      port,
+      endpoint: `http://${host}:${port}/mcp`,
+      sessions: 0,
+      lastError: ""
+    };
+  } catch (error) {
+    store.close();
+    void inspector.close();
+    embeddedMcpState = {
+      ...embeddedMcpState,
+      running: false,
+      lastError: error.message || "Embedded MCP server failed to start."
+    };
+  }
+
+  return getEmbeddedMcpStatus(settings);
+}
+
+async function stopEmbeddedMcpServer() {
+  if (!embeddedMcpRuntime) {
+    embeddedMcpState.running = false;
+    return getEmbeddedMcpStatus();
+  }
+
+  const runtime = embeddedMcpRuntime;
+  embeddedMcpRuntime = null;
+  await Promise.allSettled([...runtime.transports.values()].map((transport) => transport.close()));
+  await new Promise((resolve) => runtime.httpServer.close(resolve));
+  await runtime.inspector.close();
+  runtime.store.close();
+  embeddedMcpState.running = false;
+  embeddedMcpState.sessions = 0;
+  return getEmbeddedMcpStatus();
 }
 
 function getDefaultVault() {
@@ -339,31 +910,60 @@ function clearBrowserHistory() {
   }
 }
 
-function getDefaultHtdocsPath() {
-  const candidates = [
-    "C:\\xampp\\htdocs",
-    "C:\\Users\\Keval\\Saved Games\\xampp\\htdocs"
-  ];
-
-  return candidates.find((candidate) => fs.existsSync(candidate)) || "";
+function pickFirstExistingPath(candidates) {
+  return candidates.find((candidate) => candidate && fs.existsSync(candidate)) || "";
 }
 
-function getDefaultXamppRootPath() {
-  const defaultHtdocsPath = getDefaultHtdocsPath();
-  return defaultHtdocsPath ? getXamppRootFromHtdocs(defaultHtdocsPath) : "";
+function getDefaultLocalServerType() {
+  const detected = getSupportedLocalServerTypes().find((type) => getDefaultRootPathForType(type));
+  return detected || "xampp";
 }
 
-function getXamppRootFromHtdocs(htdocsPath) {
-  if (!htdocsPath) {
+function getDefaultRootPathForType(type) {
+  const definition = getLocalServerDefinition(type);
+  return pickFirstExistingPath(definition.defaultRoots);
+}
+
+function getDefaultHtdocsPathForType(type) {
+  const definition = getLocalServerDefinition(type);
+  const rootPath = getDefaultRootPathForType(type);
+  return rootPath ? path.join(rootPath, definition.documentRootName) : "";
+}
+
+function getDocumentRootFromRoot(rootPath, type) {
+  if (!rootPath) {
     return "";
   }
 
-  const resolved = path.resolve(htdocsPath);
-  if (path.basename(resolved).toLowerCase() === "htdocs") {
-    return path.dirname(resolved);
+  return path.join(path.resolve(rootPath), getLocalServerDefinition(type).documentRootName);
+}
+
+function getLocalServerRootFromDocumentRoot(documentRootPath, type) {
+  if (!documentRootPath) {
+    return "";
   }
 
-  return resolved;
+  const resolved = path.resolve(documentRootPath);
+  const documentRootName = getLocalServerDefinition(type).documentRootName.toLowerCase();
+  return path.basename(resolved).toLowerCase() === documentRootName
+    ? path.dirname(resolved)
+    : "";
+}
+
+function getRootPathSettingKey(type) {
+  return normalizeLocalServerType(type) === "laragon" ? "laragonRootPath" : "xamppRootPath";
+}
+
+function getStoredRootPath(settings, type) {
+  const key = getRootPathSettingKey(type);
+  return settings?.[key] || "";
+}
+
+function getResolvedRootPath(settings, type = settings?.localServerType) {
+  const normalizedType = normalizeLocalServerType(type);
+  const storedRootPath = getStoredRootPath(settings, normalizedType);
+  const derivedRootPath = getLocalServerRootFromDocumentRoot(settings?.htdocsPath, normalizedType);
+  return storedRootPath || derivedRootPath || getDefaultRootPathForType(normalizedType);
 }
 
 function getResolvedHtdocsPath(settings) {
@@ -371,25 +971,59 @@ function getResolvedHtdocsPath(settings) {
     return settings.htdocsPath;
   }
 
-  if (settings?.xamppRootPath) {
-    return path.join(settings.xamppRootPath, "htdocs");
+  const localServerType = normalizeLocalServerType(settings?.localServerType);
+  const rootPath = getResolvedRootPath(settings, localServerType);
+  return rootPath
+    ? getDocumentRootFromRoot(rootPath, localServerType)
+    : getDefaultHtdocsPathForType(localServerType);
+}
+
+function expandCandidatePattern(rootPath, segments) {
+  let candidates = [rootPath];
+  for (const segment of segments) {
+    if (segment === "*") {
+      candidates = candidates.flatMap((candidateRoot) => {
+        try {
+          return fs.readdirSync(candidateRoot, { withFileTypes: true })
+            .filter((entry) => entry.isDirectory())
+            .map((entry) => path.join(candidateRoot, entry.name));
+        } catch (_) {
+          return [];
+        }
+      });
+      continue;
+    }
+
+    candidates = candidates.map((candidateRoot) => path.join(candidateRoot, segment));
   }
 
-  return getDefaultHtdocsPath();
+  return pickFirstExistingPath(candidates);
 }
 
-function pickFirstExistingPath(candidates) {
-  return candidates.find((candidate) => candidate && fs.existsSync(candidate)) || "";
+function pickFirstExistingPattern(rootPath, patterns) {
+  for (const pattern of patterns) {
+    const resolved = expandCandidatePattern(rootPath, pattern);
+    if (resolved) {
+      return resolved;
+    }
+  }
+
+  return "";
 }
 
-function getXamppPathsSummary(settings) {
-  const xamppRootPath = settings?.xamppRootPath || getXamppRootFromHtdocs(settings?.htdocsPath) || "";
-  const htdocsPath = getResolvedHtdocsPath({ ...settings, xamppRootPath });
-  const resolvedRoot = xamppRootPath || getXamppRootFromHtdocs(htdocsPath);
+function getLocalServerPathsSummary(settings) {
+  const localServerType = normalizeLocalServerType(settings?.localServerType);
+  const definition = getLocalServerDefinition(localServerType);
+  const localServerRootPath = getResolvedRootPath(settings, localServerType);
+  const htdocsPath = getResolvedHtdocsPath({ ...settings, localServerType });
 
-  if (!resolvedRoot) {
+  if (!localServerRootPath) {
     return {
+      localServerType,
+      localServerLabel: definition.label,
+      localServerRootPath: "",
       xamppRootPath: "",
+      documentRootName: definition.documentRootName,
       htdocsPath,
       controlPanelPath: "",
       apacheStartPath: "",
@@ -403,23 +1037,20 @@ function getXamppPathsSummary(settings) {
   }
 
   return {
-    xamppRootPath: resolvedRoot,
+    localServerType,
+    localServerLabel: definition.label,
+    localServerRootPath,
+    xamppRootPath: localServerRootPath,
+    documentRootName: definition.documentRootName,
     htdocsPath,
-    controlPanelPath: pickFirstExistingPath([path.join(resolvedRoot, "xampp-control.exe")]),
-    apacheStartPath: pickFirstExistingPath([path.join(resolvedRoot, "apache_start.bat")]),
-    apacheStopPath: pickFirstExistingPath([path.join(resolvedRoot, "apache_stop.bat")]),
-    apacheConfigPath: pickFirstExistingPath([path.join(resolvedRoot, "apache", "conf", "httpd.conf")]),
-    phpExecutablePath: pickFirstExistingPath([path.join(resolvedRoot, "php", "php.exe")]),
-    phpConfigPath: pickFirstExistingPath([
-      path.join(resolvedRoot, "php", "php.ini"),
-      path.join(resolvedRoot, "php", "php-development.ini")
-    ]),
-    mysqlConfigPath: pickFirstExistingPath([
-      path.join(resolvedRoot, "mysql", "bin", "my.ini"),
-      path.join(resolvedRoot, "mysql", "data", "my.ini"),
-      path.join(resolvedRoot, "mysql", "backup", "my.ini")
-    ]),
-    phpMyAdminPath: pickFirstExistingPath([path.join(resolvedRoot, "phpMyAdmin")])
+    controlPanelPath: pickFirstExistingPattern(localServerRootPath, definition.controlPanelPatterns),
+    apacheStartPath: pickFirstExistingPattern(localServerRootPath, definition.apacheStartPatterns),
+    apacheStopPath: pickFirstExistingPattern(localServerRootPath, definition.apacheStopPatterns),
+    apacheConfigPath: pickFirstExistingPattern(localServerRootPath, definition.apacheConfigPatterns),
+    phpExecutablePath: pickFirstExistingPattern(localServerRootPath, definition.phpExecutablePatterns),
+    phpConfigPath: pickFirstExistingPattern(localServerRootPath, definition.phpConfigPatterns),
+    mysqlConfigPath: pickFirstExistingPattern(localServerRootPath, definition.mysqlConfigPatterns),
+    phpMyAdminPath: pickFirstExistingPattern(localServerRootPath, definition.phpMyAdminPatterns)
   };
 }
 
@@ -455,7 +1086,7 @@ function parseApacheConfigProfile(source) {
 }
 
 function readApacheConfigContent(settings) {
-  const apacheConfigPath = getXamppPathsSummary(settings).apacheConfigPath;
+  const apacheConfigPath = getLocalServerPathsSummary(settings).apacheConfigPath;
   if (!apacheConfigPath || !fs.existsSync(apacheConfigPath)) {
     return "";
   }
@@ -470,7 +1101,7 @@ function getConfiguredApachePorts(settings = getSettings()) {
 }
 
 function readMysqlConfigContent(settings) {
-  const mysqlConfigPath = getXamppPathsSummary(settings).mysqlConfigPath;
+  const mysqlConfigPath = getLocalServerPathsSummary(settings).mysqlConfigPath;
   if (!mysqlConfigPath || !fs.existsSync(mysqlConfigPath)) {
     return "";
   }
@@ -490,34 +1121,20 @@ function getEffectiveDbProfile(settings = getSettings()) {
   };
 }
 
-function detectXamppDbProfile(htdocsPath) {
-  const xamppRoot = getXamppRootFromHtdocs(htdocsPath);
-  if (!xamppRoot) {
+function detectLocalServerDbProfile(settings) {
+  const mysqlConfigPath = getLocalServerPathsSummary(settings).mysqlConfigPath;
+  if (!mysqlConfigPath || !fs.existsSync(mysqlConfigPath)) {
     return null;
   }
 
-  const candidates = [
-    path.join(xamppRoot, "mysql", "bin", "my.ini"),
-    path.join(xamppRoot, "mysql", "data", "my.ini"),
-    path.join(xamppRoot, "mysql", "backup", "my.ini")
-  ];
-
-  for (const configPath of candidates) {
-    if (!fs.existsSync(configPath)) {
-      continue;
-    }
-
-    const source = fs.readFileSync(configPath, "utf8");
-    const parsed = parseMysqlConfigProfile(source);
-    return {
-      host: parsed.host || "127.0.0.1",
-      port: parsed.port || "3306",
-      user: "root",
-      password: ""
-    };
-  }
-
-  return null;
+  const source = fs.readFileSync(mysqlConfigPath, "utf8");
+  const parsed = parseMysqlConfigProfile(source);
+  return {
+    host: parsed.host || "127.0.0.1",
+    port: parsed.port || "3306",
+    user: "root",
+    password: ""
+  };
 }
 
 function getSettings() {
@@ -539,9 +1156,12 @@ function saveSettings(settings) {
 }
 
 function getDefaultSettings() {
+  const localServerType = getDefaultLocalServerType();
   return {
-    xamppRootPath: getDefaultXamppRootPath(),
-    htdocsPath: getDefaultHtdocsPath(),
+    localServerType,
+    xamppRootPath: getDefaultRootPathForType("xampp"),
+    laragonRootPath: getDefaultRootPathForType("laragon"),
+    htdocsPath: getDefaultHtdocsPathForType(localServerType),
     dbUser: "root",
     dbPassword: "",
     wpInstallUsername: "admin",
@@ -557,7 +1177,20 @@ function getDefaultSettings() {
     browserPermissions: {},
     browserBookmarks: [],
     browserShowBookmarksBar: true,
-    browserExtensions: []
+    browserExtensions: [],
+    mcpServer: {
+      enabled: true,
+      host: "127.0.0.1",
+      port: 3789
+    },
+    sftpServer: {
+      host: "127.0.0.1",
+      port: 2222,
+      username: "wpdesktop",
+      password: "",
+      rootPath: getDefaultHtdocsPathForType(localServerType),
+      enabled: false
+    }
   };
 }
 
@@ -681,10 +1314,20 @@ function normalizeSettings(input = {}) {
         })
         .filter(Boolean)
     : [];
+  const sftpServerInput = input.sftpServer && typeof input.sftpServer === "object"
+    ? input.sftpServer
+    : {};
+  const mcpServerInput = input.mcpServer && typeof input.mcpServer === "object"
+    ? input.mcpServer
+    : {};
 
   return {
-    xamppRootPath: input.xamppRootPath || getXamppRootFromHtdocs(input.htdocsPath || "") || getDefaultXamppRootPath(),
-    htdocsPath: input.htdocsPath || (input.xamppRootPath ? path.join(input.xamppRootPath, "htdocs") : getDefaultHtdocsPath()),
+    localServerType: normalizeLocalServerType(
+      input.localServerType || (input.laragonRootPath ? "laragon" : "xampp")
+    ),
+    xamppRootPath: input.xamppRootPath || getDefaultRootPathForType("xampp"),
+    laragonRootPath: input.laragonRootPath || getDefaultRootPathForType("laragon"),
+    htdocsPath: input.htdocsPath || "",
     dbUser: String(input.dbUser || "root").trim() || "root",
     dbPassword: input.dbPassword ?? "",
     wpInstallUsername: String(input.wpInstallUsername || "admin").trim() || "admin",
@@ -700,7 +1343,20 @@ function normalizeSettings(input = {}) {
     browserPermissions: permissions,
     browserBookmarks: bookmarks,
     browserShowBookmarksBar: input.browserShowBookmarksBar !== false,
-    browserExtensions: extensions
+    browserExtensions: extensions,
+    mcpServer: {
+      enabled: mcpServerInput.enabled !== false,
+      host: String(mcpServerInput.host || "127.0.0.1").trim() || "127.0.0.1",
+      port: Math.max(1, Math.min(65535, Number(mcpServerInput.port) || 3789))
+    },
+    sftpServer: {
+      host: String(sftpServerInput.host || "127.0.0.1").trim() || "127.0.0.1",
+      port: Math.max(1, Math.min(65535, Number(sftpServerInput.port) || 2222)),
+      username: String(sftpServerInput.username || "wpdesktop").trim() || "wpdesktop",
+      password: String(sftpServerInput.password || ""),
+      rootPath: String(sftpServerInput.rootPath || input.htdocsPath || "").trim(),
+      enabled: sftpServerInput.enabled === true
+    }
   };
 }
 
@@ -1162,6 +1818,37 @@ function shouldOpenAsPopupWindow(details = {}) {
   const featureText = String(details.features || "").trim();
   const disposition = String(details.disposition || "").trim().toLowerCase();
   return Boolean(featureText) || disposition === "new-window";
+}
+
+function shouldOpenExternallyForCompatibility(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    const hostname = parsed.hostname.toLowerCase();
+    const pathname = parsed.pathname.toLowerCase();
+
+    if (hostname === "api.razorpay.com" && pathname.startsWith("/v1/checkout/public")) {
+      return true;
+    }
+
+    if (hostname === "checkout.razorpay.com") {
+      return true;
+    }
+
+    return false;
+  } catch (_) {
+    return false;
+  }
+}
+
+function openUrlInExternalBrowser(url) {
+  if (!url || !shouldOpenExternallyForCompatibility(url)) {
+    return false;
+  }
+
+  shell.openExternal(url).catch(() => {
+    // Ignore failures here and let the caller decide whether to continue.
+  });
+  return true;
 }
 
 function buildPopupBrowserWindowOptions(parentWindow, partition) {
@@ -2185,9 +2872,9 @@ async function buildSitesFromHtdocs() {
         dbPort: String(wpConfig.dbPort || saved.dbPort || "3306"),
         dbUser: wpConfig.dbUser || saved.dbUser || "root",
         dbPassword: wpConfig.dbPassword ?? saved.dbPassword ?? "",
-        databaseVersion: saved.databaseVersion || "MySQL via XAMPP",
-        phpVersion: saved.phpVersion || "PHP via XAMPP",
-        webServer: "Apache via XAMPP",
+        databaseVersion: saved.databaseVersion || getLocalServerDatabaseLabel(),
+        phpVersion: saved.phpVersion || getLocalServerPhpVersionLabel(),
+        webServer: saved.webServer || getLocalServerWebServerLabel(),
         wordpressVersion: saved.wordpressVersion || "Detected from folder",
         extractedCount: saved.extractedCount || null,
         lastStartedAt: saved.lastStartedAt || null,
@@ -2377,7 +3064,7 @@ function applyWordPressMultisiteNetworkConfig(sitePath, wpConfigSnippet, htacces
 function buildGeneratedMultisiteConfig(site, settings = getSettings()) {
   const htdocsPath = getResolvedHtdocsPath(settings);
   if (!htdocsPath || !site?.path) {
-    throw new Error("XAMPP htdocs or site path is missing.");
+    throw new Error("Local server document root or site path is missing.");
   }
 
   const relativePath = (site.relativePath || path.relative(htdocsPath, site.path))
@@ -2736,7 +3423,7 @@ async function restoreBackupPackage(payload) {
       dbUser: effectiveDbProfile.user || "root",
       dbPassword: effectiveDbProfile.password ?? "",
       relativePath: htdocsPath ? path.relative(htdocsPath, targetPath) : metadata.site.name,
-      webServer: "XAMPP Apache",
+      webServer: getLocalServerWebServerLabel(),
       phpVersion: "Detected from restore target",
       databaseVersion: "Detected from MySQL",
       wordpressVersion: "Restored from backup",
@@ -3031,7 +3718,7 @@ async function deleteSiteResources(payload) {
       password: installerDb.password
     },
     {
-      label: "xampp-detected",
+      label: "local-server-detected",
       host: detectedDb?.host,
       port: detectedDb?.port,
       user: detectedDb?.user,
@@ -4453,8 +5140,106 @@ function showBookmarkSaveDialog(win, payload = {}) {
   });
 }
 
+const configuredSessionsForLogging = new Set();
+
+function configureSessionNetworkLogging(ses) {
+  if (configuredSessionsForLogging.has(ses)) {
+    return;
+  }
+  configuredSessionsForLogging.add(ses);
+
+  if (ses.webRequest) {
+    ses.webRequest.onBeforeRequest({ urls: ["http://*/*", "https://*/*"] }, (details, callback) => {
+      const tab = findTabByWebContentsId(details.webContentsId);
+      if (tab) {
+        tab.networkRequests = tab.networkRequests || [];
+        tab.networkRequests.push({
+          id: details.id,
+          url: details.url,
+          method: details.method,
+          timestamp: Date.now(),
+          status: "pending"
+        });
+        if (tab.networkRequests.length > 200) {
+          tab.networkRequests.shift();
+        }
+      }
+      callback({});
+    });
+
+    ses.webRequest.onCompleted({ urls: ["http://*/*", "https://*/*"] }, (details) => {
+      const tab = findTabByWebContentsId(details.webContentsId);
+      if (tab) {
+        tab.networkRequests = tab.networkRequests || [];
+        const req = tab.networkRequests.find((r) => r.id === details.id);
+        if (req) {
+          req.status = "completed";
+          req.statusCode = details.statusCode;
+        }
+      }
+    });
+
+    ses.webRequest.onErrorOccurred({ urls: ["http://*/*", "https://*/*"] }, (details) => {
+      const tab = findTabByWebContentsId(details.webContentsId);
+      if (tab) {
+        tab.networkRequests = tab.networkRequests || [];
+        const req = tab.networkRequests.find((r) => r.id === details.id);
+        if (req) {
+          req.status = "failed";
+          req.error = details.error;
+        }
+      }
+    });
+  }
+}
+
+function findTabByWebContentsId(wcId) {
+  if (!wcId) return null;
+  for (const win of BrowserWindow.getAllWindows()) {
+    const state = browserWindows.get(win.id);
+    if (state && state.tabs) {
+      const tab = state.tabs.find((t) => t.view.webContents.id === wcId);
+      if (tab) return tab;
+    }
+  }
+  return null;
+}
+
+function findTabAcrossAllWindows(tabId) {
+  if (!tabId) return null;
+  for (const win of BrowserWindow.getAllWindows()) {
+    const state = browserWindows.get(win.id);
+    if (state && state.tabs) {
+      const tab = state.tabs.find((t) => t.id === tabId);
+      if (tab) return { tab, win };
+    }
+  }
+  return null;
+}
+
 function wireTabEvents(win, tab) {
   const wc = tab.view.webContents;
+
+  configureSessionNetworkLogging(session.fromPartition(tab.partition));
+
+  wc.on("console-message", (_event, details) => {
+    const msg = String(details?.message || "");
+    if (msg.startsWith(VAULT_CAPTURE_LOG_PREFIX)) {
+      return;
+    }
+    const lvl = ["verbose", "info", "warning", "error"][details?.level] || "info";
+    tab.consoleLogs = tab.consoleLogs || [];
+    tab.consoleLogs.push({
+      timestamp: Date.now(),
+      level: lvl,
+      message: msg,
+      line: details?.line,
+      source: details?.sourceId
+    });
+    if (tab.consoleLogs.length > 200) {
+      tab.consoleLogs.shift();
+    }
+  });
 
   wc.on("select-bluetooth-device", (_event, deviceList, callback) => {
     const preferred = (deviceList || []).find((device) => Boolean(device?.deviceId));
@@ -4462,6 +5247,10 @@ function wireTabEvents(win, tab) {
   });
 
   wc.setWindowOpenHandler((details) => {
+    if (openUrlInExternalBrowser(details.url)) {
+      return { action: "deny" };
+    }
+
     if (shouldOpenAsPopupWindow(details)) {
       configureBrowserSession(win, tab.partition);
       return {
@@ -4474,6 +5263,22 @@ function wireTabEvents(win, tab) {
       groupId: tab.groupId || null
     });
     return { action: "deny" };
+  });
+
+  wc.on("will-navigate", (event, url) => {
+    if (!openUrlInExternalBrowser(url)) {
+      return;
+    }
+
+    event.preventDefault();
+  });
+
+  wc.on("will-redirect", (event, url) => {
+    if (!openUrlInExternalBrowser(url)) {
+      return;
+    }
+
+    event.preventDefault();
   });
 
   wc.on("did-start-loading", () => {
@@ -4564,13 +5369,12 @@ function wireTabEvents(win, tab) {
         return;
       }
 
-      const vault = getVault();
-      saveVaultCredential(vault, { key, username, password });
-      saveVault(vault);
       tab.pendingCredentialCaptureToken = null;
-      win.webContents.send("browser:notice", {
-        message: `Saved credentials for ${key} to the vault.`,
-        type: "success"
+      win.webContents.send("browser:prompt-save-credentials", {
+        key,
+        url: tab.url || "",
+        username,
+        password
       });
     } catch (_) {
       // Ignore malformed page messages.
@@ -4581,6 +5385,10 @@ function wireTabEvents(win, tab) {
 function createBrowserTab(win, url, mode = "auto", activate = true, insertIndex = null, tabOptions = {}) {
   const state = getBrowserState(win);
   const resolvedUrl = ensureUrl(url);
+  if (openUrlInExternalBrowser(resolvedUrl)) {
+    return null;
+  }
+
   const id = `tab-${Date.now()}-${Math.random().toString(16).slice(2, 7)}`;
   const group = getTabGroupById(state, tabOptions.groupId);
   const partition = getPartitionForUrl(resolvedUrl, id, mode, group, {
@@ -4605,6 +5413,8 @@ function createBrowserTab(win, url, mode = "auto", activate = true, insertIndex 
     pinned: Boolean(tabOptions.pinned),
     muted: Boolean(tabOptions.muted),
     pendingCredentialCaptureToken: null,
+    consoleLogs: [],
+    networkRequests: [],
     view
   };
 
@@ -4672,12 +5482,16 @@ function closeBrowserTab(win, tabId) {
 function navigateActiveBrowserTab(win, url) {
   const state = getBrowserState(win);
   const active = state.tabs.find((tab) => tab.id === state.activeTabId);
-  if (!active) {
-    createBrowserTab(win, url, "auto", true);
+  const resolvedUrl = ensureUrl(url);
+  if (openUrlInExternalBrowser(resolvedUrl)) {
     return;
   }
 
-  const resolvedUrl = ensureUrl(url);
+  if (!active) {
+    createBrowserTab(win, resolvedUrl, "auto", true);
+    return;
+  }
+
   const nextPartition = getPartitionForUrl(resolvedUrl, active.id, active.mode, getTabGroupForTab(state, active), {
     tabName: getTabSessionMatchName({ ...active, url: resolvedUrl })
   });
@@ -6060,20 +6874,16 @@ function openSiteShell(targetPath) {
   }).unref();
 }
 
-function getApacheScriptPaths(htdocsPath) {
-  const xamppRoot = getXamppRootFromHtdocs(htdocsPath);
-  if (!xamppRoot) {
+function getApacheScriptPaths(settings = getSettings()) {
+  const serverPaths = getLocalServerPathsSummary(settings);
+  if (!serverPaths.apacheStartPath || !serverPaths.apacheStopPath) {
     return null;
   }
 
-  const startPath = path.join(xamppRoot, "apache_start.bat");
-  const stopPath = path.join(xamppRoot, "apache_stop.bat");
-
-  if (!fs.existsSync(startPath) || !fs.existsSync(stopPath)) {
-    return null;
-  }
-
-  return { startPath, stopPath };
+  return {
+    startPath: serverPaths.apacheStartPath,
+    stopPath: serverPaths.apacheStopPath
+  };
 }
 
 function runDetachedBatch(batchPath) {
@@ -6117,7 +6927,7 @@ async function performSiteMenuAction(win, site, action) {
     return;
   }
 
-  const apacheScripts = getApacheScriptPaths(getResolvedHtdocsPath(getSettings()));
+  const apacheScripts = getApacheScriptPaths(getSettings());
   if (!apacheScripts) {
     return;
   }
@@ -6142,7 +6952,7 @@ async function performSiteMenuAction(win, site, action) {
 }
 
 function showSiteContextMenu(win, site) {
-  const apacheScripts = getApacheScriptPaths(getResolvedHtdocsPath(getSettings()));
+  const apacheScripts = getApacheScriptPaths(getSettings());
   const canManageApache = Boolean(apacheScripts);
   const template = [
     {
@@ -6223,6 +7033,7 @@ function createWindow(options = {}) {
     height: isSplit ? workArea.height : 920,
     minWidth: 1100,
     minHeight: 760,
+    icon: path.join(__dirname, "wp desktop.ico"),
     backgroundColor: "#f3f1ee",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
@@ -6241,6 +7052,12 @@ function createWindow(options = {}) {
   win.loadFile(path.join(__dirname, "src", "index.html"));
   win.on("focus", () => {
     lastFocusedWindow = win;
+  });
+  win.on("enter-full-screen", () => {
+    win.webContents.send("browser:fullscreen-changed", true);
+  });
+  win.on("leave-full-screen", () => {
+    win.webContents.send("browser:fullscreen-changed", false);
   });
   win.on("closed", () => {
     const state = browserWindows.get(win.id);
@@ -6278,6 +7095,15 @@ app.on("second-instance", (_event, argv) => {
 
 app.whenReady().then(() => {
   createWindow({ startupUrl: findLaunchUrl() || getDefaultStartupUrl() });
+  startEmbeddedMcpServer().catch((error) => {
+    embeddedMcpState.lastError = error.message || "Embedded MCP server failed to start.";
+  });
+  const settings = getSettings();
+  if (settings.sftpServer?.enabled) {
+    startLocalSftpServer(settings.sftpServer).catch((error) => {
+      localSftpServerState.lastError = error.message || "SFTP server failed to start.";
+    });
+  }
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -6288,6 +7114,13 @@ app.whenReady().then(() => {
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
+    if (embeddedMcpRuntime) {
+      void stopEmbeddedMcpServer();
+    }
+    if (localSftpServer) {
+      localSftpServer.close();
+      localSftpServer = null;
+    }
     app.quit();
   }
 });
@@ -6772,6 +7605,45 @@ ipcMain.handle("vault:get-site-credentials", (_event, key) => {
   return serializeVaultCredentialResponse(getVault().siteCredentials[key], key);
 });
 
+let syncManager = null;
+
+function getSyncManager() {
+  if (!syncManager) {
+    const SyncManager = require("./src/syncManager.js");
+    syncManager = new SyncManager(app.getPath("userData"));
+  }
+  return syncManager;
+}
+
+ipcMain.handle("browser:toggle-fullscreen", (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  if (!win) {
+    return false;
+  }
+  win.setFullScreen(!win.isFullScreen());
+  return win.isFullScreen();
+});
+
+ipcMain.handle("sync:get-status", () => getSyncManager().getAuthStatus());
+
+ipcMain.handle("sync:auth-google", (event) =>
+  getSyncManager().authenticateGoogle(BrowserWindow.fromWebContents(event.sender))
+);
+
+ipcMain.handle("sync:auth-microsoft", (event) =>
+  getSyncManager().authenticateMicrosoft(BrowserWindow.fromWebContents(event.sender))
+);
+
+ipcMain.handle("sync:disconnect-google", () => {
+  getSyncManager().disconnectGoogle();
+  return { ok: true };
+});
+
+ipcMain.handle("sync:disconnect-microsoft", () => {
+  getSyncManager().disconnectMicrosoft();
+  return { ok: true };
+});
+
 ipcMain.handle("vault:save-site-credentials", (_event, payload) => {
   const vault = getVault();
   const collection = saveVaultCredential(vault, payload);
@@ -6797,10 +7669,47 @@ ipcMain.handle("settings:get", async () => {
   return buildSettingsPayload(settings);
 });
 
+ipcMain.handle("mcp-server:get-status", () => getEmbeddedMcpStatus());
+
+ipcMain.handle("mcp-server:start", async (_event, config = {}) => {
+  const settings = getSettings();
+  settings.mcpServer = {
+    ...settings.mcpServer,
+    ...config,
+    enabled: true
+  };
+  saveSettings(settings);
+  return startEmbeddedMcpServer(settings);
+});
+
+ipcMain.handle("mcp-server:stop", async () => {
+  const settings = getSettings();
+  settings.mcpServer = {
+    ...settings.mcpServer,
+    enabled: false
+  };
+  saveSettings(settings);
+  return stopEmbeddedMcpServer();
+});
+
 ipcMain.handle("settings:set-htdocs", async (_event, htdocsPath) => {
   const settings = getSettings();
   settings.htdocsPath = htdocsPath || "";
-  settings.xamppRootPath = getXamppRootFromHtdocs(settings.htdocsPath) || settings.xamppRootPath || "";
+  const derivedRootPath = getLocalServerRootFromDocumentRoot(settings.htdocsPath, settings.localServerType);
+  if (derivedRootPath) {
+    settings[getRootPathSettingKey(settings.localServerType)] = derivedRootPath;
+  }
+  saveSettings(settings);
+  return buildSettingsPayload(settings);
+});
+
+ipcMain.handle("settings:set-local-server-type", async (_event, localServerType) => {
+  const settings = getSettings();
+  settings.localServerType = normalizeLocalServerType(localServerType);
+  settings.htdocsPath = getDocumentRootFromRoot(
+    getResolvedRootPath(settings, settings.localServerType),
+    settings.localServerType
+  );
   saveSettings(settings);
   return buildSettingsPayload(settings);
 });
@@ -6808,7 +7717,19 @@ ipcMain.handle("settings:set-htdocs", async (_event, htdocsPath) => {
 ipcMain.handle("settings:set-xampp-root", async (_event, xamppRootPath) => {
   const settings = getSettings();
   settings.xamppRootPath = xamppRootPath || "";
-  settings.htdocsPath = xamppRootPath ? path.join(xamppRootPath, "htdocs") : "";
+  settings.localServerType = "xampp";
+  settings.htdocsPath = xamppRootPath ? getDocumentRootFromRoot(xamppRootPath, "xampp") : "";
+  saveSettings(settings);
+  return buildSettingsPayload(settings);
+});
+
+ipcMain.handle("settings:set-local-server-root", async (_event, payload) => {
+  const settings = getSettings();
+  const localServerType = normalizeLocalServerType(payload?.localServerType);
+  const rootPath = String(payload?.rootPath || "").trim();
+  settings.localServerType = localServerType;
+  settings[getRootPathSettingKey(localServerType)] = rootPath;
+  settings.htdocsPath = rootPath ? getDocumentRootFromRoot(rootPath, localServerType) : "";
   saveSettings(settings);
   return buildSettingsPayload(settings);
 });
@@ -6829,12 +7750,12 @@ ipcMain.handle("settings:set-online-session-sharing", async (_event, enabled) =>
 
 ipcMain.handle("settings:save-mysql-config", async (_event, payload) => {
   const settings = getSettings();
-  const xamppPaths = getXamppPathsSummary(settings);
-  if (!xamppPaths.mysqlConfigPath) {
+  const serverPaths = getLocalServerPathsSummary(settings);
+  if (!serverPaths.mysqlConfigPath) {
     throw new Error("MySQL config file was not found.");
   }
 
-  fs.writeFileSync(xamppPaths.mysqlConfigPath, String(payload.content || ""), "utf8");
+  fs.writeFileSync(serverPaths.mysqlConfigPath, String(payload.content || ""), "utf8");
   settings.dbUser = String(payload.dbUser || "root").trim() || "root";
   settings.dbPassword = payload.dbPassword ?? "";
   settings.wpInstallUsername = String(payload.wpInstallUsername || "admin").trim() || "admin";
@@ -7010,9 +7931,9 @@ ipcMain.handle("installer:run", async (_event, payload) => {
     dbPort: String(databaseProfile.port),
     dbUser: databaseProfile.user,
     dbPassword: databaseProfile.password,
-    databaseVersion: "MySQL via XAMPP",
-    phpVersion: payload.phpVersion || "PHP via XAMPP",
-    webServer: "Apache via XAMPP",
+    databaseVersion: getLocalServerDatabaseLabel(),
+    phpVersion: payload.phpVersion || getLocalServerPhpVersionLabel(),
+    webServer: getLocalServerWebServerLabel(),
     wordpressVersion: payload.wordpressVersion || "From zip package",
     extractedCount: extracted.extractedCount,
     lastStartedAt: new Date().toISOString(),
@@ -7030,6 +7951,7 @@ ipcMain.handle("installer:run", async (_event, payload) => {
     logs.push("Multisite preparation enabled. WP_ALLOW_MULTISITE will be added after wp-config.php is created.");
   }
 
+
   const existingSites = getSites().filter((site) => site.id !== siteRecord.id);
   existingSites.unshift(siteRecord);
   saveSites(existingSites);
@@ -7043,6 +7965,10 @@ ipcMain.handle("installer:run", async (_event, payload) => {
     db,
     site: siteRecord
   };
+});
+
+ipcMain.handle("shell:open-external", async (_event, url) => {
+  await shell.openExternal(url);
 });
 
 ipcMain.handle("shell:open-path", async (_event, targetPath) => {
@@ -7091,3 +8017,1413 @@ ipcMain.handle("workspace:open-with", async (_event, targetPath) => {
   await shell.openPath(resolvedPath);
   return { ok: true, message: "Opened the media file." };
 });
+
+function getSftpHostKeyPath() {
+  return path.join(app.getPath("userData"), "sftp-host-key.pem");
+}
+
+function getOrCreateSftpHostKey() {
+  const keyPath = getSftpHostKeyPath();
+  if (fs.existsSync(keyPath)) {
+    return fs.readFileSync(keyPath);
+  }
+
+  const { privateKey } = crypto.generateKeyPairSync("rsa", {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: "pkcs1", format: "pem" },
+    publicKeyEncoding: { type: "spki", format: "pem" }
+  });
+  fs.writeFileSync(keyPath, privateKey, { mode: 0o600 });
+  return Buffer.from(privateKey);
+}
+
+function getLocalSftpStatus(settings = getSettings()) {
+  return {
+    ...localSftpServerState,
+    ...settings.sftpServer,
+    running: Boolean(localSftpServer),
+    clients: localSftpServerState.clients,
+    lastError: localSftpServerState.lastError || ""
+  };
+}
+
+function resolveSftpServerPath(rootPath, remotePath = "/") {
+  const root = path.resolve(rootPath || "");
+  const normalizedRemote = String(remotePath || "/").replace(/\\/g, "/");
+  const relative = path.posix.normalize(`/${normalizedRemote}`).replace(/^\/+/, "");
+  const target = path.resolve(root, relative);
+  if (target !== root && !target.startsWith(root + path.sep)) {
+    const error = new Error("Path escapes the configured SFTP root.");
+    error.code = "EACCES";
+    throw error;
+  }
+  return target;
+}
+
+function toSftpAttrs(stats) {
+  return {
+    mode: stats.mode,
+    uid: 0,
+    gid: 0,
+    size: stats.size,
+    atime: Math.floor(stats.atimeMs / 1000),
+    mtime: Math.floor(stats.mtimeMs / 1000)
+  };
+}
+
+function toSftpStatusCode(error) {
+  if (!error) {
+    return STATUS_CODE.OK;
+  }
+  if (error.code === "ENOENT") {
+    return STATUS_CODE.NO_SUCH_FILE;
+  }
+  if (error.code === "EACCES" || error.code === "EPERM") {
+    return STATUS_CODE.PERMISSION_DENIED;
+  }
+  return STATUS_CODE.FAILURE;
+}
+
+function fsFlagsFromSftpFlags(flags) {
+  const canRead = Boolean(flags & OPEN_MODE.READ);
+  const canWrite = Boolean(flags & OPEN_MODE.WRITE);
+  const append = Boolean(flags & OPEN_MODE.APPEND);
+  const create = Boolean(flags & OPEN_MODE.CREAT);
+  const truncate = Boolean(flags & OPEN_MODE.TRUNC);
+  const exclusive = Boolean(flags & OPEN_MODE.EXCL);
+
+  if (append && canRead) return exclusive ? "ax+" : "a+";
+  if (append) return exclusive ? "ax" : "a";
+  if (canWrite && canRead) return truncate || create ? (exclusive ? "wx+" : "w+") : "r+";
+  if (canWrite) return truncate || create ? (exclusive ? "wx" : "w") : "r+";
+  return "r";
+}
+
+function makeSftpHandle(id) {
+  const handle = Buffer.alloc(4);
+  handle.writeUInt32BE(id, 0);
+  return handle;
+}
+
+function readSftpHandle(handle, handles) {
+  if (!Buffer.isBuffer(handle) || handle.length !== 4) {
+    return null;
+  }
+  return handles.get(handle.readUInt32BE(0));
+}
+
+function attachLocalSftpHandlers(sftp, rootPath) {
+  const handles = new Map();
+  let nextHandleId = 1;
+
+  function storeHandle(value) {
+    const id = nextHandleId++;
+    handles.set(id, value);
+    return makeSftpHandle(id);
+  }
+
+  function sendFailure(reqid, error) {
+    sftp.status(reqid, toSftpStatusCode(error));
+  }
+
+  function statPath(reqid, remotePath) {
+    try {
+      sftp.attrs(reqid, toSftpAttrs(fs.statSync(resolveSftpServerPath(rootPath, remotePath))));
+    } catch (error) {
+      sendFailure(reqid, error);
+    }
+  }
+
+  sftp.on("REALPATH", (reqid, remotePath) => {
+    try {
+      const target = resolveSftpServerPath(rootPath, remotePath);
+      const stats = fs.statSync(target);
+      const filename = path.posix.normalize(`/${String(remotePath || "/").replace(/\\/g, "/")}`) || "/";
+      sftp.name(reqid, [{ filename, longname: filename, attrs: toSftpAttrs(stats) }]);
+    } catch (error) {
+      sendFailure(reqid, error);
+    }
+  });
+
+  sftp.on("STAT", statPath);
+  sftp.on("LSTAT", statPath);
+
+  sftp.on("FSTAT", (reqid, handle) => {
+    const entry = readSftpHandle(handle, handles);
+    if (!entry || entry.type !== "file") {
+      return sftp.status(reqid, STATUS_CODE.FAILURE);
+    }
+    fs.fstat(entry.fd, (error, stats) => {
+      if (error) return sendFailure(reqid, error);
+      sftp.attrs(reqid, toSftpAttrs(stats));
+    });
+  });
+
+  sftp.on("OPENDIR", (reqid, remotePath) => {
+    try {
+      const localPath = resolveSftpServerPath(rootPath, remotePath);
+      const names = fs.readdirSync(localPath).map((filename) => {
+        const itemPath = path.join(localPath, filename);
+        const stats = fs.statSync(itemPath);
+        return { filename, longname: filename, attrs: toSftpAttrs(stats) };
+      });
+      sftp.handle(reqid, storeHandle({ type: "dir", names, sent: false }));
+    } catch (error) {
+      sendFailure(reqid, error);
+    }
+  });
+
+  sftp.on("READDIR", (reqid, handle) => {
+    const entry = readSftpHandle(handle, handles);
+    if (!entry || entry.type !== "dir") {
+      return sftp.status(reqid, STATUS_CODE.FAILURE);
+    }
+    if (entry.sent) {
+      return sftp.status(reqid, STATUS_CODE.EOF);
+    }
+    entry.sent = true;
+    sftp.name(reqid, entry.names);
+  });
+
+  sftp.on("OPEN", (reqid, filename, flags) => {
+    try {
+      const localPath = resolveSftpServerPath(rootPath, filename);
+      fs.mkdirSync(path.dirname(localPath), { recursive: true });
+      fs.open(localPath, fsFlagsFromSftpFlags(flags), (error, fd) => {
+        if (error) return sendFailure(reqid, error);
+        sftp.handle(reqid, storeHandle({ type: "file", fd }));
+      });
+    } catch (error) {
+      sendFailure(reqid, error);
+    }
+  });
+
+  sftp.on("READ", (reqid, handle, offset, length) => {
+    const entry = readSftpHandle(handle, handles);
+    if (!entry || entry.type !== "file") {
+      return sftp.status(reqid, STATUS_CODE.FAILURE);
+    }
+    const buffer = Buffer.alloc(length);
+    fs.read(entry.fd, buffer, 0, length, offset, (error, bytesRead) => {
+      if (error) return sendFailure(reqid, error);
+      if (!bytesRead) return sftp.status(reqid, STATUS_CODE.EOF);
+      sftp.data(reqid, buffer.slice(0, bytesRead));
+    });
+  });
+
+  sftp.on("WRITE", (reqid, handle, offset, data) => {
+    const entry = readSftpHandle(handle, handles);
+    if (!entry || entry.type !== "file") {
+      return sftp.status(reqid, STATUS_CODE.FAILURE);
+    }
+    fs.write(entry.fd, data, 0, data.length, offset, (error) => {
+      sftp.status(reqid, toSftpStatusCode(error));
+    });
+  });
+
+  sftp.on("CLOSE", (reqid, handle) => {
+    const id = Buffer.isBuffer(handle) && handle.length === 4 ? handle.readUInt32BE(0) : null;
+    const entry = id ? handles.get(id) : null;
+    if (!entry) {
+      return sftp.status(reqid, STATUS_CODE.FAILURE);
+    }
+    handles.delete(id);
+    if (entry.type !== "file") {
+      return sftp.status(reqid, STATUS_CODE.OK);
+    }
+    fs.close(entry.fd, (error) => sftp.status(reqid, toSftpStatusCode(error)));
+  });
+
+  sftp.on("MKDIR", (reqid, remotePath) => {
+    try {
+      fs.mkdirSync(resolveSftpServerPath(rootPath, remotePath), { recursive: true });
+      sftp.status(reqid, STATUS_CODE.OK);
+    } catch (error) {
+      sendFailure(reqid, error);
+    }
+  });
+
+  sftp.on("RMDIR", (reqid, remotePath) => {
+    try {
+      fs.rmdirSync(resolveSftpServerPath(rootPath, remotePath));
+      sftp.status(reqid, STATUS_CODE.OK);
+    } catch (error) {
+      sendFailure(reqid, error);
+    }
+  });
+
+  sftp.on("REMOVE", (reqid, remotePath) => {
+    try {
+      fs.unlinkSync(resolveSftpServerPath(rootPath, remotePath));
+      sftp.status(reqid, STATUS_CODE.OK);
+    } catch (error) {
+      sendFailure(reqid, error);
+    }
+  });
+
+  sftp.on("RENAME", (reqid, oldPath, newPath) => {
+    try {
+      fs.renameSync(resolveSftpServerPath(rootPath, oldPath), resolveSftpServerPath(rootPath, newPath));
+      sftp.status(reqid, STATUS_CODE.OK);
+    } catch (error) {
+      sendFailure(reqid, error);
+    }
+  });
+}
+
+async function startLocalSftpServer(overrides = {}) {
+  if (localSftpServer) {
+    return getLocalSftpStatus();
+  }
+
+  const settings = getSettings();
+  settings.sftpServer = { ...settings.sftpServer, ...overrides, enabled: true };
+  saveSettings(settings);
+
+  const config = normalizeSettings(settings).sftpServer;
+  const rootPath = path.resolve(config.rootPath || getResolvedHtdocsPath(settings) || app.getPath("documents"));
+  fs.mkdirSync(rootPath, { recursive: true });
+
+  return await new Promise((resolve, reject) => {
+    const server = new SshServer({ hostKeys: [getOrCreateSftpHostKey()] }, (client) => {
+      localSftpServerState.clients++;
+      client.on("authentication", (ctx) => {
+        const usernameOk = ctx.username === config.username;
+        const passwordOk = ctx.method === "password" && ctx.password === config.password;
+        if (usernameOk && passwordOk) {
+          ctx.accept();
+        } else {
+          ctx.reject();
+        }
+      });
+      client.on("ready", () => {
+        client.on("session", (accept) => {
+          const session = accept();
+          session.on("sftp", (accept) => attachLocalSftpHandlers(accept(), rootPath));
+        });
+      });
+      client.on("close", () => {
+        localSftpServerState.clients = Math.max(0, localSftpServerState.clients - 1);
+      });
+    });
+
+    server.once("error", (error) => {
+      localSftpServerState.lastError = error.message || "SFTP server failed to start.";
+      reject(error);
+    });
+
+    server.listen(config.port, config.host, () => {
+      localSftpServer = server;
+      localSftpServerState = {
+        running: true,
+        host: config.host,
+        port: config.port,
+        rootPath,
+        username: config.username,
+        clients: 0,
+        lastError: ""
+      };
+      resolve(getLocalSftpStatus());
+    });
+  });
+}
+
+async function stopLocalSftpServer() {
+  const settings = getSettings();
+  settings.sftpServer = { ...settings.sftpServer, enabled: false };
+  saveSettings(settings);
+
+  if (!localSftpServer) {
+    localSftpServerState.running = false;
+    return getLocalSftpStatus();
+  }
+
+  await new Promise((resolve) => {
+    localSftpServer.close(() => resolve());
+  });
+  localSftpServer = null;
+  localSftpServerState.running = false;
+  localSftpServerState.clients = 0;
+  return getLocalSftpStatus();
+}
+
+function getSshConnection(config) {
+  return new Promise((resolve, reject) => {
+    const conn = new SshClient();
+    
+    conn.on("ready", () => {
+      conn.sftp((err, sftp) => {
+        if (err) {
+          conn.end();
+          return reject(new Error("SFTP subsystem failed: " + err.message));
+        }
+        resolve({ conn, sftp });
+      });
+    });
+
+    conn.on("error", (err) => {
+      reject(new Error("SSH connection error: " + err.message));
+    });
+
+    const connSettings = {
+      host: config.host,
+      port: Number(config.port) || 22,
+      username: config.username,
+      readyTimeout: 15000
+    };
+
+    if (config.authType === "key") {
+      if (!config.keyPath) {
+        return reject(new Error("SSH Private Key path is required."));
+      }
+      try {
+        connSettings.privateKey = fs.readFileSync(config.keyPath);
+      } catch (err) {
+        return reject(new Error("Could not read SSH Private Key: " + err.message));
+      }
+    } else {
+      connSettings.password = config.password;
+    }
+
+    conn.connect(connSettings);
+  });
+}
+
+function getAllLocalFiles(dirPath, originalDirPath = dirPath) {
+  let results = [];
+  if (!fs.existsSync(dirPath)) return results;
+  const list = fs.readdirSync(dirPath);
+  list.forEach((file) => {
+    const filePath = path.join(dirPath, file);
+    const stat = fs.statSync(filePath);
+    const relativePath = path.relative(originalDirPath, filePath).replace(/\\/g, '/');
+    if (stat && stat.isDirectory()) {
+      results.push({ type: 'directory', relativePath, absolutePath: filePath });
+      results = results.concat(getAllLocalFiles(filePath, originalDirPath));
+    } else {
+      results.push({ type: 'file', relativePath, absolutePath: filePath });
+    }
+  });
+  return results;
+}
+
+async function getAllRemoteFiles(sftp, remoteDir, originalRemoteDir = remoteDir) {
+  let results = [];
+  const list = await new Promise((resolve, reject) => {
+    sftp.readdir(remoteDir, (err, files) => {
+      if (err) return reject(err);
+      resolve(files || []);
+    });
+  });
+
+  for (const file of list) {
+    if (file.filename === "." || file.filename === "..") continue;
+    const remotePath = (remoteDir === '/' ? '/' : remoteDir + '/') + file.filename;
+    const relativePath = path.relative(originalRemoteDir, remotePath).replace(/\\/g, '/');
+    const isDir = ((file.attrs.mode & 0o170000) === 0o040000) || (file.longname && file.longname.startsWith('d'));
+    if (isDir) {
+      results.push({ type: 'directory', relativePath, remotePath });
+      const subResults = await getAllRemoteFiles(sftp, remotePath, originalRemoteDir);
+      results = results.concat(subResults);
+    } else {
+      results.push({ type: 'file', relativePath, remotePath });
+    }
+  }
+  return results;
+}
+
+async function ensureRemoteDirExists(sftp, remotePath) {
+  const normalized = remotePath.replace(/\\/g, '/');
+  const parts = normalized.split('/').filter(Boolean);
+  let current = normalized.startsWith('/') ? '/' : '';
+  for (const part of parts) {
+    current = (current === '/' ? '/' : current + '/') + part;
+    try {
+      await new Promise((resolve, reject) => {
+        sftp.stat(current, (err, stat) => {
+          if (err) {
+            sftp.mkdir(current, (mkdirErr) => {
+              if (mkdirErr) reject(mkdirErr);
+              else resolve();
+            });
+          } else {
+            resolve();
+          }
+        });
+      });
+    } catch (err) {
+      throw new Error(`Failed to check or create remote directory ${current}: ${err.message}`);
+    }
+  }
+}
+
+async function uploadDirectoryRecursive(win, sftp, localDir, remoteDir, subpath = "") {
+  const fullLocalDir = subpath ? path.join(localDir, subpath) : localDir;
+  const fullRemoteDir = subpath ? (remoteDir + "/" + subpath).replace(/\/+/g, "/") : remoteDir;
+
+  await ensureRemoteDirExists(sftp, fullRemoteDir);
+
+  const localItems = getAllLocalFiles(fullLocalDir);
+  const total = localItems.filter(item => item.type === 'file').length;
+  let completed = 0;
+
+  win.webContents.send("sftp:progress", { statusText: "Scanning local files...", progress: 0 });
+
+  for (const item of localItems) {
+    const itemRemotePath = (fullRemoteDir + "/" + item.relativePath).replace(/\/+/g, "/");
+    if (item.type === 'directory') {
+      await ensureRemoteDirExists(sftp, itemRemotePath);
+    } else {
+      win.webContents.send("sftp:progress", { 
+        statusText: `Uploading ${item.relativePath}...`, 
+        progress: Math.round((completed / total) * 100),
+        logLine: `Uploading ${item.relativePath}`
+      });
+      
+      await new Promise((resolve, reject) => {
+        sftp.fastPut(item.absolutePath, itemRemotePath, (err) => {
+          if (err) return reject(err);
+          resolve();
+        });
+      });
+      completed++;
+    }
+  }
+
+  win.webContents.send("sftp:progress", { 
+    statusText: "Upload complete!", 
+    progress: 100, 
+    logLine: `Uploaded ${completed} files successfully.`
+  });
+}
+
+async function downloadDirectoryRecursive(win, sftp, remoteDir, localDir, subpath = "") {
+  const fullRemoteDir = subpath ? (remoteDir + "/" + subpath).replace(/\/+/g, "/") : remoteDir;
+  const fullLocalDir = subpath ? path.join(localDir, subpath) : localDir;
+
+  fs.mkdirSync(fullLocalDir, { recursive: true });
+
+  win.webContents.send("sftp:progress", { statusText: "Scanning remote files...", progress: 0 });
+  const remoteItems = await getAllRemoteFiles(sftp, fullRemoteDir);
+  const total = remoteItems.filter(item => item.type === 'file').length;
+  let completed = 0;
+
+  for (const item of remoteItems) {
+    const itemLocalPath = path.join(fullLocalDir, item.relativePath);
+    if (item.type === 'directory') {
+      fs.mkdirSync(itemLocalPath, { recursive: true });
+    } else {
+      win.webContents.send("sftp:progress", { 
+        statusText: `Downloading ${item.relativePath}...`, 
+        progress: Math.round((completed / total) * 100),
+        logLine: `Downloading ${item.relativePath}`
+      });
+
+      fs.mkdirSync(path.dirname(itemLocalPath), { recursive: true });
+
+      await new Promise((resolve, reject) => {
+        sftp.fastGet(item.remotePath, itemLocalPath, (err) => {
+          if (err) return reject(err);
+          resolve();
+        });
+      });
+      completed++;
+    }
+  }
+
+  win.webContents.send("sftp:progress", { 
+    statusText: "Download complete!", 
+    progress: 100, 
+    logLine: `Downloaded ${completed} files successfully.`
+  });
+}
+
+ipcMain.handle("dialog:pick-file", async () => {
+  const result = await dialog.showOpenDialog({
+    title: "Select File",
+    properties: ["openFile"],
+    filters: [{ name: "All files", extensions: ["*"] }]
+  });
+
+  if (result.canceled || !result.filePaths[0]) {
+    return null;
+  }
+
+  return result.filePaths[0];
+});
+
+ipcMain.handle("dialog:save-file", async (_event, defaultPath) => {
+  const result = await dialog.showSaveDialog({
+    title: "Save File",
+    defaultPath: defaultPath || undefined,
+    buttonLabel: "Save"
+  });
+
+  if (result.canceled || !result.filePath) {
+    return null;
+  }
+
+  return result.filePath;
+});
+
+ipcMain.handle("file:write", async (_event, { filePath, content }) => {
+  if (!filePath) {
+    throw new Error("No file path provided.");
+  }
+  fs.writeFileSync(filePath, String(content || ""), "utf8");
+  return { ok: true };
+});
+
+ipcMain.handle("sftp:save-config", async (_event, { siteId, config }) => {
+  const sites = getSites();
+  const index = sites.findIndex(site => site.id === siteId);
+  if (index === -1) {
+    throw new Error("Site not found: " + siteId);
+  }
+
+  sites[index].sftp = {
+    host: String(config.host || "").trim(),
+    port: String(config.port || "22").trim(),
+    username: String(config.username || "").trim(),
+    authType: String(config.authType || "password").trim(),
+    password: String(config.password || ""),
+    keyPath: String(config.keyPath || "").trim(),
+    remoteDir: String(config.remoteDir || "").trim()
+  };
+
+  saveSites(sites);
+  return { ok: true, site: sites[index] };
+});
+
+ipcMain.handle("sftp-server:get-status", () => getLocalSftpStatus());
+
+ipcMain.handle("sftp-server:save-settings", async (_event, config) => {
+  const settings = getSettings();
+  settings.sftpServer = {
+    ...settings.sftpServer,
+    host: String(config?.host || settings.sftpServer.host || "127.0.0.1").trim() || "127.0.0.1",
+    port: Math.max(1, Math.min(65535, Number(config?.port || settings.sftpServer.port || 2222))),
+    username: String(config?.username || settings.sftpServer.username || "wpdesktop").trim() || "wpdesktop",
+    password: String(config?.password ?? settings.sftpServer.password ?? ""),
+    rootPath: String(config?.rootPath || settings.sftpServer.rootPath || "").trim(),
+    enabled: Boolean(localSftpServer)
+  };
+  saveSettings(settings);
+  return getLocalSftpStatus(settings);
+});
+
+ipcMain.handle("sftp-server:start", async (_event, config) => startLocalSftpServer(config || {}));
+
+ipcMain.handle("sftp-server:stop", async () => stopLocalSftpServer());
+
+ipcMain.handle("sftp:test", async (_event, config) => {
+  try {
+    const { conn, sftp } = await getSshConnection(config);
+    
+    const remoteDir = String(config.remoteDir || "/").trim() || "/";
+    await new Promise((resolve, reject) => {
+      sftp.stat(remoteDir, (err, stats) => {
+        if (err) {
+          reject(new Error("Remote directory does not exist or is not readable: " + err.message));
+        } else {
+          resolve();
+        }
+      });
+    });
+
+    // Store the connection with a unique ID for future use
+    const connectionId = `sftp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    activeSftpConnections.set(connectionId, { conn, sftp, config });
+    
+    // Auto-cleanup after 1 hour of inactivity
+    setTimeout(() => {
+      if (activeSftpConnections.has(connectionId)) {
+        const { conn: oldConn } = activeSftpConnections.get(connectionId);
+        oldConn.end();
+        activeSftpConnections.delete(connectionId);
+      }
+    }, 3600000);
+
+    return { ok: true, connectionId };
+  } catch (err) {
+    throw new Error("SFTP connection test failed: " + err.message);
+  }
+});
+
+ipcMain.handle("sftp:list-dir", async (_event, payload) => {
+  const { connectionId, remotePath } = payload;
+  
+  if (!activeSftpConnections.has(connectionId)) {
+    throw new Error("SFTP connection not found or closed.");
+  }
+
+  const { sftp } = activeSftpConnections.get(connectionId);
+  const dirPath = String(remotePath || "/").trim() || "/";
+
+  return new Promise((resolve, reject) => {
+    sftp.readdir(dirPath, (err, list) => {
+      if (err) {
+        return reject(new Error(`Failed to list directory: ${err.message}`));
+      }
+      
+      const files = (list || []).map(item => ({
+        name: item.filename,
+        type: item.longname?.startsWith('d') ? 'directory' : 'file',
+        size: item.attrs?.size || 0,
+        modTime: item.attrs?.mtime ? new Date(item.attrs.mtime * 1000).toISOString() : null
+      }));
+      
+      resolve(files);
+    });
+  });
+});
+
+ipcMain.handle("sftp:read-file", async (_event, payload) => {
+  const { connectionId, remotePath } = payload;
+  
+  if (!activeSftpConnections.has(connectionId)) {
+    throw new Error("SFTP connection not found or closed.");
+  }
+
+  const { sftp } = activeSftpConnections.get(connectionId);
+  const filePath = String(remotePath || "").trim();
+
+  if (!filePath) {
+    throw new Error("Remote file path is required.");
+  }
+
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    const readStream = sftp.createReadStream(filePath);
+    
+    readStream.on('data', (chunk) => {
+      chunks.push(chunk);
+    });
+    
+    readStream.on('end', () => {
+      const content = Buffer.concat(chunks).toString('utf8');
+      resolve(content);
+    });
+    
+    readStream.on('error', (err) => {
+      reject(new Error(`Failed to read file: ${err.message}`));
+    });
+  });
+});
+
+ipcMain.handle("sftp:close-connection", (_event, connectionId) => {
+  if (activeSftpConnections.has(connectionId)) {
+    const { conn } = activeSftpConnections.get(connectionId);
+    conn.end();
+    activeSftpConnections.delete(connectionId);
+  }
+  return { ok: true };
+});
+
+ipcMain.handle("sftp:transfer", async (event, payload) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const { siteId, direction, subpath } = payload;
+  const sites = getSites();
+  const site = sites.find(s => s.id === siteId);
+  if (!site) {
+    throw new Error("Site not found: " + siteId);
+  }
+
+  if (!site.sftp || !site.sftp.host) {
+    throw new Error("SFTP is not configured for this site.");
+  }
+
+  win.webContents.send("sftp:progress", { 
+    statusText: "Connecting to remote server...", 
+    progress: 0,
+    logLine: `Connecting to ${site.sftp.username}@${site.sftp.host}:${site.sftp.port}...`
+  });
+
+  const { conn, sftp } = await getSshConnection(site.sftp);
+
+  try {
+    const remoteBaseDir = site.sftp.remoteDir || "/";
+    const localBaseDir = site.path;
+
+    if (direction === "upload") {
+      win.webContents.send("sftp:progress", { statusText: "Starting upload...", logLine: "Starting recursive upload..." });
+      await uploadDirectoryRecursive(win, sftp, localBaseDir, remoteBaseDir, subpath);
+    } else {
+      win.webContents.send("sftp:progress", { statusText: "Starting download...", logLine: "Starting recursive download..." });
+      await downloadDirectoryRecursive(win, sftp, remoteBaseDir, localBaseDir, subpath);
+    }
+
+    conn.end();
+    return { ok: true };
+  } catch (err) {
+    conn.end();
+    win.webContents.send("sftp:progress", { 
+      statusText: "Transfer failed", 
+      isError: true,
+      logLine: `Error: ${err.message}`
+    });
+    throw err;
+  }
+});
+
+ipcMain.handle("extensions:read-file", async (_event, filePath) => {
+  if (!filePath || !fs.existsSync(filePath)) {
+    throw new Error("File not found: " + filePath);
+  }
+  return fs.readFileSync(filePath, "utf8");
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// TAILSCALE ADMIN TOOLKIT — Main Process Service Layer
+// ═══════════════════════════════════════════════════════════════════
+
+const tailscaleRuntime = {
+  cliPath: null,
+  localApiAvailable: false,
+  monitorTimer: null,
+  lastPeerSnapshot: null,
+  initialized: false
+};
+
+// ─── Security: sanitize all CLI argument values ────────────────────
+function sanitizeTailscaleArg(value) {
+  const str = String(value || "");
+  // Strip shell metacharacters — we use spawn with args array anyway,
+  // but defense-in-depth is good practice.
+  return str.replace(/[;&|`$<>(){}\\!\n\r]/g, "").trim().slice(0, 512);
+}
+
+// ─── CLI detection ─────────────────────────────────────────────────
+const TAILSCALE_CLI_CANDIDATES = process.platform === "win32"
+  ? [
+      "C:\\Program Files\\Tailscale\\tailscale.exe",
+      "C:\\Program Files (x86)\\Tailscale\\tailscale.exe",
+      "tailscale"
+    ]
+  : process.platform === "darwin"
+  ? ["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "/usr/local/bin/tailscale", "tailscale"]
+  : ["/usr/bin/tailscale", "/usr/local/bin/tailscale", "tailscale"];
+
+function findTailscaleCli() {
+  for (const candidate of TAILSCALE_CLI_CANDIDATES) {
+    try {
+      if (!candidate.startsWith("/") && !candidate.includes("\\")) {
+        // PATH lookup
+        const result = spawnSync(process.platform === "win32" ? "where" : "which", [candidate], {
+          encoding: "utf8", windowsHide: true
+        });
+        if (result.status === 0 && result.stdout.trim()) {
+          return candidate;
+        }
+      } else if (fs.existsSync(candidate)) {
+        return candidate;
+      }
+    } catch (_) {
+      // continue
+    }
+  }
+  return null;
+}
+
+// ─── Run a Tailscale CLI command via spawn (Promise) ──────────────
+function runTailscaleCli(args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const cliPath = tailscaleRuntime.cliPath;
+    if (!cliPath) {
+      return reject(new Error("Tailscale CLI not found. Install Tailscale and ensure it is on PATH."));
+    }
+
+    const safeArgs = args.map(sanitizeTailscaleArg);
+    const proc = spawn(cliPath, safeArgs, {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: options.timeout || 30000
+    });
+
+    let stdout = "";
+    let stderr = "";
+    proc.stdout.on("data", (d) => { stdout += d; });
+    proc.stderr.on("data", (d) => { stderr += d; });
+    proc.on("close", (code) => {
+      resolve({ code, stdout, stderr });
+    });
+    proc.on("error", reject);
+  });
+}
+
+// ─── LocalAPI HTTP probe ───────────────────────────────────────────
+const TS_LOCAL_API_BASE = "http://localhost:41112/localapi/v0";
+
+function tailscaleLocalApiGet(path) {
+  return new Promise((resolve, reject) => {
+    const req = http.get(`${TS_LOCAL_API_BASE}${path}`, {
+      headers: { "Tailscale-Cap": "58" },
+      timeout: 3000
+    }, (res) => {
+      let body = "";
+      res.on("data", (d) => { body += d; });
+      res.on("end", () => {
+        try {
+          resolve({ status: res.statusCode, data: JSON.parse(body) });
+        } catch (_) {
+          resolve({ status: res.statusCode, data: body });
+        }
+      });
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(); reject(new Error("LocalAPI timeout")); });
+  });
+}
+
+// ─── Get Tailscale status (LocalAPI → CLI fallback) ───────────────
+async function getTailscaleStatus() {
+  if (tailscaleRuntime.localApiAvailable) {
+    try {
+      const res = await tailscaleLocalApiGet("/status");
+      if (res.status === 200) return { source: "localapi", data: res.data };
+    } catch (_) {
+      tailscaleRuntime.localApiAvailable = false;
+    }
+  }
+
+  // CLI fallback
+  const result = await runTailscaleCli(["status", "--json"]);
+  if (result.code !== 0 && !result.stdout.trim()) {
+    throw new Error(result.stderr || "tailscale status failed");
+  }
+  return { source: "cli", data: JSON.parse(result.stdout) };
+}
+
+// ─── Peer online state helpers ────────────────────────────────────
+function classifyPeerState(peer) {
+  if (!peer) return "unknown";
+  if (peer.Online) return peer.Relay ? "relay" : "online";
+  if (peer.LastSeen) return "offline";
+  return "unknown";
+}
+
+function normalizePeers(statusData) {
+  const peers = statusData?.Peer ? Object.values(statusData.Peer) : [];
+  const self = statusData?.Self || null;
+  return { peers, self };
+}
+
+// ─── Device monitor (background polling) ──────────────────────────
+async function tailscaleMonitorTick() {
+  try {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (!win || win.isDestroyed()) return;
+
+    const { data } = await getTailscaleStatus();
+    const { peers } = normalizePeers(data);
+
+    const lastSnapshot = tailscaleRuntime.lastPeerSnapshot || {};
+    const newSnapshot = {};
+
+    for (const peer of peers) {
+      const id = peer.ID || peer.PublicKey || peer.HostName;
+      const state = classifyPeerState(peer);
+      newSnapshot[id] = state;
+
+      if (lastSnapshot[id] !== undefined && lastSnapshot[id] !== state) {
+        // State changed — send desktop notification
+        const name = peer.HostName || peer.DNSName || id;
+        const notifTitle = state === "online" ? `${name} connected` : `${name} went ${state}`;
+        const { Notification } = require("electron");
+        if (Notification.isSupported()) {
+          new Notification({ title: "Tailscale", body: notifTitle }).show();
+        }
+        win.webContents.send("tailscale:notification", { type: state, name, id });
+      }
+    }
+
+    tailscaleRuntime.lastPeerSnapshot = newSnapshot;
+    win.webContents.send("tailscale:peer-update", { peers, timestamp: Date.now() });
+  } catch (_) {
+    // Silent — monitor failures don't crash the app
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// IPC Handlers — Tailscale
+// ═══════════════════════════════════════════════════════════════════
+
+// ─── detect ───────────────────────────────────────────────────────
+ipcMain.handle("tailscale:detect", async () => {
+  tailscaleRuntime.cliPath = findTailscaleCli();
+
+  // Probe LocalAPI
+  try {
+    const res = await tailscaleLocalApiGet("/status");
+    tailscaleRuntime.localApiAvailable = res.status === 200;
+  } catch (_) {
+    tailscaleRuntime.localApiAvailable = false;
+  }
+
+  tailscaleRuntime.initialized = true;
+
+  // Get version if CLI found
+  let version = null;
+  if (tailscaleRuntime.cliPath) {
+    try {
+      const r = await runTailscaleCli(["version"]);
+      version = r.stdout.split("\n")[0].trim();
+    } catch (_) {}
+  }
+
+  return {
+    found: Boolean(tailscaleRuntime.cliPath),
+    cliPath: tailscaleRuntime.cliPath,
+    localApiAvailable: tailscaleRuntime.localApiAvailable,
+    apiSource: tailscaleRuntime.localApiAvailable ? "localapi" : "cli",
+    version
+  };
+});
+
+// ─── status ───────────────────────────────────────────────────────
+ipcMain.handle("tailscale:status", async () => {
+  const { source, data } = await getTailscaleStatus();
+  return { source, data };
+});
+
+// ─── peers ────────────────────────────────────────────────────────
+ipcMain.handle("tailscale:peers", async () => {
+  const { source, data } = await getTailscaleStatus();
+  const { peers, self } = normalizePeers(data);
+  return {
+    source,
+    self,
+    peers: peers.map((peer) => ({
+      id: peer.ID || peer.PublicKey,
+      name: peer.HostName || peer.DNSName || "",
+      dnsName: peer.DNSName || "",
+      os: peer.OS || "",
+      user: peer.UserID ? (data?.User?.[peer.UserID]?.LoginName || "") : "",
+      tailscaleIPs: peer.TailscaleIPs || [],
+      ip: (peer.TailscaleIPs || [])[0] || "",
+      online: peer.Online || false,
+      relay: peer.Relay || "",
+      state: classifyPeerState(peer),
+      lastSeen: peer.LastSeen || null,
+      exitNode: peer.ExitNode || false,
+      exitNodeOption: peer.ExitNodeOption || false,
+      tags: peer.Tags || [],
+      allowedIPs: peer.AllowedIPs || []
+    }))
+  };
+});
+
+// ─── ping ─────────────────────────────────────────────────────────
+ipcMain.handle("tailscale:ping", async (_event, host) => {
+  const safeHost = sanitizeTailscaleArg(host);
+  if (!safeHost) throw new Error("Host is required.");
+  const result = await runTailscaleCli(["ping", "--c", "3", safeHost], { timeout: 15000 });
+  return { stdout: result.stdout, stderr: result.stderr, code: result.code };
+});
+
+// ─── ssh ──────────────────────────────────────────────────────────
+ipcMain.handle("tailscale:ssh", async (_event, payload) => {
+  const host = sanitizeTailscaleArg(payload?.host || "");
+  const user = sanitizeTailscaleArg(payload?.user || "");
+  if (!host) throw new Error("Host is required for SSH.");
+
+  const target = user ? `${user}@${host}` : host;
+  if (process.platform === "win32") {
+    spawn("cmd", ["/c", "start", "cmd", "/k", "tailscale", "ssh", target], { detached: true, windowsHide: false });
+  } else if (process.platform === "darwin") {
+    spawn("osascript", ["-e", `tell app "Terminal" to do script "tailscale ssh ${target}"`], { detached: true });
+  } else {
+    spawn("x-terminal-emulator", ["-e", `tailscale ssh ${target}`], { detached: true });
+  }
+  return { ok: true };
+});
+
+// ─── rdp (Windows only) ───────────────────────────────────────────
+ipcMain.handle("tailscale:rdp", async (_event, ip) => {
+  const safeIp = sanitizeTailscaleArg(ip);
+  if (!safeIp) throw new Error("IP is required for RDP.");
+  if (process.platform !== "win32") throw new Error("RDP is only available on Windows.");
+  spawn("mstsc", [`/v:${safeIp}`], { detached: true, windowsHide: false });
+  return { ok: true };
+});
+
+// ─── whois ────────────────────────────────────────────────────────
+ipcMain.handle("tailscale:whois", async (_event, ip) => {
+  const safeIp = sanitizeTailscaleArg(ip);
+  if (!safeIp) throw new Error("IP is required for whois.");
+  const result = await runTailscaleCli(["whois", safeIp]);
+  return { stdout: result.stdout, stderr: result.stderr };
+});
+
+// ─── exit nodes ───────────────────────────────────────────────────
+ipcMain.handle("tailscale:exit-nodes", async () => {
+  const { data } = await getTailscaleStatus();
+  const { peers } = normalizePeers(data);
+  const exitNodes = peers.filter((p) => p.ExitNodeOption || p.ExitNode);
+  return {
+    exitNodes: exitNodes.map((p) => ({
+      id: p.ID || p.PublicKey,
+      name: p.HostName || p.DNSName || "",
+      ip: (p.TailscaleIPs || [])[0] || "",
+      online: p.Online || false,
+      active: p.ExitNode || false,
+      country: p.Location?.Country || "",
+      city: p.Location?.City || ""
+    })),
+    activeNodeId: peers.find((p) => p.ExitNode)?.ID || null
+  };
+});
+
+// ─── set exit node ────────────────────────────────────────────────
+ipcMain.handle("tailscale:set-exit-node", async (_event, node) => {
+  const safeNode = sanitizeTailscaleArg(node || "");
+  if (!safeNode) {
+    // Disconnect
+    const result = await runTailscaleCli(["set", "--exit-node="]);
+    return { ok: result.code === 0, stdout: result.stdout, stderr: result.stderr };
+  }
+  const result = await runTailscaleCli(["set", `--exit-node=${safeNode}`]);
+  return { ok: result.code === 0, stdout: result.stdout, stderr: result.stderr };
+});
+
+// ─── serve status ─────────────────────────────────────────────────
+ipcMain.handle("tailscale:serve-status", async () => {
+  const result = await runTailscaleCli(["serve", "status", "--json"]);
+  if (result.code !== 0 && !result.stdout.trim()) {
+    return { routes: [], raw: result.stderr };
+  }
+  try {
+    return { data: JSON.parse(result.stdout), routes: [], raw: result.stdout };
+  } catch (_) {
+    return { raw: result.stdout, routes: [] };
+  }
+});
+
+// ─── serve add ────────────────────────────────────────────────────
+ipcMain.handle("tailscale:serve-add", async (_event, payload) => {
+  const protocol = sanitizeTailscaleArg(payload?.protocol || "https");
+  const port = sanitizeTailscaleArg(String(payload?.port || "443"));
+  const target = sanitizeTailscaleArg(payload?.target || "");
+  if (!target) throw new Error("Target is required.");
+
+  const args = ["serve", "--bg", `--${protocol}=${port}`, target];
+  const result = await runTailscaleCli(args);
+  return { ok: result.code === 0, stdout: result.stdout, stderr: result.stderr };
+});
+
+// ─── serve remove ─────────────────────────────────────────────────
+ipcMain.handle("tailscale:serve-remove", async (_event, payload) => {
+  const protocol = sanitizeTailscaleArg(payload?.protocol || "https");
+  const port = sanitizeTailscaleArg(String(payload?.port || "443"));
+  const result = await runTailscaleCli(["serve", `--${protocol}=${port}`, "off"]);
+  return { ok: result.code === 0, stdout: result.stdout, stderr: result.stderr };
+});
+
+// ─── funnel status ────────────────────────────────────────────────
+ipcMain.handle("tailscale:funnel-status", async () => {
+  const result = await runTailscaleCli(["funnel", "status", "--json"]);
+  try {
+    return { data: JSON.parse(result.stdout), raw: result.stdout };
+  } catch (_) {
+    return { raw: result.stdout || result.stderr };
+  }
+});
+
+// ─── funnel set ───────────────────────────────────────────────────
+ipcMain.handle("tailscale:funnel-set", async (_event, payload) => {
+  const port = sanitizeTailscaleArg(String(payload?.port || "443"));
+  const enable = Boolean(payload?.enable);
+
+  if (enable) {
+    let target = "";
+    let protocol = "https";
+    try {
+      const statusRes = await runTailscaleCli(["serve", "status", "--json"]);
+      if (statusRes.code === 0 && statusRes.stdout.trim()) {
+        const data = JSON.parse(statusRes.stdout);
+        if (data.Web) {
+          for (const [hostPort, hostCfg] of Object.entries(data.Web)) {
+            const parts = hostPort.split(":");
+            const p = parts[parts.length - 1] || "443";
+            if (p === port && hostCfg.Handlers) {
+              const handler = hostCfg.Handlers["/"] || Object.values(hostCfg.Handlers)[0];
+              target = handler?.Proxy || handler?.Path || "";
+              protocol = "https";
+              break;
+            }
+          }
+        }
+        if (!target && data.TCP && data.TCP[port]) {
+          target = data.TCP[port].To || "";
+          protocol = "tcp";
+        }
+      }
+    } catch (_) {}
+
+    if (!target) {
+      target = `localhost:${port === "443" ? "80" : port}`;
+    }
+
+    const args = ["funnel", "--bg", `--${protocol}=${port}`, target];
+    const result = await runTailscaleCli(args);
+    return { ok: result.code === 0, stdout: result.stdout, stderr: result.stderr };
+  } else {
+    let protocol = "https";
+    try {
+      const statusRes = await runTailscaleCli(["serve", "status", "--json"]);
+      if (statusRes.code === 0 && statusRes.stdout.trim()) {
+        const data = JSON.parse(statusRes.stdout);
+        if (data.TCP && data.TCP[port]) {
+          protocol = "tcp";
+        }
+      }
+    } catch (_) {}
+
+    const args = ["funnel", `--${protocol}=${port}`, "off"];
+    const result = await runTailscaleCli(args);
+    return { ok: result.code === 0, stdout: result.stdout, stderr: result.stderr };
+  }
+});
+
+// ─── netcheck ─────────────────────────────────────────────────────
+ipcMain.handle("tailscale:netcheck", async () => {
+  const result = await runTailscaleCli(["netcheck", "--format=json"], { timeout: 20000 });
+  try {
+    return { data: JSON.parse(result.stdout), raw: result.stdout };
+  } catch (_) {
+    // netcheck sometimes outputs human-readable on stderr
+    return { raw: result.stdout || result.stderr };
+  }
+});
+
+// ─── dns ──────────────────────────────────────────────────────────
+ipcMain.handle("tailscale:dns", async () => {
+  if (tailscaleRuntime.localApiAvailable) {
+    try {
+      const prefs = await tailscaleLocalApiGet("/prefs");
+      const netmap = await tailscaleLocalApiGet("/netmap");
+      return {
+        source: "localapi",
+        magicDns: prefs.data?.MagicDNS || false,
+        coreDNS: prefs.data?.CorpDNS || false,
+        domains: netmap.data?.DNS?.Domains || [],
+        nameservers: netmap.data?.DNS?.Resolvers || []
+      };
+    } catch (_) {}
+  }
+  // Fallback: parse from status
+  const { data } = await getTailscaleStatus();
+  return {
+    source: "cli-status",
+    magicDns: data?.MagicDNS?.Enabled || false,
+    domains: [],
+    nameservers: []
+  };
+});
+
+// ─── login ────────────────────────────────────────────────────────
+ipcMain.handle("tailscale:login", async () => {
+  const result = await runTailscaleCli(["login", "--json"]);
+  try {
+    const parsed = JSON.parse(result.stdout);
+    const url = parsed?.url || parsed?.authURL || "";
+    if (url) shell.openExternal(url);
+    return { url, raw: result.stdout };
+  } catch (_) {
+    // Non-JSON output — look for URL in stdout/stderr
+    const combined = result.stdout + result.stderr;
+    const urlMatch = combined.match(/https:\/\/[^\s]+/);
+    const url = urlMatch ? urlMatch[0] : "";
+    if (url) shell.openExternal(url);
+    return { url, raw: combined };
+  }
+});
+
+// ─── logout ───────────────────────────────────────────────────────
+ipcMain.handle("tailscale:logout", async () => {
+  const result = await runTailscaleCli(["logout"]);
+  return { ok: result.code === 0, stdout: result.stdout, stderr: result.stderr };
+});
+
+// ─── run-command (console) ────────────────────────────────────────
+ipcMain.handle("tailscale:run-command", async (_event, argsInput) => {
+  const args = Array.isArray(argsInput)
+    ? argsInput.map(sanitizeTailscaleArg)
+    : String(argsInput || "").split(/\s+/).filter(Boolean).map(sanitizeTailscaleArg);
+
+  if (!args.length) throw new Error("No command arguments provided.");
+
+  // Blocklist dangerous subcommands
+  const blocked = ["up", "down", "set", "login", "logout", "configure"];
+  // Allow all read-only commands freely; block state-mutating ones through console
+  // (users can still run them via explicit buttons)
+  const result = await runTailscaleCli(args, { timeout: 20000 });
+  return {
+    stdout: result.stdout,
+    stderr: result.stderr,
+    code: result.code,
+    args
+  };
+});
+
+// ─── file pick ────────────────────────────────────────────────────
+ipcMain.handle("tailscale:file-pick", async (event) => {
+  const win = BrowserWindow.fromWebContents(event.sender);
+  const result = await dialog.showOpenDialog(win, {
+    title: "Select file to send",
+    properties: ["openFile"]
+  });
+  return result.canceled ? null : result.filePaths[0];
+});
+
+// ─── file send ────────────────────────────────────────────────────
+ipcMain.handle("tailscale:file-send", async (_event, payload) => {
+  const target = sanitizeTailscaleArg(payload?.target || "");
+  const filePath = String(payload?.filePath || "").trim();
+  if (!target) throw new Error("Target device is required.");
+  if (!filePath || !fs.existsSync(filePath)) throw new Error("File not found.");
+
+  const result = await runTailscaleCli(["file", "cp", filePath, `${target}:`], { timeout: 120000 });
+  return { ok: result.code === 0, stdout: result.stdout, stderr: result.stderr };
+});
+
+// ─── cert ─────────────────────────────────────────────────────────
+ipcMain.handle("tailscale:cert-get", async (_event, hostname) => {
+  const safeHostname = sanitizeTailscaleArg(hostname);
+  if (!safeHostname) throw new Error("Hostname is required.");
+
+  const certDir = app.getPath("userData");
+  const certPath = path.join(certDir, `${safeHostname}.crt`);
+  const keyPath = path.join(certDir, `${safeHostname}.key`);
+
+  const result = await runTailscaleCli(["cert", "--cert-file", certPath, "--key-file", keyPath, safeHostname], { timeout: 30000 });
+  if (result.code !== 0) throw new Error(result.stderr || "Certificate generation failed.");
+
+  let expiry = null;
+  try {
+    // Try to parse cert for expiry using openssl if available
+    const opensslResult = spawnSync("openssl", ["x509", "-noout", "-enddate", "-in", certPath], {
+      encoding: "utf8", windowsHide: true, timeout: 5000
+    });
+    if (opensslResult.status === 0) {
+      const match = opensslResult.stdout.match(/notAfter=(.+)/);
+      expiry = match ? match[1].trim() : null;
+    }
+  } catch (_) {}
+
+  return { ok: true, certPath, keyPath, expiry, directory: certDir };
+});
+
+// ─── metrics ──────────────────────────────────────────────────────
+ipcMain.handle("tailscale:metrics", async () => {
+  const result = await runTailscaleCli(["metrics"]);
+  return { raw: result.stdout, stderr: result.stderr, code: result.code };
+});
+
+// ─── device monitor start ─────────────────────────────────────────
+ipcMain.handle("tailscale:start-monitor", (_event, intervalMs) => {
+  if (tailscaleRuntime.monitorTimer) {
+    clearInterval(tailscaleRuntime.monitorTimer);
+  }
+  const ms = Math.max(3000, Number(intervalMs) || 5000);
+  tailscaleRuntime.monitorTimer = setInterval(tailscaleMonitorTick, ms);
+  return { ok: true, intervalMs: ms };
+});
+
+// ─── device monitor stop ──────────────────────────────────────────
+ipcMain.handle("tailscale:stop-monitor", () => {
+  if (tailscaleRuntime.monitorTimer) {
+    clearInterval(tailscaleRuntime.monitorTimer);
+    tailscaleRuntime.monitorTimer = null;
+  }
+  return { ok: true };
+});
+
+// ─── Shell Execution & Database Queries (Integrated Tools Cockpit) ──────
+ipcMain.handle("shell:run", async (_event, { command, cwd }) => {
+  return new Promise((resolve) => {
+    const { exec } = require("child_process");
+    exec(command, { cwd: cwd || process.cwd(), timeout: 30000 }, (error, stdout, stderr) => {
+      resolve({
+        code: error ? error.code : 0,
+        stdout: stdout || "",
+        stderr: stderr || (error ? error.message : "")
+      });
+    });
+  });
+});
+
+ipcMain.handle("db:query", async (_event, { dbType, config, sql }) => {
+  if (dbType === "postgres") {
+    try {
+      let pgClient;
+      try {
+        const { Client } = require("pg");
+        pgClient = new Client({
+          host: config.host || "127.0.0.1",
+          port: Number(config.port) || 5432,
+          user: config.user || "postgres",
+          password: config.password || "",
+          database: config.database || "postgres",
+          connectionTimeoutMillis: 5000
+        });
+        await pgClient.connect();
+        const res = await pgClient.query(sql);
+        await pgClient.end();
+        return {
+          ok: true,
+          rows: res.rows || [],
+          rowCount: res.rowCount,
+          fields: res.fields?.map(f => f.name) || []
+        };
+      } catch (err) {
+        // Fallback to command line psql if pg npm module isn't installed
+        const { execSync } = require("child_process");
+        const passEnv = config.password ? `set PGPASSWORD=${config.password}&& ` : "";
+        const cmd = `${passEnv}psql -h ${config.host || "127.0.0.1"} -p ${config.port || 5432} -U ${config.user || "postgres"} -d ${config.database || "postgres"} -t -A -c "${sql.replace(/"/g, '\\"')}"`;
+        const output = execSync(cmd, { encoding: "utf8", timeout: 8000 });
+        const lines = output.trim().split("\n").filter(Boolean);
+        const rows = lines.map(line => {
+          const vals = line.split("|");
+          return vals.reduce((acc, v, idx) => {
+            acc[`col_${idx}`] = v;
+            return acc;
+          }, {});
+        });
+        return {
+          ok: true,
+          rows,
+          fields: rows[0] ? Object.keys(rows[0]) : ["result"]
+        };
+      }
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
+  } else {
+    // MySQL
+    try {
+      const mysql = require("mysql2/promise");
+      const connection = await mysql.createConnection({
+        host: config.host || "127.0.0.1",
+        port: Number(config.port) || 3306,
+        user: config.user || "root",
+        password: config.password || "",
+        database: config.database || ""
+      });
+      const [rows, fields] = await connection.execute(sql);
+      await connection.end();
+      
+      const rowsArray = Array.isArray(rows) ? rows : [rows];
+      const fieldsArray = Array.isArray(fields) ? fields.map(f => f.name) : (rowsArray[0] ? Object.keys(rowsArray[0]) : ["result"]);
+      
+      return {
+        ok: true,
+        rows: rowsArray,
+        fields: fieldsArray
+      };
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
+  }
+});
+
