@@ -718,6 +718,11 @@ const elements = {
   saveMysqlConfigButton: document.getElementById("save-mysql-config-button"),
   installExtensionFolderButton: document.getElementById("install-extension-folder-button"),
   installExtensionArchiveButton: document.getElementById("install-extension-archive-button"),
+  storeInstallForm: document.getElementById("store-install-form"),
+  storeInstallInput: document.getElementById("store-install-input"),
+  storeInstallSubmit: document.getElementById("store-install-submit"),
+  storeInstallButton: document.getElementById("store-install-button"),
+  updateStoreExtensionsButton: document.getElementById("update-store-extensions-button"),
   openChromeWebStoreButton: document.getElementById("open-chrome-web-store-button"),
   openEdgeAddonsButton: document.getElementById("open-edge-addons-button"),
   openFirefoxAddonsButton: document.getElementById("open-firefox-addons-button"),
@@ -2869,6 +2874,7 @@ function refreshControls() {
   renderBookmarks();
   renderDownloads();
   renderPermissions();
+  void refreshStoreInstallButton();
   renderSavedSessionControls();
   void syncVaultPanel();
 }
@@ -3068,6 +3074,96 @@ function renderSavedSessionControls() {
   elements.sessionUnsaveButton.disabled = !active.savedSession;
 }
 
+const EXTENSION_STORE_LABELS = {
+  chrome: "Chrome Web Store",
+  edge: "Edge Add-ons",
+  firefox: "Firefox Add-ons"
+};
+
+function getExtensionSourceLabel(extension) {
+  if (extension.sourceType === "store") {
+    return EXTENSION_STORE_LABELS[extension.store] || "store";
+  }
+  return extension.sourceType === "zip" ? "zip import" : "folder import";
+}
+
+let storeInstallInFlight = false;
+let lastStoreCheckUrl = "";
+let currentStoreTarget = null;
+
+async function installExtensionFromStore(input) {
+  if (storeInstallInFlight) {
+    return;
+  }
+  storeInstallInFlight = true;
+  setStoreInstallBusy(true);
+  setStatus("Downloading extension…");
+  try {
+    const result = await window.desktopAPI.installBrowserExtensionFromStore(input);
+    applySettingsPayload(result.settings);
+    const extension = result.extension;
+    const verb = result.updatedFrom
+      ? `Updated ${extension.name} ${result.updatedFrom} → ${extension.version}`
+      : `Installed ${extension.name} ${extension.version}`;
+    const warning = extension.loadError
+      ? ` It failed to load: ${extension.loadError}`
+      : ((extension.notes || [])[0] ? ` ${extension.notes[0]}` : "");
+    const message = `${verb} from ${result.storeLabel}.${warning}`;
+    setStatus(message);
+    setBrowserFeedback(message, extension.loadError || result.compatibility?.level === "broken" ? "error" : "success");
+    if (elements.storeInstallInput) {
+      elements.storeInstallInput.value = "";
+    }
+  } catch (error) {
+    const message = `Extension install failed: ${error.message}`;
+    setStatus(message);
+    setBrowserFeedback(message, "error");
+  } finally {
+    storeInstallInFlight = false;
+    setStoreInstallBusy(false);
+    lastStoreCheckUrl = "";
+    void refreshStoreInstallButton();
+  }
+}
+
+function setStoreInstallBusy(busy) {
+  if (elements.storeInstallSubmit) {
+    elements.storeInstallSubmit.disabled = busy;
+    elements.storeInstallSubmit.textContent = busy ? "Installing…" : "Install";
+  }
+  if (elements.storeInstallButton) {
+    elements.storeInstallButton.disabled = busy;
+    if (busy) {
+      elements.storeInstallButton.textContent = "Installing…";
+    }
+  }
+}
+
+// Shows "Add to WP Desktop" while the active tab is an extension's store page.
+async function refreshStoreInstallButton() {
+  const button = elements.storeInstallButton;
+  if (!button) {
+    return;
+  }
+  const url = getActiveBrowserTab()?.url || "";
+  if (url === lastStoreCheckUrl) {
+    return;
+  }
+  lastStoreCheckUrl = url;
+  const target = url ? await window.desktopAPI.parseExtensionStoreUrl(url).catch(() => null) : null;
+  if (url !== lastStoreCheckUrl) {
+    return;
+  }
+  currentStoreTarget = target;
+  button.classList.toggle("hidden", !target);
+  if (target && !storeInstallInFlight) {
+    button.textContent = target.installed ? "Reinstall in WP Desktop" : "Add to WP Desktop";
+    button.title = target.installed
+      ? `${target.installed.name} ${target.installed.version} is installed. Click to download the latest version from ${target.storeLabel}.`
+      : `Install this extension from ${target.storeLabel}`;
+  }
+}
+
 function renderExtensionsSettings() {
   if (!elements.extensionsList) {
     return;
@@ -3088,7 +3184,9 @@ function renderExtensionsSettings() {
     item.innerHTML = `
       <div class="settings-item-copy">
         <strong>${escapeHtml(extension.name || "Extension")}</strong>
-        <span>${escapeHtml(extension.version || "Version unknown")} · ${escapeHtml(extension.sourceType === "zip" ? "zip import" : "folder import")} · ${extension.enabled ? "enabled" : "disabled"}</span>
+        <span>${escapeHtml(extension.version || "Version unknown")} · ${escapeHtml(getExtensionSourceLabel(extension))} · ${extension.enabled ? "enabled" : "disabled"}</span>
+        ${extension.loadError ? `<span class="extension-load-error">Failed to load: ${escapeHtml(extension.loadError)}</span>` : ""}
+        ${(extension.notes || []).map((note) => `<span class="extension-note">${escapeHtml(note)}</span>`).join("")}
         <span>${escapeHtml(extension.unpackedPath || "")}</span>
       </div>
       <div class="button-row compact">
@@ -6774,6 +6872,44 @@ elements.installExtensionArchiveButton?.addEventListener("click", async () => {
     setStatus(`Installed extension from ${selected}.`);
   } catch (error) {
     setStatus(`Extension install failed: ${error.message}`);
+  }
+});
+elements.storeInstallForm?.addEventListener("submit", (event) => {
+  event.preventDefault();
+  const input = elements.storeInstallInput?.value.trim();
+  if (input) {
+    void installExtensionFromStore(input);
+  }
+});
+elements.storeInstallButton?.addEventListener("click", () => {
+  const url = getActiveBrowserTab()?.url;
+  if (url && currentStoreTarget) {
+    void installExtensionFromStore(url);
+  }
+});
+elements.updateStoreExtensionsButton?.addEventListener("click", async () => {
+  const button = elements.updateStoreExtensionsButton;
+  button.disabled = true;
+  button.textContent = "Checking…";
+  try {
+    const { results, settings } = await window.desktopAPI.updateStoreExtensions();
+    applySettingsPayload(settings);
+    if (!results.length) {
+      setStatus("No store extensions installed.");
+    } else {
+      const updated = results.filter((item) => item.ok && item.from && item.from !== item.to);
+      const failed = results.filter((item) => !item.ok);
+      const summary = updated.length
+        ? `Updated ${updated.map((item) => `${item.name} ${item.from} → ${item.to}`).join(", ")}.`
+        : "All store extensions are up to date.";
+      const failures = failed.length ? ` Failed: ${failed.map((item) => `${item.name} (${item.error})`).join(", ")}.` : "";
+      setStatus(summary + failures);
+    }
+  } catch (error) {
+    setStatus(`Update check failed: ${error.message}`);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Check for updates";
   }
 });
 elements.openChromeWebStoreButton?.addEventListener("click", () => void openUrlInAppBrowser("https://chromewebstore.google.com/category/extensions"));

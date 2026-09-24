@@ -21,6 +21,7 @@
     "mysql2": "^3.11.3",
     "playwright": "^1.60.0",
     "ssh2": "^1.17.0",
+    "webextension-polyfill": "^0.12.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
@@ -44,6 +45,7 @@
       "main.js",
       "preload.js",
       "dialog-preload.js",
+    "lib/**/*",
       "scripts/**/*",
       "src/**/*",
       "!src/**/*.backup",

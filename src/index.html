@@ -77,6 +77,7 @@
             <div id="address-suggestions" class="address-suggestions hidden" aria-live="polite"></div>
           </form>
           <div class="toolbar-actions">
+            <button id="store-install-button" class="store-install-button hidden" type="button" title="Install this extension in WP Desktop">Add to WP Desktop</button>
             <div class="extension-menu-shell">
               <button id="extensions-menu-button" class="icon-button toolbar-icon-button" type="button" title="Extensions" aria-label="Extensions"><span class="toolbar-icon-glyph">&#x29C9;</span></button>
               <div id="extensions-menu-popup" class="extensions-menu-popup hidden"></div>
@@ -891,9 +892,14 @@
               <div class="card-header">
                 <div>
                   <span class="eyebrow">Browser extensions</span>
-                  <h3>Chromium extension manager</h3>
+                  <h3>Extension manager</h3>
                 </div>
               </div>
+
+              <form id="store-install-form" class="store-install-form">
+                <input id="store-install-input" type="text" placeholder="Paste a Chrome Web Store, Edge Add-ons or Firefox Add-ons link" autocomplete="off" spellcheck="false">
+                <button id="store-install-submit" type="submit" class="primary-button">Install</button>
+              </form>
 
               <div class="button-row compact">
                 <button id="install-extension-folder-button" type="button" class="primary-button">Install folder</button>
@@ -901,10 +907,11 @@
                 <button id="open-chrome-web-store-button" type="button">Chrome Web Store</button>
                 <button id="open-edge-addons-button" type="button">Edge Add-ons</button>
                 <button id="open-firefox-addons-button" type="button">Firefox Add-ons</button>
+                <button id="update-store-extensions-button" type="button">Check for updates</button>
               </div>
 
               <div class="settings-note">
-                Electron can only run unpacked Chromium-compatible extensions. Direct Chrome Web Store, Edge Add-ons, packed <code>.crx</code>, and Firefox <code>.xpi</code> installs are not supported by the runtime, so use an unpacked folder or a <code>.zip</code> that contains an unpacked extension.
+                Open an extension's page in any of the three stores and click <strong>Add to WP Desktop</strong> in the toolbar, or paste its link above. Firefox add-ons are converted to run on Chromium. WP Desktop's browser engine supports fewer extension APIs than Chrome, so each install lists anything that won't work.
               </div>
 
               <div id="extensions-list" class="settings-list"></div>
